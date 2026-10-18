@@ -16,6 +16,7 @@ dist-ssr
 # Desktop & Mobile Releases
 release/
 dist-app/
+output/
 *.exe
 *.apk
 *.dmg
@@ -41,6 +42,7 @@ mvnw.cmd
 
 # Hadoop / MapReduce
 *.jar
+!gradle-wrapper.jar
 *.war
 *.nar
 *.ear

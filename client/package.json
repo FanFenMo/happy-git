@@ -7,17 +7,19 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "vite",
+    "prebuild": "node scripts/prepare-config.mjs",
+    "dev": "node scripts/prepare-config.mjs && vite",
     "build": "vite build",
     "preview": "vite preview",
     "build:win": "node scripts/build-win.mjs",
-    "app:run": "vite build && electron electron/main.cjs",
-    "cap:sync": "vite build && cap sync",
-    "cap:android": "vite build && cap add android",
-    "cap:ios": "vite build && cap add ios"
+    "app:run": "npm run build && electron electron/main.cjs",
+    "cap:sync": "npm run build && cap sync",
+    "cap:android": "npm run build && cap add android",
+    "cap:ios": "npm run build && cap add ios"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^4.1.0",
     "vue": "^3.5.42",
@@ -25,7 +27,6 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^8.5.3",
-    "@capacitor/core": "^8.5.3",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-vue": "^6.0.8",
     "concurrently": "^10.0.6",

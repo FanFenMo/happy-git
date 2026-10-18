@@ -10,7 +10,20 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+release/
 *.local
+.env.local
+
+# Generated configs
+electron/config.generated.json
+android/app/src/main/res/values/happygit_config.xml
+
+# SQLite data files
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Editor directories and files
 .vscode/*

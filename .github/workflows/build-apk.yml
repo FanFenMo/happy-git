@@ -27,10 +27,10 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: Set up Node.js 20
+      - name: Set up Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
           cache-dependency-path: client/package-lock.json
 
@@ -40,6 +40,8 @@ jobs:
           npm install
 
       - name: Build Web Assets
+        env:
+          VITE_PUBLIC_GITHUB_CLIENT_ID: ${{ secrets.GITHUB_APP_CLIENT_ID || 'Ov23liP64n878tPZJkZ3' }}
         run: |
           cd client
           npm run build

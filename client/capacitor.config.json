@@ -1,0 +1,9 @@
+{
+  "appId": "com.happygit.app",
+  "appName": "HappyGit",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
+}

@@ -2,7 +2,18 @@
 
 基于开发者画像的开源项目推荐与类短视频卡片流展示系统，结合 Hadoop MapReduce 离线计算与在线实时推荐服务。
 
-## 🎯 项目愿景
+---
+
+## 📲 安装包直接下载 (Downloads)
+
+| 平台 | 格式 | 下载与安装说明 |
+| :--- | :--- | :--- |
+| **Android 手机端** | `.apk` | [👉 前往 GitHub Releases 页面直接下载 HappyGit-v1.0.0.apk](https://github.com/FanFenMo/happy-git/releases)（或在 GitHub Actions 产物 Artifacts 中点击下载） |
+| **Windows 电脑端** | `.exe` | 本地已编译生成至 `client/release/HappyGit-win-x64/HappyGit.exe`，也可直接双击根目录的 `启动HappyGit桌面端.bat` 或桌面图标直接运行 |
+
+---
+
+## 🎯 项目愿景与架构
 - **开发者画像构建**：分析用户开源项目与浏览行为，多维技术标签建模，与 LLM 生成效果对照评测。
 - **智能推荐引擎**：融合技术栈兴趣匹配、协同过滤、项目质量评分与近期爆火趋势。
 - **类短视频卡片流展示**：重构传统 README 体验，以极速卡片提取痛点、效果演示与上手门槛。
@@ -20,13 +31,18 @@
 
 ---
 
-## 📁 目录结构规划（逐步完善）
+## 📁 目录结构规划
 
 ```text
 happy-git/
-├── client/              # 跨平台客户端应用 (移动端 + 桌面端)
+├── .github/workflows/   # GitHub Actions CI/CD (自动化构建与发布 Android APK)
+├── client/              # 跨平台客户端 (Vue 3 + Electron + Capacitor Android)
+│   ├── android/         # Android 原生工程 (供 Gradle 编译 APK)
+│   ├── electron/        # Windows 原生桌面端主进程 (无端口本地独立运行)
+│   └── src/             # 类抖音个人主页与热门项目流前端源码
 ├── server/              # 在线后端服务 (Spring Boot / API)
 ├── mapreduce/           # Hadoop 离线批处理计算任务 (特征工程/推荐计算)
 ├── docs/                # 项目架构与设计文档
+├── 启动HappyGit桌面端.bat # Windows 桌面端极速启动入口
 └── README.md
 ```

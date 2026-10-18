@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -59,7 +60,7 @@ public class GitHubOAuthService {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "GitHub 网页授权尚未配置");
         if (proof == null || !proof.matches("[A-Za-z0-9_-]{43}"))
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "无效的授权请求");
-        logins.values().removeIf(p -> p.expiresAt < System.currentTimeMillis());
+        evictExpired();
         if (logins.size() >= 1000) throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS);
         var pending = new PendingLogin(secret(), proof, secret(), secret());
         logins.put(pending.id, pending);
@@ -83,7 +84,7 @@ public class GitHubOAuthService {
             JsonNode tokens = exchange(Map.of("client_id", clientId, "client_secret", clientSecret,
                     "code", code, "redirect_uri", callbackUrl, "code_verifier", pending.verifier));
             synchronized (pending) {
-                if (!pending.status.equals("exchanging")) return false;
+                if (!pending.status.equals("exchanging") || pending.expiresAt < System.currentTimeMillis()) return false;
                 pending.tokens = tokens;
                 pending.status = "authenticated";
             }
@@ -123,6 +124,17 @@ public class GitHubOAuthService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
         return exchange(Map.of("client_id", clientId, "client_secret", clientSecret,
                 "grant_type", "refresh_token", "refresh_token", token));
+    }
+
+    @Scheduled(fixedDelay = 60000)
+    public void evictExpired() {
+        logins.values().removeIf(p -> {
+            synchronized (p) {
+                if (p.expiresAt >= System.currentTimeMillis()) return false;
+                p.status = "expired"; p.tokens = null;
+                return true;
+            }
+        });
     }
 
     private JsonNode exchange(Map<String, String> body) {

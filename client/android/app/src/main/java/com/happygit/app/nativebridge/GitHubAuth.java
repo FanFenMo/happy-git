@@ -5,6 +5,7 @@ import android.content.pm.ApplicationInfo;
 import android.util.Base64;
 import org.json.JSONObject;
 import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -13,6 +14,7 @@ import java.security.SecureRandom;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 
 public class GitHubAuth {
     private final CredentialStore store;
@@ -53,7 +55,12 @@ public class GitHubAuth {
             try (var output = conn.getOutputStream()) { output.write(payload.toString().getBytes(StandardCharsets.UTF_8)); }
             int code = conn.getResponseCode();
             if (code != 200) throw new IllegalStateException(code == 401 ? "AUTH_REQUIRED" : code == 503 ? "CONFIG_MISSING" : "AUTH_SERVICE_ERROR");
-            try (InputStream input = conn.getInputStream()) { return new JSONObject(new String(input.readAllBytes(), StandardCharsets.UTF_8)); }
+            try (InputStream input = conn.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[4096];
+                int count;
+                while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+                return new JSONObject(output.toString("UTF-8"));
+            }
         } finally { conn.disconnect(); }
     }
     private static String secret() { byte[] bytes = new byte[32]; new SecureRandom().nextBytes(bytes); return Base64.encodeToString(bytes, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING); }
@@ -100,8 +107,16 @@ public class GitHubAuth {
         }
     }
     public synchronized void cancelAuthorization(String id) {
-        if (id == null) { authorizationVersion++; challenges.clear(); }
-        else challenges.remove(id);
+        if (id == null) {
+            authorizationVersion++;
+            for (String key : challenges.keySet()) cancelAuthorization(key);
+        } else {
+            Challenge ch = challenges.remove(id);
+            if (ch != null) CompletableFuture.runAsync(() -> {
+                try { broker("cancel", new JSONObject().put("challengeId", id).put("codeVerifier", ch.verifier)); }
+                catch (Exception ignored) { /* 本地取消已生效，服务端请求仍受有效期限制。 */ }
+            });
+        }
     }
     private void refresh(String expected, String staleToken) throws Exception {
         synchronized (refreshLock) {
@@ -164,7 +179,7 @@ public class GitHubAuth {
         return session(repository.readAccountSnapshot(id).optJSONObject("profile"));
     }
     public synchronized void logout() {
-        store.clear(); challenges.clear(); authorizationVersion++;
+        store.clear(); cancelAuthorization(null);
         contextId = UUID.randomUUID().toString(); status = "guest";
         repository.saveSetting("mode", "guest"); repository.saveSetting("active_account_id", null);
     }

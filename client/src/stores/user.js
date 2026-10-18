@@ -90,10 +90,13 @@ export const useUserStore = defineStore('user', {
       } finally { if (epoch === this.sessionEpoch) this[pageKey].loading = false }
     },
     async startLogin() {
-      await this.cancelLogin()
       const sequence = ++this.loginSequence
       this.authStage = 'requesting'; this.authError = null
       try {
+        const previous = this.loginChallenge?.challengeId
+        this.loginChallenge = null
+        await apiCancelLogin(previous)
+        if (sequence !== this.loginSequence) return
         const challenge = await apiStartLogin()
         if (sequence !== this.loginSequence) { await apiCancelLogin(challenge.challengeId); return }
         this.loginChallenge = challenge

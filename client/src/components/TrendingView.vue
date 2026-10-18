@@ -298,8 +298,14 @@ const getLangColor = (lang) => {
   return map[lang] || '#8793A5'
 }
 
-watch(() => userStore.session.contextId, () => {
+watch(() => userStore.session.contextId, async context => {
   starredMap.value = {}
+  if (!userStore.hasAccount) return
+  for (const project of projects.value) {
+    const starred = await getStarState(project)
+    if (context !== userStore.session.contextId) return
+    starredMap.value[project.repoId] = starred
+  }
 })
 
 onMounted(() => {

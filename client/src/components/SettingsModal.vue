@@ -118,6 +118,7 @@
         </div>
       </div>
 
+      <p v-if="feedback" role="status" class="mt-3 text-xs text-[var(--color-danger)]">{{ feedback }}</p>
       <!-- Footer Buttons -->
       <div class="flex items-center justify-between mt-5 pt-4 border-t border-[var(--color-border)]">
         <button
@@ -154,6 +155,7 @@ const emit = defineEmits(['close', 'open-login'])
 const userStore = useUserStore()
 const historyStore = useHistoryStore()
 const isSyncing = ref(false)
+const feedback = ref('')
 
 const openLogin = () => {
   emit('close')
@@ -162,7 +164,9 @@ const openLogin = () => {
 
 const toggleHistory = async (e) => {
   const enabled = e.target.checked
-  await userStore.setHistoryEnabled(enabled)
+  feedback.value = ''
+  try { await userStore.setHistoryEnabled(enabled) }
+  catch (error) { e.target.checked = !enabled; feedback.value = error.message }
 }
 
 const handleManualSync = async () => {
@@ -183,15 +187,15 @@ const handleClearHistory = async () => {
 
 const handleForgetAccount = async () => {
   if (window.confirm('将删除本账号在当前设备上的所有本地快照、浏览历史与偏好设置并退出登录，是否继续？')) {
-    await userStore.forgetAccount()
-    emit('close')
+    try { await userStore.forgetAccount(); emit('close') }
+    catch (error) { feedback.value = error.message }
   }
 }
 
 const handleLogout = async () => {
   if (window.confirm('确定退出当前 GitHub 账号？（本地历史将保留）')) {
-    await userStore.logout()
-    emit('close')
+    try { await userStore.logout(); emit('close') }
+    catch (error) { feedback.value = error.message }
   }
 }
 </script>

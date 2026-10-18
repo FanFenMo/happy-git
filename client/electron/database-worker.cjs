@@ -357,6 +357,7 @@ function applyConfirmedStar(accountId, repository, starred) {
         VALUES (?, 'stars', ?, 0, 0);
       `)
       initStmt.run(accountId, activeGen)
+      db.prepare(`UPDATE sync_state SET active_generation = ? WHERE account_id = ? AND kind = 'stars' AND active_generation IS NULL`).run(activeGen, accountId)
     }
 
     if (starred) {
@@ -478,7 +479,7 @@ function listHistory(accountId, cursor = null, limit = 30, keyword = '') {
   const params = [accountId]
 
   if (keyword && keyword.trim()) {
-    const kw = `%${keyword.trim().replace(/%/g, '\\%').replace(/_/g, '\\_')}%`
+    const kw = `%${keyword.trim().replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')}%`
     querySql += ` AND (full_name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')`
     params.push(kw, kw)
   }
@@ -512,7 +513,7 @@ function listHistory(accountId, cursor = null, limit = 30, keyword = '') {
   let countSql = 'SELECT COUNT(*) as total FROM browse_history WHERE account_id = ?'
   const countParams = [accountId]
   if (keyword && keyword.trim()) {
-    const kw = `%${keyword.trim().replace(/%/g, '\\%').replace(/_/g, '\\_')}%`
+    const kw = `%${keyword.trim().replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')}%`
     countSql += ` AND (full_name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')`
     countParams.push(kw, kw)
   }

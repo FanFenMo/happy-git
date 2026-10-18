@@ -13,6 +13,7 @@ const activeSyncControllers = {
 // 缓存进行中的 starState 查询，避免重复并发请求
 const inflightStarQueries = new Map()
 const memoryStarCache = new Map()
+const starVersions = new Map()
 
 /**
  * 解析 GitHub 分页响应头中的下一页页码
@@ -165,6 +166,7 @@ export async function cancelCollectionSync(kind) {
 export function resetAccountTasks() {
   for (const controller of Object.values(activeSyncControllers)) if (controller) controller.aborted = true
   memoryStarCache.clear()
+  starVersions.clear()
   inflightStarQueries.clear()
 }
 
@@ -219,15 +221,21 @@ export async function getStarState(repository) {
   if (!repository?.repoId) return null
   const context = nativeBridge.contextId, key = `${context}:${repository.repoId}`
   const invoke = nativeBridge.capture()
+  const version = starVersions.get(key) || 0
+  const currentResult = value => (starVersions.get(key) || 0) === version ? value : memoryStarCache.get(key) ?? null
   if (memoryStarCache.has(key)) return memoryStarCache.get(key)
   if (inflightStarQueries.has(key)) return inflightStarQueries.get(key)
   const query = (async () => {
     const local = await invoke('repositories.isStarred', { repoId: repository.repoId })
-    if (local.ok && local.data?.known) { memoryStarCache.set(key, local.data.starred); return local.data.starred }
+    if (local.ok && local.data?.known) {
+      const value = currentResult(local.data.starred)
+      if (context === nativeBridge.contextId && (starVersions.get(key) || 0) === version) memoryStarCache.set(key, value)
+      return value
+    }
     const result = await invoke('github.request', { resource: 'starState', args: repoArgs(repository) })
     if (!result.ok || ![204, 404].includes(result.data?.status)) return null
-    const starred = result.data.status === 204
-    if (context === nativeBridge.contextId) memoryStarCache.set(key, starred)
+    const starred = currentResult(result.data.status === 204)
+    if (context === nativeBridge.contextId && (starVersions.get(key) || 0) === version) memoryStarCache.set(key, starred)
     return starred
   })().finally(() => inflightStarQueries.delete(key))
   inflightStarQueries.set(key, query)
@@ -242,6 +250,7 @@ const starMutations = new Map()
 export function setStar(repository, starred) {
   const context = nativeBridge.contextId, key = `${context}:${repository.repoId}`
   if (starMutations.has(key)) return starMutations.get(key)
+  starVersions.set(key, (starVersions.get(key) || 0) + 1)
   const invoke = nativeBridge.capture()
   const task = (async () => {
     await cancelCollectionSync('stars')
@@ -361,6 +370,7 @@ export function deriveInterestTags(owned = [], starred = [], manual = []) {
  * 校验、切分并保存手选兴趣标签
  */
 export async function saveInterestPreferences(manualInput) {
+  const invoke = nativeBridge.capture()
   let rawList = []
   if (Array.isArray(manualInput)) {
     rawList = manualInput
@@ -385,7 +395,8 @@ export async function saveInterestPreferences(manualInput) {
 
   // 读取当前设置保留 historyEnabled
   const snapRes = await invoke('account.readSnapshot')
-  const historyEnabled = snapRes.ok && snapRes.data?.preferences ? snapRes.data.preferences.historyEnabled : true
+  if (!snapRes.ok) throw new Error(snapRes.error?.message || '读取账号偏好失败')
+  const historyEnabled = Boolean(snapRes.data?.preferences?.historyEnabled)
 
   const res = await invoke('account.savePreferences', {
     manualTags,

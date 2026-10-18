@@ -61,7 +61,7 @@ async function main() {
   await check('stars: confirmed Star is stored and idempotent', async () => { await call('applyConfirmedStar', { accountId: 'B', repository: repo(90), starred: true }); await call('applyConfirmedStar', { accountId: 'B', repository: repo(90), starred: true }); assert.equal((await call('listRepositories', { accountId: 'B', kind: 'stars' })).loadedCount, 1); });
   await check('history: clear does not affect other account', async () => { await call('clearHistory', { accountId: 'A' }); assert.equal(await call('countHistory', { accountId: 'A' }), 0); assert.equal(await call('countHistory', { accountId: 'B' }), 1); });
   await check('account: forget cascades local records', async () => { await call('forgetAccount', { accountId: 'cap' }); assert.equal(await call('countHistory', { accountId: 'cap' }), 0); assert.equal((await call('readAccountSnapshot', { accountId: 'cap' })).profile, null); });
-  await check('auth: missing client ID fails explicitly', async () => { const f = authFixture('missing', { missing: true }); await assert.rejects(() => f.auth.beginAuthorization(''), error => error.code === 'CONFIG_MISSING'); });
+  await check('auth: missing authorization service fails explicitly', async () => { const f = authFixture('missing', { missing: true }); await assert.rejects(() => f.auth.beginAuthorization(''), error => error.code === 'CONFIG_MISSING'); });
   await check('auth: native response uses authenticated state', async () => { const f = authFixture('contract'); const result = await authorize(f); assert.equal(result.state, 'authenticated'); assert.equal(result.session.accountId, '101'); return { state: result.state, status: result.status ?? null }; });
   await check('auth: cancellation prevents late login', async () => {
     const f = authFixture('cancel'); let finish;
@@ -150,6 +150,38 @@ async function main() {
     bridgeHandler = async (op, payload) => ({ ok: true, data: { items: Array.from({ length: Math.min(payload.limit, 75 - payload.offset) }, (_, i) => repo(payload.offset + i)), total: 75, nextOffset: payload.offset + payload.limit < 75 ? payload.offset + payload.limit : null } });
     await store.loadCollection('stars'); assert.equal(store.stars.length, 30); assert.equal(store.starPage.total, 75); assert.equal(store.interestStars.length, 75);
     await store.loadCollection('stars', true); await store.loadCollection('stars', true); assert.equal(store.stars.length, 75); assert.equal(store.starPage.nextOffset, null);
+  });
+  await check('preferences: manual tags preserve disabled history', async () => {
+    nativeBridge.setContext('preferences'); let saved;
+    bridgeHandler = async (op, payload) => {
+      if (op === 'account.readSnapshot') return { ok: true, data: { preferences: { historyEnabled: false } } };
+      saved = payload; return { ok: true, data: {} };
+    };
+    assert.deepEqual(await account.saveInterestPreferences([' Vue ', 'vue', 'Java']), ['Vue', 'Java']);
+    assert.equal(saved.historyEnabled, false);
+  });
+  await check('stars: first mutation after aborted initial sync creates visible cache', async () => {
+    await db.startDatabaseWorker(dbPath);
+    await call('saveProfile', { accountId: 'first-star', profile: profile('first-star') });
+    const generationId = (await call('beginSync', { accountId: 'first-star', kind: 'stars' })).generationId;
+    await call('abortSync', { accountId: 'first-star', kind: 'stars', generationId });
+    await call('applyConfirmedStar', { accountId: 'first-star', repository: repo('first-star'), starred: true });
+    assert.equal((await call('listRepositories', { accountId: 'first-star', kind: 'stars' })).items[0].repoId, 'first-star');
+    await db.closeDatabaseWorker();
+  });
+  await check('stars: late state query cannot overwrite confirmed write', async () => {
+    nativeBridge.setContext('late-query'); let answer;
+    bridgeHandler = async (op, payload) => {
+      if (op === 'repositories.isStarred') return { ok: true, data: { known: false } };
+      if (op === 'github.request' && payload.resource === 'starState') return new Promise(resolve => { answer = resolve; });
+      return { ok: true, data: { status: 204 } };
+    };
+    const querying = account.getStarState(repo('late'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await account.setStar(repo('late'), true)).success, true);
+    answer({ ok: true, data: { status: 404 } });
+    assert.equal(await querying, true);
+    assert.equal(await account.getStarState(repo('late')), true);
   });
   fs.writeFileSync(path.join(executionDir, 'results.json'), JSON.stringify({  runtime: process.versions, passed: results.filter((x) => x.pass).length, failed: results.filter((x) => !x.pass).length, results }, null, 2));
   process.exitCode = results.some(x => !x.pass) ? 1 : 0;

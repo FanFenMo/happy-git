@@ -10,25 +10,19 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 
 public class LocalRepository {
 
     private final HappyGitDbHelper dbHelper;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     public LocalRepository(Context context) {
         this.dbHelper = new HappyGitDbHelper(context);
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.execSQL("DELETE FROM repository_cache WHERE NOT EXISTS (SELECT 1 FROM sync_state s WHERE s.account_id = repository_cache.account_id AND s.kind = repository_cache.kind AND s.active_generation = repository_cache.generation_id)");
         db.execSQL("UPDATE sync_state SET staging_generation = NULL, staging_next_page = NULL, staging_count = 0");
-    }
-
-    public <T> Future<T> executeAsync(Callable<T> task) {
-        return executor.submit(task);
+        try (Cursor accounts = db.rawQuery("SELECT account_id FROM accounts", null)) {
+            while (accounts.moveToNext()) pruneHistory(db, accounts.getString(0), System.currentTimeMillis());
+        }
     }
 
     public synchronized void saveProfile(String accountId, JSONObject profile) {
@@ -494,14 +488,15 @@ public class LocalRepository {
 
         if (total > 5000) {
             db.execSQL(
-                    "DELETE FROM browse_history WHERE account_id = '" + accountId + "' AND repo_id NOT IN (" +
-                            "SELECT repo_id FROM browse_history WHERE account_id = '" + accountId + "' " +
-                            "ORDER BY last_viewed_at DESC, repo_id DESC LIMIT 5000);"
+                    "DELETE FROM browse_history WHERE account_id = ? AND repo_id NOT IN (" +
+                            "SELECT repo_id FROM browse_history WHERE account_id = ? " +
+                            "ORDER BY last_viewed_at DESC, repo_id DESC LIMIT 5000)", new Object[]{accountId, accountId}
             );
         }
     }
 
     public synchronized JSONObject listHistory(String accountId, JSONObject cursor, int limit, String keyword) {
+        limit = Math.max(1, Math.min(100, limit));
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         JSONObject res = new JSONObject();
         try {
@@ -511,7 +506,7 @@ public class LocalRepository {
 
             if (keyword != null && !keyword.trim().isEmpty()) {
                 query.append(" AND (full_name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')");
-                String kw = "%" + keyword.trim().replace("%", "\\%").replace("_", "\\_") + "%";
+                String kw = "%" + keyword.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
                 params.add(kw);
                 params.add(kw);
             }
@@ -556,7 +551,7 @@ public class LocalRepository {
             countParams.add(accountId);
             if (keyword != null && !keyword.trim().isEmpty()) {
                 countSql.append(" AND (full_name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')");
-                String kw = "%" + keyword.trim().replace("%", "\\%").replace("_", "\\_") + "%";
+                String kw = "%" + keyword.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
                 countParams.add(kw);
                 countParams.add(kw);
             }

@@ -2,6 +2,7 @@ package com.happygit.app.nativebridge;
 
 import android.content.Intent;
 import android.net.Uri;
+import com.happygit.app.R;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.Plugin;
@@ -32,8 +33,7 @@ public class HappyGitPlugin extends Plugin {
         super.load();
         localRepository = new LocalRepository(getContext());
 
-        int apiId = getContext().getResources().getIdentifier("happygit_api_base_url", "string", getContext().getPackageName());
-        if (apiId != 0) apiBaseUrl = getContext().getString(apiId);
+        apiBaseUrl = getContext().getString(R.string.happygit_api_base_url);
 
         gitHubAuth = new GitHubAuth(getContext(), localRepository, apiBaseUrl);
     }

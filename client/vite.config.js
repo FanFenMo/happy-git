@@ -35,13 +35,14 @@ export default defineConfig(async () => {
   const port = await resolvePort()
 
   return {
+    base: './', // 关键配置：使 dist 内静态资源支持 file:// 协议本地直读，供 Electron 桌面客户端无端口运行
     plugins: [
       vue(),
       tailwindcss(),
     ],
     server: {
       port,
-      strictPort: false, // 兜底策略：若备用端口均占用，自动顺延寻找空闲端口
+      strictPort: false,
       host: true
     }
   }

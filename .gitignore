@@ -13,6 +13,14 @@ dist
 dist-ssr
 *.local
 
+# Desktop & Mobile Releases
+release/
+dist-app/
+*.exe
+*.apk
+*.dmg
+*.AppImage
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

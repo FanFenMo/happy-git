@@ -39,7 +39,7 @@ export function normalizeRepository(raw, fetchedAt = Date.now(), starredAt = nul
   }
 
   // 许可证处理
-  let licenseSpdx = null
+  let licenseSpdx = raw.licenseSpdx || null
   if (raw.license) {
     const key = raw.license.spdx_id || raw.license.name || raw.license
     if (key && key !== 'NOASSERTION' && key !== 'null') {

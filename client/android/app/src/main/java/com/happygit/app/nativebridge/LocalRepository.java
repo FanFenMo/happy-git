@@ -22,13 +22,16 @@ public class LocalRepository {
 
     public LocalRepository(Context context) {
         this.dbHelper = new HappyGitDbHelper(context);
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        db.execSQL("DELETE FROM repository_cache WHERE NOT EXISTS (SELECT 1 FROM sync_state s WHERE s.account_id = repository_cache.account_id AND s.kind = repository_cache.kind AND s.active_generation = repository_cache.generation_id)");
+        db.execSQL("UPDATE sync_state SET staging_generation = NULL, staging_next_page = NULL, staging_count = 0");
     }
 
     public <T> Future<T> executeAsync(Callable<T> task) {
         return executor.submit(task);
     }
 
-    public void saveProfile(String accountId, JSONObject profile) {
+    public synchronized void saveProfile(String accountId, JSONObject profile) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.beginTransaction();
         try {
@@ -39,7 +42,8 @@ public class LocalRepository {
             cv.put("login", login);
             cv.put("profile_json", profile.toString());
             cv.put("profile_synced_at", now);
-            db.insertWithOnConflict("accounts", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+            if (db.update("accounts", cv, "account_id = ?", new String[]{accountId}) == 0)
+                db.insertOrThrow("accounts", null, cv);
 
             ContentValues prefCv = new ContentValues();
             prefCv.put("account_id", accountId);
@@ -54,7 +58,7 @@ public class LocalRepository {
         }
     }
 
-    public JSONObject readAccountSnapshot(String accountId) {
+    public synchronized JSONObject readAccountSnapshot(String accountId) {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         JSONObject result = new JSONObject();
         try {
@@ -84,7 +88,7 @@ public class LocalRepository {
             result.put("repoSync", getSyncState(db, accountId, "repos"));
             result.put("starSync", getSyncState(db, accountId, "stars"));
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         }
         return result;
     }
@@ -119,12 +123,12 @@ public class LocalRepository {
             }
             c.close();
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         }
         return obj;
     }
 
-    public void savePreferences(String accountId, JSONObject preferences) {
+    public synchronized void savePreferences(String accountId, JSONObject preferences) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         ContentValues cv = new ContentValues();
         cv.put("account_id", accountId);
@@ -134,12 +138,12 @@ public class LocalRepository {
         db.insertWithOnConflict("account_preferences", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
 
-    public String beginSync(String accountId, String kind) {
+    public synchronized String beginSync(String accountId, String kind) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         String generationId = "gen_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 6);
         db.beginTransaction();
         try {
-            db.delete("repository_cache", "account_id = ? AND kind = ? AND generation_id LIKE 'gen_%'", new String[]{accountId, kind});
+            db.execSQL("DELETE FROM repository_cache WHERE account_id = ? AND kind = ? AND generation_id != COALESCE((SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = ?), '')", new Object[]{accountId, kind, accountId, kind});
 
             ContentValues cv = new ContentValues();
             cv.put("account_id", accountId);
@@ -147,7 +151,8 @@ public class LocalRepository {
             cv.put("staging_generation", generationId);
             cv.put("staging_next_page", 1);
             cv.put("staging_count", 0);
-            db.insertWithOnConflict("sync_state", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+            if (db.update("sync_state", cv, "account_id = ? AND kind = ?", new String[]{accountId, kind}) == 0)
+                db.insertOrThrow("sync_state", null, cv);
 
             db.setTransactionSuccessful();
         } finally {
@@ -156,11 +161,15 @@ public class LocalRepository {
         return generationId;
     }
 
-    public JSONObject writeSyncPage(String accountId, String kind, String generationId, int page, JSONArray items, Integer nextPage) {
+    public synchronized JSONObject writeSyncPage(String accountId, String kind, String generationId, int page, JSONArray items, Integer nextPage) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         JSONObject res = new JSONObject();
         db.beginTransaction();
         try {
+            try (Cursor state = db.rawQuery("SELECT staging_generation, staging_next_page FROM sync_state WHERE account_id = ? AND kind = ?", new String[]{accountId, kind})) {
+                if (!state.moveToFirst() || !generationId.equals(state.getString(0))) throw new IllegalStateException("SYNC_GENERATION_MISMATCH");
+                if (state.isNull(1) || state.getInt(1) != page || (nextPage != null && nextPage <= page)) throw new IllegalStateException("SYNC_PAGE_MISMATCH");
+            }
             for (int i = 0; i < items.length(); i++) {
                 JSONObject item = items.getJSONObject(i);
                 String repoId = item.getString("repoId");
@@ -194,18 +203,22 @@ public class LocalRepository {
             res.put("loadedCount", count);
             res.put("nextPage", nextPage != null ? nextPage : JSONObject.NULL);
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         } finally {
             db.endTransaction();
         }
         return res;
     }
 
-    public JSONObject finishSync(String accountId, String kind, String generationId) {
+    public synchronized JSONObject finishSync(String accountId, String kind, String generationId) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         JSONObject res = new JSONObject();
         db.beginTransaction();
         try {
+            try (Cursor state = db.rawQuery("SELECT staging_generation, staging_next_page FROM sync_state WHERE account_id = ? AND kind = ?", new String[]{accountId, kind})) {
+                if (!state.moveToFirst() || !generationId.equals(state.getString(0))) throw new IllegalStateException("SYNC_GENERATION_MISMATCH");
+                if (!state.isNull(1)) throw new IllegalStateException("SYNC_INCOMPLETE");
+            }
             db.delete("repository_cache", "account_id = ? AND kind = ? AND generation_id != ?", new String[]{accountId, kind, generationId});
 
             Cursor c = db.rawQuery("SELECT staging_count FROM sync_state WHERE account_id = ? AND kind = ?", new String[]{accountId, kind});
@@ -229,21 +242,24 @@ public class LocalRepository {
             db.setTransactionSuccessful();
 
             res.put("kind", kind);
-            res.put("count", count);
+            res.put("activeCount", count);
             res.put("complete", true);
-            res.put("syncedAt", now);
+            res.put("lastSyncedAt", now);
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         } finally {
             db.endTransaction();
         }
         return res;
     }
 
-    public void abortSync(String accountId, String kind, String generationId, String errorCode, Long retryAt) {
+    public synchronized void abortSync(String accountId, String kind, String generationId, String errorCode, Long retryAt) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.beginTransaction();
         try {
+            try (Cursor state = db.rawQuery("SELECT staging_generation FROM sync_state WHERE account_id = ? AND kind = ?", new String[]{accountId, kind})) {
+                if (!state.moveToFirst() || !generationId.equals(state.getString(0))) { db.setTransactionSuccessful(); return; }
+            }
             db.delete("repository_cache", "account_id = ? AND kind = ? AND generation_id = ?", new String[]{accountId, kind, generationId});
 
             ContentValues upd = new ContentValues();
@@ -260,7 +276,7 @@ public class LocalRepository {
         }
     }
 
-    public JSONObject listRepositories(String accountId, String kind, int offset, int limit) {
+    public synchronized JSONObject listRepositories(String accountId, String kind, int offset, int limit) {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         JSONObject res = new JSONObject();
         try {
@@ -301,14 +317,14 @@ public class LocalRepository {
             res.put("total", complete ? activeCount : JSONObject.NULL);
             res.put("loadedCount", activeCount);
             res.put("complete", complete);
-            res.put("nextOffset", items.length() == limit ? (offset + limit) : JSONObject.NULL);
+            res.put("nextOffset", offset + items.length() < activeCount ? (offset + items.length()) : JSONObject.NULL);
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         }
         return res;
     }
 
-    public void applyConfirmedStar(String accountId, JSONObject repository, boolean starred) {
+    public synchronized void applyConfirmedStar(String accountId, JSONObject repository, boolean starred) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.beginTransaction();
         try {
@@ -321,6 +337,11 @@ public class LocalRepository {
             }
             c.close();
 
+            ContentValues initial = new ContentValues();
+            initial.put("account_id", accountId); initial.put("kind", "stars"); initial.put("active_generation", activeGen);
+            db.insertWithOnConflict("sync_state", null, initial, SQLiteDatabase.CONFLICT_IGNORE);
+            ContentValues active = new ContentValues(); active.put("active_generation", activeGen);
+            db.update("sync_state", active, "account_id = ? AND kind = 'stars'", new String[]{accountId});
             if (starred) {
                 ContentValues cv = new ContentValues();
                 cv.put("account_id", accountId);
@@ -347,13 +368,13 @@ public class LocalRepository {
 
             db.setTransactionSuccessful();
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         } finally {
             db.endTransaction();
         }
     }
 
-    public JSONObject isRepositoryStarred(String accountId, String repoId) {
+    public synchronized JSONObject isRepositoryStarred(String accountId, String repoId) {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         JSONObject res = new JSONObject();
         try {
@@ -388,12 +409,12 @@ public class LocalRepository {
                 res.put("starred", false);
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         }
         return res;
     }
 
-    public JSONObject recordBrowse(String accountId, JSONObject repository, String source, long viewedAt) {
+    public synchronized JSONObject recordBrowse(String accountId, JSONObject repository, String source, long viewedAt) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         JSONObject res = new JSONObject();
         db.beginTransaction();
@@ -455,7 +476,7 @@ public class LocalRepository {
 
             db.setTransactionSuccessful();
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         } finally {
             db.endTransaction();
         }
@@ -480,7 +501,7 @@ public class LocalRepository {
         }
     }
 
-    public JSONObject listHistory(String accountId, JSONObject cursor, int limit, String keyword) {
+    public synchronized JSONObject listHistory(String accountId, JSONObject cursor, int limit, String keyword) {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         JSONObject res = new JSONObject();
         try {
@@ -548,22 +569,22 @@ public class LocalRepository {
             res.put("nextCursor", nextCursor != null ? nextCursor : JSONObject.NULL);
             res.put("total", total);
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         }
         return res;
     }
 
-    public void deleteHistory(String accountId, String repoId) {
+    public synchronized void deleteHistory(String accountId, String repoId) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.delete("browse_history", "account_id = ? AND repo_id = ?", new String[]{accountId, repoId});
     }
 
-    public void clearHistory(String accountId) {
+    public synchronized void clearHistory(String accountId) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.delete("browse_history", "account_id = ?", new String[]{accountId});
     }
 
-    public int countHistory(String accountId) {
+    public synchronized int countHistory(String accountId) {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         Cursor c = db.rawQuery("SELECT COUNT(*) FROM browse_history WHERE account_id = ?", new String[]{accountId});
         int count = 0;
@@ -572,12 +593,12 @@ public class LocalRepository {
         return count;
     }
 
-    public void forgetAccount(String accountId) {
+    public synchronized void forgetAccount(String accountId) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.delete("accounts", "account_id = ?", new String[]{accountId});
     }
 
-    public String readSetting(String key) {
+    public synchronized String readSetting(String key) {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         Cursor c = db.rawQuery("SELECT value_json FROM app_settings WHERE setting_key = ?", new String[]{key});
         String val = null;
@@ -586,7 +607,7 @@ public class LocalRepository {
         return val;
     }
 
-    public void saveSetting(String key, String valueJson) {
+    public synchronized void saveSetting(String key, String valueJson) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         ContentValues cv = new ContentValues();
         cv.put("setting_key", key);
@@ -594,7 +615,7 @@ public class LocalRepository {
         db.insertWithOnConflict("app_settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
 
-    public JSONObject readFeed(String key) {
+    public synchronized JSONObject readFeed(String key) {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         Cursor c = db.rawQuery("SELECT payload_json, fetched_at FROM feed_cache WHERE cache_key = ?", new String[]{key});
         JSONObject res = null;
@@ -606,14 +627,14 @@ public class LocalRepository {
                 res.put("source", "cache");
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException(e.getMessage(), e);
         } finally {
             c.close();
         }
         return res;
     }
 
-    public void saveFeed(String key, JSONArray items, long fetchedAt) {
+    public synchronized void saveFeed(String key, JSONArray items, long fetchedAt) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         ContentValues cv = new ContentValues();
         cv.put("cache_key", key);

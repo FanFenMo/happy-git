@@ -14,7 +14,7 @@ export async function initializeApplication() {
 export async function startLogin() {
   const res = await nativeBridge.invoke('auth.begin')
   if (!res.ok) {
-    throw new Error(res.error?.message || '发起设备码授权失败')
+    throw new Error(res.error?.message || '打开 GitHub 授权失败')
   }
   return res.data
 }
@@ -28,7 +28,8 @@ export async function pollLogin(challengeId) {
 }
 
 export async function cancelLogin(challengeId) {
-  await nativeBridge.invoke('auth.cancel', { challengeId })
+  const res = await nativeBridge.invoke('auth.cancel', { challengeId })
+  if (!res.ok) throw new Error(res.error?.message || '取消授权失败')
 }
 
 export async function restoreSession() {
@@ -56,5 +57,6 @@ export async function forgetCurrentAccount() {
 }
 
 export async function saveModeSetting(mode) {
-  await nativeBridge.invoke('settings.save', { mode })
+  const res = await nativeBridge.invoke('settings.save', { mode })
+  if (!res.ok) throw new Error(res.error?.message || '保存浏览模式失败')
 }

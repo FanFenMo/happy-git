@@ -22,6 +22,11 @@ function openDatabase(dbPath) {
   db.exec('PRAGMA busy_timeout = 5000;')
 
   initTables()
+  db.exec(`DELETE FROM repository_cache WHERE NOT EXISTS (
+    SELECT 1 FROM sync_state s WHERE s.account_id = repository_cache.account_id
+    AND s.kind = repository_cache.kind AND s.active_generation = repository_cache.generation_id);
+    UPDATE sync_state SET staging_generation = NULL, staging_next_page = NULL, staging_count = 0;`)
+  for (const row of db.prepare('SELECT account_id FROM accounts').all()) pruneHistory(row.account_id)
 }
 
 function initTables() {
@@ -200,8 +205,8 @@ function beginSync(accountId, kind) {
   const generationId = 'gen_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
   withTransaction(() => {
     // 清理该账号该 kind 的旧临时数据
-    const delStmt = db.prepare('DELETE FROM repository_cache WHERE account_id = ? AND kind = ? AND generation_id LIKE "gen_%";')
-    delStmt.run(accountId, kind)
+    const delStmt = db.prepare(`DELETE FROM repository_cache WHERE account_id = ? AND kind = ? AND generation_id != COALESCE((SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = ?), '');`)
+    delStmt.run(accountId, kind, accountId, kind)
 
     const syncStmt = db.prepare(`
       INSERT INTO sync_state (account_id, kind, staging_generation, staging_next_page, staging_count)
@@ -218,11 +223,12 @@ function beginSync(accountId, kind) {
 
 function writeSyncPage(accountId, kind, generationId, page, items, nextPage) {
   return withTransaction(() => {
-    const stateStmt = db.prepare('SELECT staging_generation FROM sync_state WHERE account_id = ? AND kind = ?;')
+    const stateStmt = db.prepare('SELECT staging_generation, staging_next_page FROM sync_state WHERE account_id = ? AND kind = ?;')
     const state = stateStmt.get(accountId, kind)
     if (!state || state.staging_generation !== generationId) {
       throw new Error('SYNC_GENERATION_MISMATCH')
     }
+    if (state.staging_next_page !== page || (nextPage !== null && (!Number.isInteger(nextPage) || nextPage <= page))) throw new Error('SYNC_PAGE_MISMATCH')
 
     const insStmt = db.prepare(`
       INSERT OR REPLACE INTO repository_cache (account_id, kind, generation_id, repo_id, sort_time, repository_json)
@@ -255,11 +261,12 @@ function writeSyncPage(accountId, kind, generationId, page, items, nextPage) {
 
 function finishSync(accountId, kind, generationId) {
   return withTransaction(() => {
-    const stateStmt = db.prepare('SELECT staging_generation, staging_count FROM sync_state WHERE account_id = ? AND kind = ?;')
+    const stateStmt = db.prepare('SELECT staging_generation, staging_count, staging_next_page FROM sync_state WHERE account_id = ? AND kind = ?;')
     const state = stateStmt.get(accountId, kind)
     if (!state || state.staging_generation !== generationId) {
       throw new Error('SYNC_GENERATION_MISMATCH')
     }
+    if (state.staging_next_page !== null) throw new Error('SYNC_INCOMPLETE')
 
     // 删除旧的 active generation 数据
     const delStmt = db.prepare('DELETE FROM repository_cache WHERE account_id = ? AND kind = ? AND generation_id != ?;')
@@ -283,15 +290,17 @@ function finishSync(accountId, kind, generationId) {
 
     return {
       kind,
-      count: state.staging_count,
+      activeCount: state.staging_count,
       complete: true,
-      syncedAt: now
+      lastSyncedAt: now
     }
   })
 }
 
 function abortSync(accountId, kind, generationId, errorCode = null, retryAt = null) {
   withTransaction(() => {
+    const state = db.prepare('SELECT staging_generation FROM sync_state WHERE account_id = ? AND kind = ?').get(accountId, kind)
+    if (state?.staging_generation !== generationId) return
     const delStmt = db.prepare('DELETE FROM repository_cache WHERE account_id = ? AND kind = ? AND generation_id = ?;')
     delStmt.run(accountId, kind, generationId)
 
@@ -325,7 +334,7 @@ function listRepositories(accountId, kind, offset = 0, limit = 30) {
   `)
   const rows = queryStmt.all(accountId, kind, activeGen, limit, offset)
   const items = rows.map((r) => JSON.parse(r.repository_json))
-  const nextOffset = items.length === limit ? offset + limit : null
+  const nextOffset = offset + items.length < syncState.active_count ? offset + items.length : null
 
   return {
     items,
@@ -338,14 +347,14 @@ function listRepositories(accountId, kind, offset = 0, limit = 30) {
 
 function applyConfirmedStar(accountId, repository, starred) {
   withTransaction(() => {
-    const syncStmt = db.prepare('SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = "stars";')
+    const syncStmt = db.prepare(`SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = 'stars';`)
     const syncState = syncStmt.get(accountId)
     let activeGen = syncState?.active_generation
     if (!activeGen) {
       activeGen = 'active_stars_local'
       const initStmt = db.prepare(`
         INSERT OR IGNORE INTO sync_state (account_id, kind, active_generation, active_complete, active_count)
-        VALUES (?, "stars", ?, 0, 0);
+        VALUES (?, 'stars', ?, 0, 0);
       `)
       initStmt.run(accountId, activeGen)
     }
@@ -353,30 +362,30 @@ function applyConfirmedStar(accountId, repository, starred) {
     if (starred) {
       const insStmt = db.prepare(`
         INSERT OR REPLACE INTO repository_cache (account_id, kind, generation_id, repo_id, sort_time, repository_json)
-        VALUES (?, "stars", ?, ?, ?, ?);
+        VALUES (?, 'stars', ?, ?, ?, ?);
       `)
       insStmt.run(accountId, activeGen, repository.repoId, Date.now(), JSON.stringify(repository))
     } else {
-      const delStmt = db.prepare('DELETE FROM repository_cache WHERE account_id = ? AND kind = "stars" AND generation_id = ? AND repo_id = ?;')
+      const delStmt = db.prepare(`DELETE FROM repository_cache WHERE account_id = ? AND kind = 'stars' AND generation_id = ? AND repo_id = ?;`)
       delStmt.run(accountId, activeGen, repository.repoId)
     }
 
-    const countStmt = db.prepare('SELECT COUNT(*) as cnt FROM repository_cache WHERE account_id = ? AND kind = "stars" AND generation_id = ?;')
+    const countStmt = db.prepare(`SELECT COUNT(*) as cnt FROM repository_cache WHERE account_id = ? AND kind = 'stars' AND generation_id = ?;`)
     const countRow = countStmt.get(accountId, activeGen)
     const newCount = countRow ? countRow.cnt : 0
 
-    const updStmt = db.prepare('UPDATE sync_state SET active_count = ? WHERE account_id = ? AND kind = "stars";')
+    const updStmt = db.prepare(`UPDATE sync_state SET active_count = ? WHERE account_id = ? AND kind = 'stars';`)
     updStmt.run(newCount, accountId)
   })
 }
 
 function isRepositoryStarred(accountId, repoId) {
-  const syncStmt = db.prepare('SELECT active_generation, active_complete FROM sync_state WHERE account_id = ? AND kind = "stars";')
+  const syncStmt = db.prepare(`SELECT active_generation, active_complete FROM sync_state WHERE account_id = ? AND kind = 'stars';`)
   const syncState = syncStmt.get(accountId)
   if (!syncState || !syncState.active_generation) {
     return { known: false, starred: false }
   }
-  const checkStmt = db.prepare('SELECT 1 FROM repository_cache WHERE account_id = ? AND kind = "stars" AND generation_id = ? AND repo_id = ?;')
+  const checkStmt = db.prepare(`SELECT 1 FROM repository_cache WHERE account_id = ? AND kind = 'stars' AND generation_id = ? AND repo_id = ?;`)
   const row = checkStmt.get(accountId, syncState.active_generation, repoId)
   if (row) {
     return { known: true, starred: true }
@@ -461,6 +470,7 @@ function pruneHistory(accountId, now = Date.now()) {
 }
 
 function listHistory(accountId, cursor = null, limit = 30, keyword = '') {
+  limit = Math.max(1, Math.min(100, limit))
   let querySql = `
     SELECT * FROM browse_history
     WHERE account_id = ?
@@ -581,6 +591,11 @@ parentPort.on('message', (msg) => {
   try {
     let result = null
     switch (operation) {
+      case 'closeDatabase':
+        db.close()
+        parentPort.postMessage({ id, ok: true, data: null })
+        parentPort.close()
+        return
       case 'openDatabase':
         openDatabase(payload.dbPath)
         result = { ready: true }

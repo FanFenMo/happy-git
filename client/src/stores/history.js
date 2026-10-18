@@ -32,6 +32,7 @@ export const useHistoryStore = defineStore('history', {
       const seq = ++this.requestSequence
       this.keyword = keyword
       this.isLoading = true
+      this.isLoadingMore = false
       this.error = null
 
       try {
@@ -85,8 +86,10 @@ export const useHistoryStore = defineStore('history', {
 
     async remove(repoId) {
       if (!repoId) return
+      const seq = this.requestSequence
       try {
         await deleteHistory(repoId)
+        if (seq !== this.requestSequence) return
         // 删除成功后重新加载当前搜索第一页，确保 total 与游标准确
         await this.loadFirstPage(this.keyword)
       } catch (err) {
@@ -96,12 +99,16 @@ export const useHistoryStore = defineStore('history', {
     },
 
     async clearAll() {
+      const seq = ++this.requestSequence
+      this.isLoading = false; this.isLoadingMore = false
       try {
         await clearHistory()
+        if (seq !== this.requestSequence) return
         this.items = []
         this.nextCursor = null
         this.total = 0
       } catch (err) {
+        if (seq !== this.requestSequence) return
         this.error = err.message || '清空历史记录失败'
         throw err
       }

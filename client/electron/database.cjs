@@ -22,7 +22,7 @@ function startDatabaseWorker(dbPath) {
         if (ok) {
           req.resolve(data)
         } else {
-          req.reject(new Error(error?.message || 'Database worker error'))
+          req.reject(Object.assign(new Error(error?.message || 'Database worker error'), { code: error?.message }))
         }
       }
     })
@@ -36,6 +36,9 @@ function startDatabaseWorker(dbPath) {
     })
 
     worker.on('exit', (code) => {
+      for (const req of pendingRequests.values()) req.reject(new Error('DATABASE_CLOSED'))
+      pendingRequests.clear()
+      worker = null
       if (code !== 0) {
         console.warn(`[database.cjs] Worker stopped with exit code ${code}`)
       }
@@ -60,11 +63,13 @@ function callDatabase(operation, payload = {}) {
 
 async function closeDatabaseWorker() {
   if (!worker) return
+  const closing = worker
+  const exited = new Promise(resolve => closing.once('exit', resolve))
   try {
-    await worker.terminate()
+    await callDatabase('closeDatabase')
+    await exited
   } finally {
-    worker = null
-    pendingRequests.clear()
+    if (worker === closing) worker = null
   }
 }
 

@@ -87,13 +87,13 @@ public class CredentialStore {
             System.arraycopy(ciphertext, 0, combined, 1 + iv.length, ciphertext.length);
 
             String encoded = Base64.encodeToString(combined, Base64.DEFAULT);
-            prefs.edit().putString(KEY_CREDENTIALS, encoded).commit();
+            if (!prefs.edit().putString(KEY_CREDENTIALS, encoded).commit()) throw new IllegalStateException("STORAGE_UNAVAILABLE");
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new IllegalStateException("STORAGE_UNAVAILABLE", e);
         }
     }
 
     public synchronized void clear() {
-        prefs.edit().remove(KEY_CREDENTIALS).commit();
+        if (!prefs.edit().remove(KEY_CREDENTIALS).commit()) throw new IllegalStateException("STORAGE_UNAVAILABLE");
     }
 }

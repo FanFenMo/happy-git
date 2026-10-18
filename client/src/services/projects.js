@@ -5,16 +5,19 @@ import { nativeBridge } from '../platform'
 import { normalizeTrendingRepository } from '../models/github'
 import { getCutoffDate } from '../utils/time'
 import { recordHistory } from './history'
+import { useHistoryStore } from '../stores/history'
 
 export async function openRepository(repository, source = 'trending', canRecord = true) {
   if (!repository || !repository.htmlUrl) {
     return { opened: false, historySaved: false }
   }
 
+  const context = nativeBridge.contextId
   let historySaved = false
   if (canRecord) {
     const entry = await recordHistory(repository, source)
     historySaved = Boolean(entry)
+    if (historySaved && context === nativeBridge.contextId) await useHistoryStore().refreshAfterVisit()
   }
 
   const openRes = await nativeBridge.invoke('external.open', { url: repository.htmlUrl })

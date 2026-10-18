@@ -72,7 +72,7 @@
         @open-login="isLoginModalOpen = true"
       />
 
-      <!-- GitHub 设备码登录弹窗 -->
+      <!-- GitHub 登录弹窗 -->
       <LoginModal
         :is-open="isLoginModalOpen"
         @close="isLoginModalOpen = false"
@@ -117,9 +117,9 @@ onMounted(async () => {
 
 // 监听登录成功：当 session.status 变为 authenticated 且弹窗处于打开状态时自动关闭
 watch(
-  () => userStore.session?.status,
-  (status) => {
-    if (status === 'authenticated') {
+  () => userStore.session?.contextId,
+  () => {
+    if (userStore.session.status === 'authenticated') {
       isLoginModalOpen.value = false
     }
   }

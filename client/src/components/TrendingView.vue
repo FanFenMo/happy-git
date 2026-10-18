@@ -165,7 +165,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useUserStore } from '../stores/user'
 import { loadTrending, openRepository } from '../services/projects'
 import { getStarState } from '../services/account'
@@ -214,11 +214,12 @@ const fetchTrending = async (force = false) => {
     projects.value = result.items || []
     feedSource.value = result.source
 
+    const context = userStore.session.contextId
     // 若已登录，异步查询列表中项目的 Star 状态
     if (userStore.hasAccount && projects.value.length > 0) {
       for (const p of projects.value) {
         getStarState(p).then((starred) => {
-          starredMap.value[p.repoId] = starred
+          if (context === userStore.session.contextId) starredMap.value[p.repoId] = starred
         })
       }
     }
@@ -234,7 +235,7 @@ const handleOpenRepo = async (project) => {
   const result = await openRepository(project, 'trending', userStore.canRecordHistory)
   if (!result.opened) {
     showToast('打开仓库链接失败')
-  }
+  } else if (userStore.canRecordHistory && !result.historySaved) showToast('仓库已打开，浏览历史保存失败')
 }
 
 const toggleStar = async (project) => {
@@ -244,14 +245,18 @@ const toggleStar = async (project) => {
     return
   }
 
-  const currentlyStarred = isRepoStarred(project)
+  const context = userStore.session.contextId
+  const currentlyStarred = await getStarState(project)
+  if (context !== userStore.session.contextId) return
+  if (currentlyStarred === null) { showToast('无法确认 Star 状态，请联网后重试'); return }
   const targetStarred = !currentlyStarred
 
   try {
     const res = await userStore.setStar(project, targetStarred)
+    if (context !== userStore.session.contextId) return
     if (res.success) {
       starredMap.value[project.repoId] = targetStarred
-      showToast(targetStarred ? `★ 已为 ${project.name} 添加 Star` : `☆ 已取消对 ${project.name} 的 Star`)
+      showToast(res.warning || (targetStarred ? `★ 已为 ${project.name} 添加 Star` : `☆ 已取消对 ${project.name} 的 Star`))
     } else {
       showToast(res.error || 'Star 操作未成功')
     }
@@ -292,6 +297,10 @@ const getLangColor = (lang) => {
   }
   return map[lang] || '#8793A5'
 }
+
+watch(() => userStore.session.contextId, () => {
+  starredMap.value = {}
+})
 
 onMounted(() => {
   fetchTrending(false)

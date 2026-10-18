@@ -225,6 +225,7 @@
             </button>
           </div>
 
+          <p v-if="historyStore.error" class="text-xs text-[var(--color-danger)]">{{ historyStore.error }}</p>
           <!-- 历史列表 -->
           <div class="space-y-2.5">
             <div
@@ -237,7 +238,7 @@
                   @click="openRepo(item.repository || item, 'history')"
                   class="text-sm font-bold text-[var(--color-text)] hover:text-[var(--color-primary)] cursor-pointer truncate selectable"
                 >
-                  {{ item.fullName }}
+                  {{ item.repository?.fullName }}
                 </h4>
                 <div class="flex items-center gap-2 shrink-0 no-select">
                   <span class="text-[10px] text-[var(--color-text-subtle)] font-mono">
@@ -254,7 +255,7 @@
               </div>
 
               <p class="text-xs text-[var(--color-text-muted)] line-clamp-2 mb-2 selectable">
-                {{ item.description || '暂无描述' }}
+                {{ item.repository?.description || '暂无描述' }}
               </p>
 
               <div class="flex items-center justify-between text-[11px] text-[var(--color-text-subtle)] no-select">
@@ -305,13 +306,14 @@
         </div>
       </div>
 
+      <p v-if="feedback" role="status" class="text-xs text-[var(--color-text-muted)] mb-3">{{ feedback }}</p>
       <!-- 2. 我的 Star -->
       <div v-if="activeTab === 'stars'" class="space-y-3">
         <div v-if="userStore.hasAccount">
           <!-- 同步状态提示 -->
           <div class="flex items-center justify-between text-xs text-[var(--color-text-subtle)] pb-1 no-select">
             <span>
-              {{ userStore.starSync.complete ? `已完整同步 (共 ${userStore.stars.length} 项)` : `已加载 ${userStore.stars.length} 项 (同步中)` }}
+              {{ userStore.starSync.complete ? `已完整同步 (共 ${userStore.starPage.total ?? userStore.starSync.loadedCount} 项)` : `已加载 ${userStore.stars.length} 项 (同步中)` }}
             </span>
           </div>
 
@@ -352,6 +354,9 @@
             </div>
           </div>
 
+          <button v-if="userStore.starPage.nextOffset !== null" @click="loadMore('stars')" :disabled="userStore.starPage.loading" class="w-full btn-secondary text-xs mt-3">
+            {{ userStore.starPage.loading ? '加载中...' : '加载更多' }}
+          </button>
           <div v-if="userStore.stars.length === 0" class="py-12 text-center text-xs text-[var(--color-text-subtle)] no-select">
             {{ userStore.starSync.status === 'loading' ? '正在拉取 Star 列表...' : '暂无公开 Star 仓库' }}
           </div>
@@ -387,7 +392,7 @@
               <div class="flex items-start justify-between gap-2 mb-1.5">
                 <div class="flex items-center gap-2 truncate">
                   <h4
-                    @click="openRepo(proj, 'owned')"
+                    @click="openRepo(proj, 'projects')"
                     class="text-sm font-bold text-[var(--color-text)] hover:text-[var(--color-primary)] cursor-pointer truncate selectable"
                   >
                     {{ proj.name }}
@@ -415,6 +420,9 @@
             </div>
           </div>
 
+          <button v-if="userStore.repoPage.nextOffset !== null" @click="loadMore('repos')" :disabled="userStore.repoPage.loading" class="w-full btn-secondary text-xs mt-3">
+            {{ userStore.repoPage.loading ? '加载中...' : '加载更多' }}
+          </button>
           <div v-if="userStore.repos.length === 0" class="py-12 text-center text-xs text-[var(--color-text-subtle)] no-select">
             {{ userStore.repoSync.status === 'loading' ? '正在拉取仓库列表...' : '暂无公开仓库' }}
           </div>
@@ -442,7 +450,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 import { useUserStore } from '../stores/user'
 import { useHistoryStore } from '../stores/history'
 import { openRepository } from '../services/projects'
@@ -453,6 +461,8 @@ const emit = defineEmits(['edit-profile', 'open-settings', 'open-login'])
 const userStore = useUserStore()
 const historyStore = useHistoryStore()
 
+const feedback = ref('')
+const loadMore = async kind => { try { await userStore.loadCollection(kind, true) } catch (error) { feedback.value = error.message } }
 const activeTab = ref('history')
 const historyKeyword = ref('')
 const isRefreshing = ref(false)
@@ -463,19 +473,21 @@ const avatarUrl = computed(() => profile.value?.avatarUrl || 'https://avatars.gi
 
 const starCountDisplay = computed(() => {
   if (userStore.starSync.complete) {
-    return userStore.stars.length
+    return userStore.starPage.total ?? userStore.starSync.loadedCount
   }
   return userStore.stars.length > 0 ? `${userStore.stars.length}+` : '-'
 })
 
 const tabs = computed(() => [
   { id: 'history', label: '浏览历史', count: historyStore.total },
-  { id: 'stars', label: '我的 Star', count: userStore.stars.length },
-  { id: 'projects', label: '我的项目', count: userStore.repos.length }
+  { id: 'stars', label: '我的 Star', count: userStore.starPage.total ?? userStore.starSync.loadedCount },
+  { id: 'projects', label: '我的项目', count: userStore.repoPage.total ?? userStore.repoSync.loadedCount }
 ])
 
 const openRepo = async (repo, source) => {
-  await openRepository(repo, source, userStore.canRecordHistory)
+  const result = await openRepository(repo, source, userStore.canRecordHistory)
+  if (!result.opened) feedback.value = '无法打开仓库链接'
+  else if (userStore.canRecordHistory && !result.historySaved) feedback.value = '仓库已打开，浏览历史保存失败'
 }
 
 const refreshData = async () => {
@@ -489,6 +501,7 @@ const refreshData = async () => {
 }
 
 let searchTimer = null
+onUnmounted(() => clearTimeout(searchTimer))
 const handleHistorySearch = () => {
   clearTimeout(searchTimer)
   searchTimer = setTimeout(() => {
@@ -512,6 +525,7 @@ const confirmClearHistory = async () => {
 }
 
 const unstarRepo = async (repo) => {
-  await userStore.setStar(repo, false)
+  const result = await userStore.setStar(repo, false)
+  feedback.value = result.success ? result.warning || '已取消 Star' : result.error
 }
 </script>

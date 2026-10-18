@@ -17,7 +17,9 @@ const {
   beginAuthorization,
   pollAuthorization,
   cancelAuthorization,
-  ensureAccessToken,
+  authorizedRequest,
+  assertContext,
+  getStatus,
   restoreSession,
   clearCredentials,
   getContextId,
@@ -44,7 +46,7 @@ function isSafeGitHubUrl(targetUrl) {
       parsed.protocol === 'https:' &&
       parsed.hostname === 'github.com' &&
       !parsed.username &&
-      !parsed.password
+      !parsed.password && !parsed.port
     )
   } catch {
     return false
@@ -103,7 +105,10 @@ function registerIpcHandlers() {
       }
     }
 
+    const personal = /^(account\.|sync\.|repositories\.|stars\.|history\.)/.test(operation) || (operation === 'github.request' && payload.resource !== 'searchTrending')
+    const accountId = getCurrentAccountId()
     try {
+      if (personal) assertContext(contextId)
       switch (operation) {
         case 'app.initialize': {
           const mode = (await callDatabase('readSetting', { key: 'mode' })) || 'unset'
@@ -120,7 +125,7 @@ function registerIpcHandlers() {
         }
 
         case 'auth.begin': {
-          const challenge = await beginAuthorization(publicConfig.githubClientId)
+          const challenge = await beginAuthorization()
           return { ok: true, data: challenge }
         }
 
@@ -156,24 +161,20 @@ function registerIpcHandlers() {
         }
 
         case 'github.request': {
-          let token = null
-          // 部分资源需要认证
-          if (['currentUser', 'ownedRepos', 'starredRepos', 'starState', 'addStar', 'removeStar'].includes(payload.resource)) {
-            token = await ensureAccessToken()
-          }
-          const resp = await requestGitHub(payload.resource, payload.args || {}, token)
+          const resp = payload.resource === 'searchTrending'
+            ? await requestGitHub(payload.resource, payload.args || {})
+            : await authorizedRequest(payload.resource, payload.args || {}, contextId)
           return { ok: true, data: resp }
         }
 
         case 'account.saveProfile': {
-          const accountId = getCurrentAccountId()
           if (!accountId) throw new Error('AUTH_REQUIRED')
+          if (payload.profile?.accountId !== accountId) throw Object.assign(new Error('账号资料不匹配'), { code: 'SESSION_CHANGED' })
           await callDatabase('saveProfile', { accountId, profile: payload.profile })
           return { ok: true, data: { saved: true } }
         }
 
         case 'account.readSnapshot': {
-          const accountId = getCurrentAccountId()
           if (!accountId) {
             return {
               ok: true,
@@ -190,31 +191,25 @@ function registerIpcHandlers() {
         }
 
         case 'account.savePreferences': {
-          const accountId = getCurrentAccountId()
           if (!accountId) throw new Error('AUTH_REQUIRED')
           await callDatabase('savePreferences', { accountId, preferences: payload })
           return { ok: true, data: { saved: true } }
         }
 
         case 'account.forgetLocalData': {
-          const accountId = getCurrentAccountId()
-          if (accountId) {
-            await callDatabase('forgetAccount', { accountId })
-          }
           clearCredentials()
+          if (accountId) await callDatabase('forgetAccount', { accountId })
           await callDatabase('saveSetting', { key: 'mode', value: 'guest' })
-          return { ok: true, data: { forgotten: true } }
+          return { ok: true, data: { status: 'guest', accountId: null, profile: null, contextId: getContextId(), verifiedAt: null } }
         }
 
         case 'sync.begin': {
-          const accountId = getCurrentAccountId()
           if (!accountId) throw new Error('AUTH_REQUIRED')
           const res = await callDatabase('beginSync', { accountId, kind: payload.kind })
           return { ok: true, data: res }
         }
 
         case 'sync.writePage': {
-          const accountId = getCurrentAccountId()
           if (!accountId) throw new Error('AUTH_REQUIRED')
           const res = await callDatabase('writeSyncPage', {
             accountId,
@@ -228,7 +223,6 @@ function registerIpcHandlers() {
         }
 
         case 'sync.finish': {
-          const accountId = getCurrentAccountId()
           if (!accountId) throw new Error('AUTH_REQUIRED')
           const res = await callDatabase('finishSync', {
             accountId,
@@ -239,7 +233,6 @@ function registerIpcHandlers() {
         }
 
         case 'sync.abort': {
-          const accountId = getCurrentAccountId()
           if (accountId) {
             await callDatabase('abortSync', {
               accountId,
@@ -253,7 +246,6 @@ function registerIpcHandlers() {
         }
 
         case 'repositories.list': {
-          const accountId = getCurrentAccountId()
           if (!accountId) {
             return { ok: true, data: { items: [], total: null, loadedCount: 0, complete: false, nextOffset: null } }
           }
@@ -267,7 +259,6 @@ function registerIpcHandlers() {
         }
 
         case 'repositories.isStarred': {
-          const accountId = getCurrentAccountId()
           if (!accountId) {
             return { ok: true, data: { known: true, starred: false } }
           }
@@ -279,7 +270,6 @@ function registerIpcHandlers() {
         }
 
         case 'stars.applyConfirmed': {
-          const accountId = getCurrentAccountId()
           if (!accountId) throw new Error('AUTH_REQUIRED')
           await callDatabase('applyConfirmedStar', {
             accountId,
@@ -290,21 +280,22 @@ function registerIpcHandlers() {
         }
 
         case 'history.record': {
-          const accountId = getCurrentAccountId()
           if (!accountId) {
             return { ok: true, data: null }
           }
+          const snap = await callDatabase('readAccountSnapshot', { accountId })
+          assertContext(contextId)
+          if (!snap?.preferences?.historyEnabled || !['authenticated', 'offline'].includes(getStatus()) || payload.repository?.isPrivate) return { ok: true, data: null }
           const entry = await callDatabase('recordBrowse', {
             accountId,
             repository: payload.repository,
             source: payload.source || 'trending',
-            viewedAt: payload.viewedAt || Date.now()
+            viewedAt: Date.now()
           })
           return { ok: true, data: entry }
         }
 
         case 'history.list': {
-          const accountId = getCurrentAccountId()
           if (!accountId) {
             return { ok: true, data: { items: [], nextCursor: null, total: 0 } }
           }
@@ -318,7 +309,6 @@ function registerIpcHandlers() {
         }
 
         case 'history.delete': {
-          const accountId = getCurrentAccountId()
           if (accountId) {
             await callDatabase('deleteHistory', { accountId, repoId: payload.repoId })
           }
@@ -326,7 +316,6 @@ function registerIpcHandlers() {
         }
 
         case 'history.clear': {
-          const accountId = getCurrentAccountId()
           if (accountId) {
             await callDatabase('clearHistory', { accountId })
           }
@@ -334,7 +323,6 @@ function registerIpcHandlers() {
         }
 
         case 'history.count': {
-          const accountId = getCurrentAccountId()
           const cnt = accountId ? await callDatabase('countHistory', { accountId }) : 0
           return { ok: true, data: cnt }
         }
@@ -398,7 +386,7 @@ function registerIpcHandlers() {
       return {
         ok: false,
         error: {
-          code: err.message.startsWith('AUTH_') || err.message.startsWith('CONFIG_') ? err.message : 'INTERNAL_ERROR',
+          code: err.code || (/^(AUTH_|CONFIG_|SYNC_)/.test(err.message) ? err.message : 'INTERNAL_ERROR'),
           message: err.message || '内部服务处理失败'
         }
       }
@@ -406,10 +394,14 @@ function registerIpcHandlers() {
   })
 }
 
-app.whenReady().then(async () => {
+const primary = app.requestSingleInstanceLock()
+if (!primary) app.quit()
+else app.whenReady().then(async () => {
+  if (process.defaultApp) app.setAsDefaultProtocolClient('happygit', process.execPath, [path.resolve(__dirname, 'main.cjs')])
+  else app.setAsDefaultProtocolClient('happygit')
   const dbPath = path.join(userDataPath, 'data/happygit.db')
   await startDatabaseWorker(dbPath)
-  initAuth(userDataPath)
+  initAuth(userDataPath, publicConfig)
   registerIpcHandlers()
   createWindow()
 
@@ -426,3 +418,5 @@ app.on('window-all-closed', async () => {
     app.quit()
   }
 })
+
+app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus() } })

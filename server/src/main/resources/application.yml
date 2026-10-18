@@ -11,6 +11,11 @@ spring:
     time-zone: GMT+8
 
 happygit:
+  oauth:
+    client-id: ${GITHUB_CLIENT_ID:}
+    client-secret: ${GITHUB_CLIENT_SECRET:}
+    callback-url: ${GITHUB_CALLBACK_URL:}
+    app-type: ${GITHUB_APP_TYPE:oauth-app}
   github:
     api-url: https://api.github.com
     # 可选配置个人访问令牌以提升 GitHub API 速率限制 (默认每小时 60 次，配置后 5000 次)

@@ -6,6 +6,13 @@ import { electronAdapter } from './electron'
 import { androidAdapter } from './android'
 
 export const nativeBridge = {
+  contextId: null,
+  onAuthRequired: null,
+  setContext(contextId) { this.contextId = contextId },
+  capture() {
+    const contextId = this.contextId
+    return (operation, payload = {}) => this.invoke(operation, payload, contextId)
+  },
   getPlatform() {
     if (electronAdapter.isAvailable()) return 'electron'
     if (androidAdapter.isAvailable()) return 'android'
@@ -16,12 +23,20 @@ export const nativeBridge = {
     return electronAdapter.isAvailable() || androidAdapter.isAvailable()
   },
 
-  async invoke(operation, payload = {}, contextId = null) {
+  async invoke(operation, payload = {}, contextId = this.contextId) {
+    payload = JSON.parse(JSON.stringify(payload))
+    let result
     if (electronAdapter.isAvailable()) {
-      return await electronAdapter.invoke(operation, payload, contextId)
+      result = await electronAdapter.invoke(operation, payload, contextId)
     }
-    if (androidAdapter.isAvailable()) {
-      return await androidAdapter.invoke(operation, payload, contextId)
+    else if (androidAdapter.isAvailable()) {
+      result = await androidAdapter.invoke(operation, payload, contextId)
+    }
+    if (result) {
+      const personal = /^(account\.|sync\.|repositories\.|stars\.|history\.)/.test(operation) || (operation === 'github.request' && payload.resource !== 'searchTrending')
+      if (personal && contextId !== this.contextId) return { ok: false, error: { code: 'SESSION_CHANGED', message: '账号已变化' } }
+      if (result.error?.code === 'AUTH_REQUIRED' && contextId === this.contextId) this.onAuthRequired?.()
+      return result
     }
 
     // 浏览器开发环境兜底（仅供开发时预览公开热门，账号与本地数据库操作返回明确提示）

@@ -15,7 +15,8 @@
     "app:run": "npm run build && electron electron/main.cjs",
     "cap:sync": "npm run build && cap sync",
     "cap:android": "npm run build && cap add android",
-    "cap:ios": "npm run build && cap add ios"
+    "cap:ios": "npm run build && cap add ios",
+    "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

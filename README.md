@@ -46,3 +46,7 @@ happy-git/
 ├── 启动HappyGit桌面端.bat # Windows 桌面端极速启动入口
 └── README.md
 ```
+
+## GitHub 账号接入
+
+双端使用系统浏览器完成 GitHub 网页授权，后端交换授权码，客户端保存加密凭据和本机历史。部署前按 [GitHub 授权配置](docs/github-login.md) 设置服务端环境变量与客户端服务地址。

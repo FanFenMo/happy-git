@@ -1,6 +1,7 @@
 package com.happygit.app.nativebridge;
 
 import org.json.JSONObject;
+import org.json.JSONTokener;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -19,7 +20,7 @@ public class GitHubClient {
 
     public static class Response {
         public int status;
-        public JSONObject body;
+        public Object body;
         public Map<String, String> headers = new HashMap<>();
     }
 
@@ -81,6 +82,7 @@ public class GitHubClient {
 
         URL url = URI.create(urlStr).toURL();
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setInstanceFollowRedirects(false);
         conn.setRequestMethod(method);
         conn.setRequestProperty("Accept", accept);
         conn.setRequestProperty("User-Agent", "HappyGit-Android/1.0");
@@ -101,6 +103,7 @@ public class GitHubClient {
 
         if (resp.status == 204) {
             resp.body = null;
+            conn.disconnect();
             return resp;
         }
 
@@ -114,11 +117,12 @@ public class GitHubClient {
             }
             reader.close();
             try {
-                resp.body = new JSONObject(sb.toString());
+                resp.body = new JSONTokener(sb.toString()).nextValue();
             } catch (Exception e) {
                 resp.body = null;
             }
         }
+        conn.disconnect();
         return resp;
     }
 }

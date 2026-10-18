@@ -12,7 +12,7 @@
         {{ userStore.hasAccount ? '切换 GitHub 账号' : '欢迎来到 HappyGit' }}
       </h3>
       <p class="text-xs text-[var(--color-text-muted)] mb-5 leading-relaxed">
-        {{ userStore.hasAccount ? '完成设备授权以切换到新的 GitHub 账号' : '登录后可同步公开仓库与 Star，生成技术兴趣画像并记录本机浏览历史' }}
+        {{ userStore.hasAccount ? '在 GitHub 网页确认授权后切换账号' : '登录后可同步公开仓库与 Star，生成技术兴趣画像并记录本机浏览历史' }}
       </p>
 
       <!-- 阶段 1: 待发起或初始状态 -->
@@ -26,7 +26,7 @@
           @click="startLoginFlow"
           class="w-full btn-primary mb-3 shadow-lg cursor-pointer"
         >
-          <span>立即开启 GitHub 设备授权</span>
+          <span>使用 GitHub 登录</span>
         </button>
 
         <button
@@ -45,34 +45,25 @@
         </button>
       </div>
 
-      <!-- 阶段 2: 正在请求设备码 -->
+      <!-- 阶段 2: 正在打开授权页 -->
       <div v-else-if="userStore.authStage === 'requesting'" class="py-6 flex flex-col items-center">
         <div class="w-8 h-8 border-2 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin mb-3"></div>
-        <p class="text-xs text-[var(--color-text-muted)]">正在向 GitHub 请求设备验证码...</p>
+        <p class="text-xs text-[var(--color-text-muted)]">正在打开 GitHub 授权页...</p>
       </div>
 
       <!-- 阶段 3: 等待用户在浏览器验证 -->
       <div v-else-if="userStore.authStage === 'waiting' && challenge" class="space-y-4">
-        <div class="p-4 rounded-xl card-raised border border-[var(--color-border)] text-center">
-          <p class="text-xs text-[var(--color-text-muted)] mb-1.5">设备用户验证码</p>
-          <div class="font-mono text-2xl font-bold text-[var(--color-primary)] tracking-widest selectable select-all">
-            {{ challenge.userCode }}
-          </div>
-          <div class="mt-2.5 flex items-center justify-center gap-2">
-            <button
-              @click="copyCode"
-              class="px-3 py-1.5 text-xs rounded-lg card-surface border border-[var(--color-border)] hover:border-[var(--color-primary)] transition text-[var(--color-text)] flex items-center gap-1 cursor-pointer"
-            >
-              <span>{{ copied ? '已复制 ✓' : '复制验证码' }}</span>
-            </button>
-          </div>
+        <div class="p-4 rounded-xl card-raised border border-[var(--color-border)] text-left">
+          <p class="text-sm text-[var(--color-text)]">请在浏览器中完成 GitHub 授权</p>
+          <p class="mt-2 text-xs text-[var(--color-text-muted)] leading-relaxed">确认授权后会自动登录，可随时返回此窗口查看结果。</p>
+          <p v-if="userStore.authError" class="mt-2 text-xs text-[var(--color-danger)]">{{ userStore.authError }}</p>
         </div>
 
         <button
           @click="openAuthUrl"
           class="w-full btn-primary cursor-pointer flex items-center justify-center gap-1.5"
         >
-          <span>在系统浏览器打开验证页 ↗</span>
+          <span>重新打开 GitHub 授权页 ↗</span>
         </button>
 
         <div class="flex items-center justify-center gap-2 text-xs text-[var(--color-text-subtle)]">
@@ -108,7 +99,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 import { useUserStore } from '../stores/user'
 import { nativeBridge } from '../platform'
 
@@ -120,7 +111,6 @@ const emit = defineEmits(['close', 'skip'])
 const userStore = useUserStore()
 
 const challenge = computed(() => userStore.loginChallenge)
-const copied = ref(false)
 
 const startLoginFlow = async () => {
   try {
@@ -130,22 +120,10 @@ const startLoginFlow = async () => {
   }
 }
 
-const copyCode = async () => {
-  if (!challenge.value?.userCode) return
-  try {
-    if (navigator.clipboard) {
-      await navigator.clipboard.writeText(challenge.value.userCode)
-      copied.value = true
-      setTimeout(() => { copied.value = false }, 2500)
-    }
-  } catch (e) {
-    console.warn('复制失败:', e)
-  }
-}
-
 const openAuthUrl = async () => {
-  const url = challenge.value?.verificationUri || 'https://github.com/login/device'
-  await nativeBridge.invoke('external.open', { url })
+  const url = challenge.value?.authorizationUrl
+  const result = await nativeBridge.invoke('external.open', { url })
+  if (!result.ok) userStore.authError = result.error?.message || '无法打开浏览器'
 }
 
 const cancelAuth = async () => {

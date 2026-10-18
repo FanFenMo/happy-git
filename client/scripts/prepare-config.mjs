@@ -30,11 +30,9 @@ function readPublicConfig() {
   const envMain = parseEnvFile(path.join(clientDir, '.env'))
   const envLocal = parseEnvFile(path.join(clientDir, '.env.local'))
 
-  const githubClientId = process.env.VITE_GITHUB_CLIENT_ID || envLocal.VITE_GITHUB_CLIENT_ID || envMain.VITE_GITHUB_CLIENT_ID || ''
   const apiBaseUrl = process.env.VITE_API_BASE_URL || envLocal.VITE_API_BASE_URL || envMain.VITE_API_BASE_URL || ''
 
   return {
-    githubClientId: githubClientId.trim(),
     apiBaseUrl: apiBaseUrl.trim()
   }
 }
@@ -70,7 +68,6 @@ function writeAndroidConfig(config) {
   const outFile = path.join(resValuesDir, 'happygit_config.xml')
   const xmlContent = `<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="happygit_github_client_id" translatable="false">${escapeXml(config.githubClientId)}</string>
     <string name="happygit_api_base_url" translatable="false">${escapeXml(config.apiBaseUrl)}</string>
 </resources>
 `

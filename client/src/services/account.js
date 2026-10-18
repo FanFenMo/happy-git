@@ -25,13 +25,14 @@ export function extractNextPage(linkHeader, expectedResource) {
 
   try {
     const nextUrl = new URL(match[1])
-    if (nextUrl.hostname !== 'api.github.com' || nextUrl.protocol !== 'https:') {
+    const validPath = expectedResource === 'starredRepos' ? nextUrl.pathname === '/user/starred' : (nextUrl.pathname === '/user/repos' || /^\/users\/[^/]+\/repos$/.test(nextUrl.pathname))
+    if (nextUrl.hostname !== 'api.github.com' || nextUrl.protocol !== 'https:' || nextUrl.port || nextUrl.username || nextUrl.password || !validPath) {
       return null
     }
     const pageParam = nextUrl.searchParams.get('page')
     if (pageParam) {
-      const pageNum = parseInt(pageParam, 10)
-      return Number.isFinite(pageNum) && pageNum > 0 ? pageNum : null
+      const pageNum = Number(pageParam)
+      return Number.isSafeInteger(pageNum) && pageNum > 0 ? pageNum : null
     }
   } catch {
     return null
@@ -43,7 +44,8 @@ export function extractNextPage(linkHeader, expectedResource) {
  * 同步当前账号的公开资料
  */
 export async function syncProfile() {
-  const ghRes = await nativeBridge.invoke('github.request', {
+  const invoke = nativeBridge.capture()
+  const ghRes = await invoke('github.request', {
     resource: 'currentUser',
     args: {}
   })
@@ -73,129 +75,67 @@ export async function syncProfile() {
   }
 
   const profile = normalizeProfile(body)
-  await nativeBridge.invoke('account.saveProfile', { profile })
+  const saved = await invoke('account.saveProfile', { profile })
+  if (!saved.ok) throw new Error(saved.error?.message || '资料保存失败')
   return profile
 }
 
 /**
  * 同步指定类型的仓库集合 ('repos' | 'stars')
  */
-export async function syncRepositoryCollection(kind, options = {}) {
-  if (kind !== 'repos' && kind !== 'stars') {
-    throw new Error(`非法同步类型: ${kind}`)
-  }
-
-  // 若已有进行中的同类型同步，先中止
+export function syncRepositoryCollection(kind, options = {}) {
+  if (!['repos', 'stars'].includes(kind)) return Promise.reject(new Error('非法同步类型'))
   if (activeSyncControllers[kind]) {
-    activeSyncControllers[kind].aborted = true
+    const current = activeSyncControllers[kind]
+    if (!current.aborted) return current.done
+    const context = nativeBridge.contextId
+    return current.done.catch(() => {}).then(() => context === nativeBridge.contextId ? syncRepositoryCollection(kind, options) : { aborted: true })
   }
-
-  const controller = { aborted: false, generationId: null }
+  const invoke = nativeBridge.capture()
+  const controller = { aborted: false, generationId: null, invoke }
   activeSyncControllers[kind] = controller
-
-  try {
-    const beginRes = await nativeBridge.invoke('sync.begin', { kind })
-    if (!beginRes.ok || !beginRes.data?.generationId) {
-      throw new Error(beginRes.error?.message || '初始化同步失败')
-    }
-
-    const generationId = beginRes.data.generationId
-    controller.generationId = generationId
-
-    let page = 1
+  controller.done = (async () => {
     let loadedCount = 0
-    const resource = kind === 'repos' ? 'ownedRepos' : 'starredRepos'
-
-    while (page !== null && !controller.aborted) {
-      const ghRes = await nativeBridge.invoke('github.request', {
-        resource,
-        args: { page, login: options.login || '' }
-      })
-
-      if (controller.aborted) {
-        await nativeBridge.invoke('sync.abort', { kind, generationId, errorCode: 'ABORTED' })
-        return { kind, aborted: true, loadedCount }
+    try {
+      const begin = await invoke('sync.begin', { kind })
+      if (!begin.ok) throw new Error(begin.error?.message || '初始化同步失败')
+      controller.generationId = begin.data.generationId
+      let page = 1
+      const resource = kind === 'repos' ? 'ownedRepos' : 'starredRepos'
+      while (page !== null) {
+        if (controller.aborted) return { aborted: true }
+        const response = await invoke('github.request', { resource, args: { page, login: options.login || '' } })
+        if (controller.aborted) return { aborted: true }
+        if (!response.ok) throw Object.assign(new Error(response.error?.message || '同步请求失败'), { code: response.error?.code })
+        const { status, body, headers } = response.data
+        if (status !== 200 || !Array.isArray(body)) throw githubError(response.data)
+        const items = body.map(item => kind === 'repos' ? normalizeRepository(item) : normalizeStarredRepository(item)).filter(item => item && !item.isPrivate)
+        const nextPage = extractNextPage(headers?.link, resource)
+        if (nextPage !== null && nextPage <= page) throw new Error('GitHub 分页顺序异常')
+        const written = await invoke('sync.writePage', { kind, generationId: controller.generationId, page, items, nextPage })
+        if (!written.ok) throw new Error(written.error?.message || '同步缓存写入失败')
+        loadedCount = written.data.loadedCount
+        options.onProgress?.({ loadedCount, page })
+        page = nextPage
       }
-
-      if (!ghRes.ok || !ghRes.data) {
-        const errMessage = ghRes.error?.message || '拉取数据失败'
-        await nativeBridge.invoke('sync.abort', { kind, generationId, errorCode: 'NETWORK_ERROR' })
-        throw new Error(errMessage)
-      }
-
-      const { status, body, headers } = ghRes.data
-
-      if (status === 401) {
-        await nativeBridge.invoke('sync.abort', { kind, generationId, errorCode: 'UNAUTHORIZED' })
-        const err = new Error('授权失效')
-        err.code = 'UNAUTHORIZED'
-        throw err
-      }
-
-      if (status === 403 || status === 429) {
-        const retryAt = headers?.rateLimitReset ? parseInt(headers.rateLimitReset, 10) * 1000 : Date.now() + 60000
-        await nativeBridge.invoke('sync.abort', { kind, generationId, errorCode: 'RATE_LIMITED', retryAt })
-        const err = new Error('请求频次受限')
-        err.code = 'RATE_LIMITED'
-        err.retryAt = retryAt
-        throw err
-      }
-
-      if (status !== 200 || !Array.isArray(body)) {
-        await nativeBridge.invoke('sync.abort', { kind, generationId, errorCode: `HTTP_${status}` })
-        throw new Error(`同步失败 (HTTP ${status})`)
-      }
-
-      // 过滤 private 仓库并按类型标准化
-      const items = body
-        .map((item) => (kind === 'repos' ? normalizeRepository(item) : normalizeStarredRepository(item)))
-        .filter((item) => item && !item.isPrivate)
-
-      const nextPage = extractNextPage(headers?.link, resource)
-
-      const writeRes = await nativeBridge.invoke('sync.writePage', {
-        kind,
-        generationId,
-        page,
-        items,
-        nextPage
-      })
-
-      if (!writeRes.ok) {
-        await nativeBridge.invoke('sync.abort', { kind, generationId, errorCode: 'WRITE_ERROR' })
-        throw new Error(writeRes.error?.message || '写入本地缓存失败')
-      }
-
-      loadedCount = writeRes.data?.loadedCount || loadedCount
-      if (typeof options.onProgress === 'function') {
-        options.onProgress({ loadedCount, page, hasNext: nextPage !== null })
-      }
-
-      page = nextPage
+      if (controller.aborted) return { aborted: true }
+      const finished = await invoke('sync.finish', { kind, generationId: controller.generationId })
+      if (!finished.ok) throw new Error(finished.error?.message || '同步提交失败')
+      controller.generationId = null
+      if (kind === 'stars') memoryStarCache.clear()
+      return { kind, aborted: false, loadedCount: finished.data.activeCount, complete: true, lastSyncedAt: finished.data.lastSyncedAt }
+    } finally {
+      if (controller.generationId) await invoke('sync.abort', { kind, generationId: controller.generationId, errorCode: controller.aborted ? 'CANCELLED' : 'SYNC_FAILED' })
+      if (activeSyncControllers[kind] === controller) activeSyncControllers[kind] = null
     }
+  })()
+  return controller.done
+}
 
-    if (controller.aborted) {
-      await nativeBridge.invoke('sync.abort', { kind, generationId, errorCode: 'ABORTED' })
-      return { kind, aborted: true, loadedCount }
-    }
-
-    const finishRes = await nativeBridge.invoke('sync.finish', { kind, generationId })
-    if (!finishRes.ok) {
-      throw new Error(finishRes.error?.message || '提交同步结果失败')
-    }
-
-    return {
-      kind,
-      aborted: false,
-      loadedCount: finishRes.data?.activeCount ?? loadedCount,
-      complete: Boolean(finishRes.data?.complete),
-      lastSyncedAt: finishRes.data?.lastSyncedAt || Date.now()
-    }
-  } finally {
-    if (activeSyncControllers[kind] === controller) {
-      activeSyncControllers[kind] = null
-    }
-  }
+function githubError({ status, headers = {} }) {
+  const limited = status === 429 || (status === 403 && (headers.rateLimitRemaining === '0' || headers.retryAfter))
+  const message = status === 401 ? 'GitHub 授权已失效，请重新登录' : limited ? 'GitHub 请求频次受限，请稍后重试' : status === 403 ? '授权缺少 Star 读写权限，请检查 GitHub 应用权限并重新授权' : `GitHub 请求失败 (HTTP ${status})`
+  return Object.assign(new Error(message), { code: status === 401 ? 'AUTH_REQUIRED' : limited ? 'RATE_LIMITED' : 'GITHUB_ERROR', retryAt: limited ? (headers.retryAfter ? Date.now() + Number(headers.retryAfter) * 1000 : Number(headers.rateLimitReset) * 1000 || Date.now() + 60000) : null })
 }
 
 /**
@@ -216,17 +156,28 @@ export async function syncStarredRepositories(options = {}) {
  * 取消正在进行的集合同步
  */
 export async function cancelCollectionSync(kind) {
-  if (activeSyncControllers[kind]) {
-    activeSyncControllers[kind].aborted = true
-    if (activeSyncControllers[kind].generationId) {
-      await nativeBridge.invoke('sync.abort', {
-        kind,
-        generationId: activeSyncControllers[kind].generationId,
-        errorCode: 'USER_CANCELLED'
-      })
-    }
-    activeSyncControllers[kind] = null
-  }
+  const controller = activeSyncControllers[kind]
+  if (!controller) return
+  controller.aborted = true
+  try { await controller.done } catch { /* 任务失败由同步调用者处理。 */ }
+}
+
+export function resetAccountTasks() {
+  for (const controller of Object.values(activeSyncControllers)) if (controller) controller.aborted = true
+  memoryStarCache.clear()
+  inflightStarQueries.clear()
+}
+
+export async function loadAllRepositories(kind) {
+  const invoke = nativeBridge.capture()
+  let offset = 0, items = []
+  do {
+    const res = await invoke('repositories.list', { kind, offset, limit: 100 })
+    if (!res.ok) throw new Error(res.error?.message || '读取兴趣数据失败')
+    items.push(...res.data.items)
+    offset = res.data.nextOffset
+  } while (offset !== null)
+  return items
 }
 
 /**
@@ -265,116 +216,51 @@ export async function refreshAccount(options = {}) {
  * 优先检查本地完整 Star 缓存或内存缓存；若未知则请求 GitHub API
  */
 export async function getStarState(repository) {
-  if (!repository || !repository.repoId) return false
-
-  // 1. 检查内存缓存
-  if (memoryStarCache.has(repository.repoId)) {
-    return memoryStarCache.get(repository.repoId)
-  }
-
-  // 2. 检查本地数据库是否已有记录
-  const checkRes = await nativeBridge.invoke('repositories.isStarred', { repoId: repository.repoId })
-  if (checkRes.ok && checkRes.data && checkRes.data.known) {
-    memoryStarCache.set(repository.repoId, checkRes.data.starred)
-    return checkRes.data.starred
-  }
-
-  // 3. 若处于进行中的查询，复用 Promise
-  if (inflightStarQueries.has(repository.repoId)) {
-    return inflightStarQueries.get(repository.repoId)
-  }
-
-  let owner = repository.owner
-  let name = repository.name
-  if (!owner || !name) {
-    const parts = (repository.fullName || '').split('/')
-    owner = parts[0]
-    name = parts[1]
-  }
-
-  if (!owner || !name) return false
-
-  const queryPromise = (async () => {
-    try {
-      const ghRes = await nativeBridge.invoke('github.request', {
-        resource: 'starState',
-        args: { owner, repo: name }
-      })
-      if (ghRes.ok && ghRes.data) {
-        // 204 No Content 代表已 Star，404 Not Found 代表未 Star
-        const isStarred = ghRes.data.status === 204
-        memoryStarCache.set(repository.repoId, isStarred)
-        return isStarred
-      }
-      return false
-    } catch {
-      return false
-    } finally {
-      inflightStarQueries.delete(repository.repoId)
-    }
-  })()
-
-  inflightStarQueries.set(repository.repoId, queryPromise)
-  return queryPromise
+  if (!repository?.repoId) return null
+  const context = nativeBridge.contextId, key = `${context}:${repository.repoId}`
+  const invoke = nativeBridge.capture()
+  if (memoryStarCache.has(key)) return memoryStarCache.get(key)
+  if (inflightStarQueries.has(key)) return inflightStarQueries.get(key)
+  const query = (async () => {
+    const local = await invoke('repositories.isStarred', { repoId: repository.repoId })
+    if (local.ok && local.data?.known) { memoryStarCache.set(key, local.data.starred); return local.data.starred }
+    const result = await invoke('github.request', { resource: 'starState', args: repoArgs(repository) })
+    if (!result.ok || ![204, 404].includes(result.data?.status)) return null
+    const starred = result.data.status === 204
+    if (context === nativeBridge.contextId) memoryStarCache.set(key, starred)
+    return starred
+  })().finally(() => inflightStarQueries.delete(key))
+  inflightStarQueries.set(key, query)
+  return query
 }
 
-/**
- * 对指定仓库进行 Star 或取消 Star
- */
-export async function setStar(repository, starred) {
-  if (!repository || !repository.repoId) {
-    return { success: false, error: '无效仓库信息' }
-  }
-
-  let owner = repository.owner
-  let name = repository.name
-  if (!owner || !name) {
-    const parts = (repository.fullName || '').split('/')
-    owner = parts[0]
-    name = parts[1]
-  }
-
-  if (!owner || !name) {
-    return { success: false, error: '缺少仓库所有者或名称' }
-  }
-
-  // 取消正在进行的 Star 列表同步，防止写操作被旧快照覆盖
-  await cancelCollectionSync('stars')
-
-  const resource = starred ? 'addStar' : 'removeStar'
-  const ghRes = await nativeBridge.invoke('github.request', {
-    resource,
-    args: { owner, repo: name }
-  })
-
-  if (!ghRes.ok || !ghRes.data) {
-    return { success: false, error: ghRes.error?.message || '网络请求失败' }
-  }
-
-  const { status } = ghRes.data
-  // GitHub addStar/removeStar 成功时返回 204 No Content
-  if (status !== 204) {
-    if (status === 401) {
-      return { success: false, error: '登录凭据已失效，请重新登录' }
+function repoArgs(repository) {
+  const [owner, repo] = (repository.fullName || '').split('/')
+  return { owner: repository.owner || owner, repo: repository.name || repo }
+}
+const starMutations = new Map()
+export function setStar(repository, starred) {
+  const context = nativeBridge.contextId, key = `${context}:${repository.repoId}`
+  if (starMutations.has(key)) return starMutations.get(key)
+  const invoke = nativeBridge.capture()
+  const task = (async () => {
+    await cancelCollectionSync('stars')
+    const args = repoArgs(repository)
+    if (!args.owner || !args.repo) return { success: false, error: '仓库信息不完整' }
+    let result = await invoke('github.request', { resource: starred ? 'addStar' : 'removeStar', args })
+    let confirmed = result.ok && result.data.status === 204
+    // 请求超时可能发生在 GitHub 已完成写入之后，只查询远端状态，不盲目重复写入。
+    if (!result.ok && context === nativeBridge.contextId && !['SESSION_CHANGED', 'AUTH_REQUIRED'].includes(result.error?.code)) {
+      const check = await invoke('github.request', { resource: 'starState', args })
+      confirmed = check.ok && [204, 404].includes(check.data.status) && (check.data.status === 204) === starred
     }
-    if (status === 403 || status === 429) {
-      return { success: false, error: 'GitHub 请求频次受限，请稍后重试' }
-    }
-    return { success: false, error: `操作未成功 (HTTP ${status})` }
-  }
-
-  // 更新内存缓存与本地数据库活动版本
-  memoryStarCache.set(repository.repoId, starred)
-  try {
-    await nativeBridge.invoke('stars.applyConfirmed', {
-      repository,
-      starred
-    })
-  } catch (err) {
-    console.warn('[accountService] 远程 Star 成功，但落库失败:', err)
-  }
-
-  return { success: true, starred }
+    if (!confirmed) return { success: false, error: result.ok ? githubError(result.data).message : result.error?.message || 'Star 请求失败' }
+    memoryStarCache.set(key, starred)
+    const saved = await invoke('stars.applyConfirmed', { repository, starred })
+    return { success: true, starred, cacheSaved: saved.ok, warning: saved.ok ? null : 'GitHub 已更新，本地缓存保存失败，请刷新列表' }
+  })().finally(() => starMutations.delete(key))
+  starMutations.set(key, task)
+  return task
 }
 
 /**
@@ -498,10 +384,10 @@ export async function saveInterestPreferences(manualInput) {
   }
 
   // 读取当前设置保留 historyEnabled
-  const snapRes = await nativeBridge.invoke('account.readSnapshot')
+  const snapRes = await invoke('account.readSnapshot')
   const historyEnabled = snapRes.ok && snapRes.data?.preferences ? snapRes.data.preferences.historyEnabled : true
 
-  const res = await nativeBridge.invoke('account.savePreferences', {
+  const res = await invoke('account.savePreferences', {
     manualTags,
     historyEnabled
   })

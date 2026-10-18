@@ -3,6 +3,7 @@ package com.happygit.app.nativebridge;
 import android.content.Intent;
 import android.net.Uri;
 import com.getcapacitor.JSObject;
+import com.getcapacitor.JSArray;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
@@ -31,16 +32,10 @@ public class HappyGitPlugin extends Plugin {
         super.load();
         localRepository = new LocalRepository(getContext());
 
-        String clientId = "";
-        try {
-            int resId = getContext().getResources().getIdentifier("happygit_github_client_id", "string", getContext().getPackageName());
-            if (resId != 0) clientId = getContext().getString(resId);
+        int apiId = getContext().getResources().getIdentifier("happygit_api_base_url", "string", getContext().getPackageName());
+        if (apiId != 0) apiBaseUrl = getContext().getString(apiId);
 
-            int apiId = getContext().getResources().getIdentifier("happygit_api_base_url", "string", getContext().getPackageName());
-            if (apiId != 0) apiBaseUrl = getContext().getString(apiId);
-        } catch (Exception ignored) {}
-
-        gitHubAuth = new GitHubAuth(getContext(), localRepository, clientId);
+        gitHubAuth = new GitHubAuth(getContext(), localRepository, apiBaseUrl);
     }
 
     @PluginMethod
@@ -56,15 +51,19 @@ public class HappyGitPlugin extends Plugin {
 
         backgroundExecutor.execute(() -> {
             try {
-                dispatch(operation, payload, contextId, call);
+                if (isPersonal(operation, payload) && !"github.request".equals(operation)) {
+                    synchronized (gitHubAuth) { dispatch(operation, payload, contextId, call); }
+                } else dispatch(operation, payload, contextId, call);
             } catch (Exception e) {
                 e.printStackTrace();
-                resolveFailure(call, "INTERNAL_ERROR", e.getMessage() != null ? e.getMessage() : "原生插件内部错误");
+                resolveFailure(call, e.getMessage() != null && e.getMessage().matches("(AUTH_|CONFIG_|SYNC_|SESSION_|STORAGE_).*" ) ? e.getMessage() : "INTERNAL_ERROR", e.getMessage() != null ? e.getMessage() : "原生插件内部错误");
             }
         });
     }
 
     private void dispatch(String operation, JSObject payload, String contextId, PluginCall call) throws Exception {
+        if (isPersonal(operation, payload)) gitHubAuth.assertContext(contextId);
+        final String accountId = gitHubAuth.getCurrentAccountId();
         switch (operation) {
             case "app.initialize": {
                 String mode = localRepository.readSetting("mode");
@@ -121,15 +120,10 @@ public class HappyGitPlugin extends Plugin {
             case "github.request": {
                 String resource = payload.getString("resource");
                 JSObject args = payload.getJSObject("args");
-                String token = null;
-                if ("currentUser".equals(resource) || "ownedRepos".equals(resource) || "starredRepos".equals(resource)
-                        || "starState".equals(resource) || "addStar".equals(resource) || "removeStar".equals(resource)) {
-                    token = gitHubAuth.ensureAccessToken();
-                }
-                GitHubClient.Response resp = GitHubClient.request(resource, args, token);
+                GitHubClient.Response resp = "searchTrending".equals(resource) ? GitHubClient.request(resource, args, null) : gitHubAuth.request(resource, args, contextId);
                 JSObject ret = new JSObject();
                 ret.put("status", resp.status);
-                ret.put("body", resp.body != null ? new JSObject(resp.body.toString()) : JSONObject.NULL);
+                ret.put("body", resp.body != null ? resp.body : JSONObject.NULL);
                 JSObject hdrs = new JSObject();
                 for (String k : resp.headers.keySet()) hdrs.put(k, resp.headers.get(k));
                 ret.put("headers", hdrs);
@@ -138,11 +132,11 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "account.saveProfile": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     resolveFailure(call, "AUTH_REQUIRED", "尚未登录");
                     return;
                 }
+                if (!accountId.equals(payload.getJSObject("profile").getString("accountId"))) throw new IllegalStateException("SESSION_CHANGED");
                 localRepository.saveProfile(accountId, payload.getJSObject("profile"));
                 JSObject r = new JSObject();
                 r.put("saved", true);
@@ -151,7 +145,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "account.readSnapshot": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     JSObject r = new JSObject();
                     r.put("profile", JSONObject.NULL);
@@ -164,7 +157,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "account.savePreferences": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     resolveFailure(call, "AUTH_REQUIRED", "尚未登录");
                     return;
@@ -177,19 +169,14 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "account.forgetLocalData": {
-                String accountId = gitHubAuth.getCurrentAccountId();
-                if (accountId != null) {
-                    localRepository.forgetAccount(accountId);
-                }
                 gitHubAuth.logout();
+                if (accountId != null) localRepository.forgetAccount(accountId);
                 JSObject r = new JSObject();
-                r.put("forgotten", true);
-                resolveSuccess(call, r);
+                resolveSuccess(call, gitHubAuth.session(null));
                 break;
             }
 
             case "sync.begin": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     resolveFailure(call, "AUTH_REQUIRED", "尚未登录");
                     return;
@@ -202,7 +189,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "sync.writePage": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     resolveFailure(call, "AUTH_REQUIRED", "尚未登录");
                     return;
@@ -222,7 +208,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "sync.finish": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     resolveFailure(call, "AUTH_REQUIRED", "尚未登录");
                     return;
@@ -237,7 +222,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "sync.abort": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId != null) {
                     String errCode = payload.optString("errorCode", null);
                     Long retryAt = payload.has("retryAt") ? payload.getLong("retryAt") : null;
@@ -250,7 +234,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "repositories.list": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     JSObject r = new JSObject();
                     r.put("items", new JSArray());
@@ -268,7 +251,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "repositories.isStarred": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     JSObject r = new JSObject();
                     r.put("known", true);
@@ -282,7 +264,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "stars.applyConfirmed": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     resolveFailure(call, "AUTH_REQUIRED", "尚未登录");
                     return;
@@ -295,23 +276,25 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "history.record": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     resolveSuccess(call, null);
                     return;
+                }
+                JSONObject snapshot = localRepository.readAccountSnapshot(accountId);
+                if (!snapshot.getJSONObject("preferences").optBoolean("historyEnabled", false) || !("authenticated".equals(gitHubAuth.getStatus()) || "offline".equals(gitHubAuth.getStatus())) || payload.getJSObject("repository").optBoolean("isPrivate")) {
+                    resolveSuccess(call, null); return;
                 }
                 JSONObject entry = localRepository.recordBrowse(
                         accountId,
                         payload.getJSObject("repository"),
                         payload.optString("source", "trending"),
-                        payload.optLong("viewedAt", System.currentTimeMillis())
+                        System.currentTimeMillis()
                 );
                 resolveSuccess(call, new JSObject(entry.toString()));
                 break;
             }
 
             case "history.list": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId == null) {
                     JSObject r = new JSObject();
                     r.put("items", new JSArray());
@@ -330,7 +313,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "history.delete": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId != null) {
                     localRepository.deleteHistory(accountId, payload.getString("repoId"));
                 }
@@ -341,7 +323,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "history.clear": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 if (accountId != null) {
                     localRepository.clearHistory(accountId);
                 }
@@ -352,7 +333,6 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "history.count": {
-                String accountId = gitHubAuth.getCurrentAccountId();
                 int cnt = accountId != null ? localRepository.countHistory(accountId) : 0;
                 resolveSuccess(call, cnt);
                 break;
@@ -376,9 +356,7 @@ public class HappyGitPlugin extends Plugin {
                     reader.close();
                     JSONObject resp = new JSONObject(sb.toString());
                     JSONArray data = resp.optJSONArray("data");
-                    JSObject r = new JSObject();
-                    r.put("items", data != null ? data : new JSONArray());
-                    resolveSuccess(call, r);
+                    resolveSuccess(call, data != null ? data : new JSONArray());
                 } else {
                     resolveFailure(call, "NETWORK_UNAVAILABLE", "后端响应: " + conn.getResponseCode());
                 }
@@ -435,12 +413,16 @@ public class HappyGitPlugin extends Plugin {
         }
     }
 
+    private boolean isPersonal(String operation, JSObject payload) {
+        return operation.matches("^(account\\.|sync\\.|repositories\\.|stars\\.|history\\.).*") || ("github.request".equals(operation) && !"searchTrending".equals(payload.optString("resource")));
+    }
+
     private boolean isSafeGitHubUrl(String url) {
         try {
             Uri uri = Uri.parse(url);
             return "https".equalsIgnoreCase(uri.getScheme()) &&
                     "github.com".equalsIgnoreCase(uri.getHost()) &&
-                    uri.getUserInfo() == null;
+                    uri.getUserInfo() == null && (uri.getPort() == -1 || uri.getPort() == 443);
         } catch (Exception e) {
             return false;
         }

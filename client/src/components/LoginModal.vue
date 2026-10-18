@@ -1,5 +1,5 @@
 <template>
-  <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+  <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
     <div class="w-full max-w-sm bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-2xl relative text-center">
       <!-- GitHub Logo -->
       <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-zinc-800 border border-zinc-700/60 flex items-center justify-center shadow-lg">
@@ -8,8 +8,10 @@
         </svg>
       </div>
 
-      <h3 class="text-xl font-bold text-white mb-1">登录 HappyGit</h3>
-      <p class="text-xs text-zinc-400 mb-6">使用 GitHub 账号登录，同步您的开源项目与个性化推荐画像</p>
+      <h3 class="text-xl font-bold text-white mb-1">欢迎来到 HappyGit</h3>
+      <p class="text-xs text-zinc-400 mb-5 leading-relaxed">
+        使用 GitHub 账号登录可同步公开开源项目，享受专属推荐画像与历史记录
+      </p>
 
       <!-- Input GitHub Username -->
       <div class="mb-4 text-left">
@@ -23,19 +25,29 @@
         />
       </div>
 
-      <!-- Action Button -->
+      <!-- Action Button 1: Login -->
       <button
         @click="handleLogin"
         :disabled="loading"
-        class="w-full py-3 rounded-xl font-medium text-sm text-white bg-gradient-to-r from-rose-500 to-amber-500 shadow-lg shadow-rose-500/20 hover:opacity-90 active:scale-98 transition flex items-center justify-center gap-2"
+        class="w-full py-3 rounded-xl font-medium text-sm text-white bg-gradient-to-r from-rose-500 to-amber-500 shadow-lg shadow-rose-500/20 hover:opacity-90 active:scale-98 transition flex items-center justify-center gap-2 mb-3"
       >
         <span v-if="loading" class="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin"></span>
-        <span>{{ loading ? '正在连接 GitHub...' : '立即使用 GitHub 登录' }}</span>
+        <span>{{ loading ? '正在连接 GitHub...' : '立即登录 GitHub' }}</span>
       </button>
 
-      <p class="text-[11px] text-zinc-500 mt-4 leading-normal">
-        本系统仅读取公开开源仓库数据，不访问私有/闭源项目与敏感权限。
-      </p>
+      <!-- Action Button 2: Skip Login (Guest Mode) -->
+      <button
+        @click="handleSkip"
+        class="w-full py-2.5 rounded-xl font-medium text-xs text-zinc-400 hover:text-white bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/60 transition flex items-center justify-center gap-1.5 active:scale-98"
+      >
+        <span>跳过登录，以游客身份浏览 ➔</span>
+      </button>
+
+      <!-- Notice -->
+      <div class="mt-4 p-2.5 rounded-xl bg-zinc-950/70 border border-zinc-800/80 text-[11px] text-zinc-500 leading-normal text-left">
+        <p class="text-zinc-400 font-medium mb-0.5">ℹ️ 游客模式提示：</p>
+        <p>可自由浏览 3 个月内热门开源项目。系统不会收集个人信息，且不提供个人多维画像、项目收藏与浏览历史记录。</p>
+      </div>
     </div>
   </div>
 </template>
@@ -47,7 +59,7 @@ const props = defineProps({
   isOpen: Boolean
 })
 
-const emit = defineEmits(['login'])
+const emit = defineEmits(['login', 'skip'])
 
 const username = ref('FanFenMo')
 const loading = ref(false)
@@ -60,5 +72,9 @@ const handleLogin = async () => {
   } finally {
     loading.value = false
   }
+}
+
+const handleSkip = () => {
+  emit('skip')
 }
 </script>

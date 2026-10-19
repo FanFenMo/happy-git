@@ -36,7 +36,7 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
           </div>
-          <span class="text-xs">热门项目</span>
+          <span class="text-xs">发现</span>
         </button>
 
         <!-- 我的 Tab -->

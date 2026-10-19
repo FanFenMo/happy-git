@@ -51,6 +51,9 @@ fs.cpSync(path.join(rootDir, 'dist'), path.join(appDir, 'dist'), { recursive: tr
 // 复制 electron 主进程代码
 fs.cpSync(path.join(rootDir, 'electron'), path.join(appDir, 'electron'), { recursive: true })
 
+// 复制 shared 模块 (契约、路由、推荐算法与规范化模型)
+fs.cpSync(path.join(rootDir, 'shared'), path.join(appDir, 'shared'), { recursive: true })
+
 // 生成精简的生产配置 package.json
 const prodPkg = {
   name: 'happygit-client',

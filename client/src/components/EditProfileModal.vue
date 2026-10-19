@@ -132,7 +132,7 @@ const openGitHubSettings = async () => {
 }
 
 const handleSave = async () => {
-  await userStore.saveManualTags(tagsInput.value)
+  await userStore.saveManualTags(previewTags.value)
   emit('close')
 }
 </script>

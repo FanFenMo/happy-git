@@ -1,54 +1,125 @@
+/**
+ * client/src/stores/user.js
+ * 当前会话、账号资料与集合同步状态管理 (依据 project.md 第四节、第五节与第十一节)
+ */
+
 import { defineStore } from 'pinia'
-import { initializeApplication, startLogin as apiStartLogin, pollLogin as apiPollLogin,
-  cancelLogin as apiCancelLogin, logout as apiLogout, forgetCurrentAccount as apiForgetCurrentAccount,
-  saveModeSetting } from '../services/auth'
-import { syncProfile, syncRepositoryCollection, loadRepositoryPage, loadAllRepositories,
-  setStar as apiSetStar, deriveInterestTags, saveInterestPreferences, resetAccountTasks } from '../services/account'
+import {
+  initializeApplication,
+  beginLogin as apiBeginLogin,
+  getLoginTask as apiGetLoginTask,
+  cancelLogin as apiCancelLogin,
+  logout as apiLogout,
+  forgetCurrentAccount as apiForgetCurrentAccount
+} from '../services/session'
+import {
+  readAccountSnapshot,
+  syncAccount as apiSyncAccount,
+  readTask as apiReadTask,
+  cancelTask as apiCancelTask,
+  listRepositories,
+  loadAllRepositories,
+  setStar as apiSetStar,
+  savePreferences as apiSavePreferences
+} from '../services/account'
 import { useHistoryStore } from './history'
 import { nativeBridge } from '../platform'
 
-const emptySync = () => ({ status: 'idle', loadedCount: 0, complete: false, lastSyncedAt: null, errorCode: null, retryAt: null })
-const emptyPage = () => ({ nextOffset: null, total: null, loading: false })
-const emptyPreferences = () => ({ historyEnabled: false, manualTags: [] })
+const emptySync = () => ({
+  status: 'idle',
+  loadedCount: 0,
+  complete: false,
+  lastSyncedAt: null,
+  errorCode: null,
+  retryAt: null
+})
+
+const emptyPage = () => ({
+  nextOffset: null,
+  total: null,
+  loading: false
+})
+
+const emptyPreferences = () => ({
+  historyEnabled: true,
+  manualTags: []
+})
 
 export const useUserStore = defineStore('user', {
   state: () => ({
-    session: { status: 'guest', accountId: null, contextId: null, profile: null, verifiedAt: null },
-    sessionEpoch: 0, loginSequence: 0, bootStatus: 'starting', authStage: 'idle', authError: null,
-    loginChallenge: null, preferences: emptyPreferences(), repos: [], stars: [],
-    interestRepos: [], interestStars: [], repoSync: emptySync(), starSync: emptySync(),
-    repoPage: emptyPage(), starPage: emptyPage(), starPendingByRepo: {}, refreshing: false
+    session: {
+      status: 'guest',
+      accountId: null,
+      contextId: null,
+      profile: null,
+      verifiedAt: null
+    },
+    sessionEpoch: 0,
+    loginSequence: 0,
+    loginChallenge: null,
+    bootStatus: 'starting',
+    authStage: 'idle', // 'idle' | 'opening' | 'waiting' | 'verifying'
+    authError: null,
+    activeLoginTaskId: null,
+    preferences: emptyPreferences(),
+    repos: [],
+    stars: [],
+    interestRepos: [],
+    interestStars: [],
+    repoSync: emptySync(),
+    starSync: emptySync(),
+    repoPage: emptyPage(),
+    starPage: emptyPage(),
+    starPendingByRepo: {},
+    refreshing: false,
+    activeSyncTaskId: null
   }),
+
   getters: {
-    hasAccount: state => Boolean(state.session.accountId),
-    isGuest: state => state.session.status === 'guest',
-    isOffline: state => state.session.status === 'offline',
-    needsReauth: state => state.session.status === 'reauthRequired',
-    canWriteGitHub: state => state.session.status === 'authenticated' && state.authStage === 'idle',
-    canRecordHistory: state => state.authStage === 'idle' && state.preferences.historyEnabled && ['authenticated', 'offline'].includes(state.session.status),
-    profile: state => state.session.profile,
-    interestTags: state => deriveInterestTags(state.interestRepos, state.interestStars, state.preferences.manualTags)
+    hasAccount: (state) => Boolean(state.session.accountId),
+    isGuest: (state) => state.session.status === 'guest',
+    isOffline: (state) => state.session.status === 'offline',
+    needsReauth: (state) => state.session.status === 'reauth_required',
+    canWriteGitHub: (state) => state.session.status === 'authenticated' && state.authStage === 'idle',
+    canRecordHistory: (state) => state.preferences.historyEnabled && ['authenticated', 'offline'].includes(state.session.status),
+    profile: (state) => state.session.profile,
+    manualTags: (state) => state.preferences.manualTags || [],
+    interestTags: (state) => state.preferences.manualTags || []
   },
+
   actions: {
     applySession(session) {
-      resetAccountTasks()
       this.sessionEpoch++
-      this.session = session
-      nativeBridge.setContext(session.contextId)
-      this.repos = []; this.stars = []; this.interestRepos = []; this.interestStars = []
+      this.session = session || { status: 'guest', accountId: null, contextId: null, profile: null, verifiedAt: null }
+      if (session?.contextId) {
+        nativeBridge.setContext(session.contextId)
+      }
+      this.repos = []
+      this.stars = []
       this.preferences = emptyPreferences()
-      this.repoSync = emptySync(); this.starSync = emptySync()
-      this.repoPage = emptyPage(); this.starPage = emptyPage()
-      this.starPendingByRepo = {}; this.refreshing = false
+      this.repoSync = emptySync()
+      this.starSync = emptySync()
+      this.repoPage = emptyPage()
+      this.starPage = emptyPage()
+      this.starPendingByRepo = {}
+      this.refreshing = false
+      this.activeSyncTaskId = null
       useHistoryStore().reset()
     },
+
     async initialize() {
-      nativeBridge.onAuthRequired = () => { if (this.hasAccount) this.session.status = 'reauthRequired' }
+      nativeBridge.onAuthRequired = () => {
+        if (this.hasAccount) this.session.status = 'reauth_required'
+      }
+
       try {
         const data = await initializeApplication()
         this.applySession(data.session)
         this.bootStatus = 'ready'
-        if (this.hasAccount) await this.loadCurrentAccountData()
+
+        if (this.hasAccount) {
+          await this.loadCurrentAccountData()
+        }
         return { mode: data.mode, shouldPromptLogin: data.shouldPromptLogin }
       } catch (error) {
         this.bootStatus = 'storageError'
@@ -56,154 +127,253 @@ export const useUserStore = defineStore('user', {
         return { mode: 'unset', shouldPromptLogin: false }
       }
     },
+
     async loadCurrentAccountData() {
       if (!this.hasAccount) return
       const epoch = this.sessionEpoch
-      const snapshot = await nativeBridge.invoke('account.readSnapshot')
-      if (epoch !== this.sessionEpoch) return
-      if (!snapshot.ok) throw new Error(snapshot.error?.message || '读取账号数据失败')
-      const snap = snapshot.data
-      if (snap.profile) this.session.profile = snap.profile
-      this.preferences = snap.preferences || emptyPreferences()
-      this.repoSync = { ...emptySync(), ...snap.repoSync }
-      this.starSync = { ...emptySync(), ...snap.starSync }
-      await Promise.all([this.loadCollection('repos'), this.loadCollection('stars'), useHistoryStore().initializeForCurrentAccount()])
-      if (epoch !== this.sessionEpoch) return
-      if (this.session.status === 'authenticated' && [this.repoSync, this.starSync].some(sync => !sync.complete || Date.now() - (sync.lastSyncedAt || 0) > 300000))
-        this.refreshAccountData().catch(error => { if (epoch === this.sessionEpoch) this.authError = error.message })
+
+      try {
+        const snap = await readAccountSnapshot()
+        if (epoch !== this.sessionEpoch) return
+
+        if (snap.profile) this.session.profile = snap.profile
+        this.preferences = snap.preferences || emptyPreferences()
+        this.repoSync = { ...emptySync(), ...snap.repoSync }
+        this.starSync = { ...emptySync(), ...snap.starSync }
+
+        await Promise.all([
+          this.loadCollection('repos'),
+          this.loadCollection('stars'),
+          useHistoryStore().initializeForCurrentAccount()
+        ])
+
+        if (epoch !== this.sessionEpoch) return
+
+        // 若尚未同步过或同步不完整，触发低优先级同步
+        if (this.session.status === 'authenticated' && (!this.repoSync.complete || !this.starSync.complete)) {
+          this.refreshAccountData().catch(err => {
+            if (epoch === this.sessionEpoch) this.authError = err.message
+          })
+        }
+      } catch (err) {
+        console.warn('[UserStore] 读取账号快照失败:', err.message)
+      }
     },
+
     async loadCollection(kind, more = false) {
       const epoch = this.sessionEpoch
       const pageKey = kind === 'repos' ? 'repoPage' : 'starPage'
       const current = this[pageKey]
       if (current.loading || (more && current.nextOffset === null)) return
+
       current.loading = true
       try {
-        const page = await loadRepositoryPage(kind, more ? current.nextOffset : 0, 30)
+        const offset = more ? current.nextOffset : 0
+        const page = await listRepositories(kind, offset, 30)
         if (epoch !== this.sessionEpoch) return
+
         this[kind] = more ? [...this[kind], ...page.items] : page.items
-        this[pageKey] = { total: page.total, nextOffset: page.nextOffset, loading: false }
+        this[pageKey] = {
+          total: page.total,
+          nextOffset: page.nextOffset,
+          loading: false
+        }
         if (!more) {
           const all = await loadAllRepositories(kind)
           if (epoch === this.sessionEpoch) this[kind === 'repos' ? 'interestRepos' : 'interestStars'] = all
         }
-      } finally { if (epoch === this.sessionEpoch) this[pageKey].loading = false }
+      } finally {
+        if (epoch === this.sessionEpoch) this[pageKey].loading = false
+      }
     },
-    async startLogin() {
+
+    async startLogin(intent = 'login') {
       const sequence = ++this.loginSequence
-      this.authStage = 'requesting'; this.authError = null
+      this.authStage = 'opening'
+      this.authError = null
+
       try {
-        const previous = this.loginChallenge?.challengeId
-        this.loginChallenge = null
-        await apiCancelLogin(previous)
+        const { loginTaskId, state } = await apiBeginLogin(intent)
         if (sequence !== this.loginSequence) return
-        const challenge = await apiStartLogin()
-        if (sequence !== this.loginSequence) { await apiCancelLogin(challenge.challengeId); return }
-        this.loginChallenge = challenge
-        this.authStage = 'waiting'
-        const opened = await nativeBridge.invoke('external.open', { url: challenge.authorizationUrl })
-        if (sequence !== this.loginSequence) return
-        if (!opened.ok) this.authError = '浏览器未打开，请点击下方按钮重试'
-        this.pollLoginStatus(challenge.challengeId, sequence, challenge.intervalMs || 1500)
-        return challenge
+
+        this.activeLoginTaskId = loginTaskId
+        this.authStage = state || 'waiting'
+
+        // 轮询本地登录任务状态 (每 1000ms 一次，任务结束立即终止)
+        this.pollLoginStatus(loginTaskId, sequence)
       } catch (error) {
-        if (sequence === this.loginSequence) { this.authStage = 'idle'; this.authError = error.message }
+        if (sequence === this.loginSequence) {
+          this.authStage = 'idle'
+          this.authError = error.message
+        }
         throw error
       }
     },
-    async pollLoginStatus(id, sequence, intervalMs) {
-      let nextPollAt = Date.now() + intervalMs
-      const active = () => sequence === this.loginSequence && this.loginChallenge?.challengeId === id
+
+    async pollLoginStatus(taskId, sequence, intervalMs = 1000) {
+      const active = () =>
+        sequence === this.loginSequence &&
+        (!this.activeLoginTaskId || this.activeLoginTaskId === taskId || this.loginChallenge?.challengeId === taskId)
+
       while (active()) {
-        await new Promise(resolve => setTimeout(resolve, Math.max(0, nextPollAt - Date.now())))
+        await new Promise(r => setTimeout(r, intervalMs))
         if (!active()) return
+
         try {
-          const progress = await apiPollLogin(id)
+          const task = await apiGetLoginTask(taskId)
           if (!active()) return
-          if (progress.state === 'authenticated') {
+
+          if (!task || !task.state) {
+            this.authStage = 'idle'
+            this.activeLoginTaskId = null
+            this.loginChallenge = null
+            return
+          }
+
+          if (task.state === 'authenticated' && task.session) {
             this.authStage = 'verifying'
-            this.applySession(progress.session)
-            this.loginChallenge = null; this.authStage = 'idle'; this.authError = null
+            this.applySession(task.session)
+            this.authStage = 'idle'
+            this.authError = null
+            this.activeLoginTaskId = null
+            this.loginChallenge = null
             await this.loadCurrentAccountData()
             return
           }
-          if (['pending', 'slowDown'].includes(progress.state)) { nextPollAt = progress.nextPollAt || Date.now() + intervalMs; continue }
-          this.authError = progress.state === 'expired' ? '授权已过期，请重新登录' : progress.state === 'denied' ? '已取消 GitHub 授权' : '授权未完成，请重新登录'
-          this.authStage = 'idle'; this.loginChallenge = null
-          return
-        } catch (error) {
-          if (active()) { this.authStage = 'idle'; this.authError = error.message; this.loginChallenge = null }
+
+          if (task.state === 'cancelled') {
+            this.authStage = 'idle'
+            this.activeLoginTaskId = null
+            this.loginChallenge = null
+            return
+          }
+
+          if (task.state === 'failed') {
+            this.authStage = 'idle'
+            this.authError = task.error?.message || '登录失败，请重试'
+            this.activeLoginTaskId = null
+            this.loginChallenge = null
+            return
+          }
+
+          this.authStage = task.state // 'waiting' or 'verifying'
+        } catch (err) {
+          if (active()) {
+            this.authStage = 'idle'
+            this.authError = err.message
+            this.activeLoginTaskId = null
+            this.loginChallenge = null
+          }
           return
         }
       }
     },
+
     async cancelLogin() {
       this.loginSequence++
-      const id = this.loginChallenge?.challengeId
-      this.loginChallenge = null; this.authStage = 'idle'; this.authError = null
-      await apiCancelLogin(id)
+      const taskId = this.activeLoginTaskId
+      this.activeLoginTaskId = null
+      this.authStage = 'idle'
+      this.authError = null
+      if (taskId) {
+        await apiCancelLogin(taskId).catch(() => {})
+      }
     },
+
     async handleSkipLogin() {
       await this.cancelLogin()
-      if (!this.hasAccount) await saveModeSetting('guest')
     },
+
     async logout() {
       await this.cancelLogin()
       const session = await apiLogout()
       this.applySession(session)
     },
+
     async forgetAccount() {
       await this.cancelLogin()
       const session = await apiForgetCurrentAccount()
       this.applySession(session)
     },
-    async refreshAccountData() {
-      if (!this.hasAccount || this.session.status !== 'authenticated' || this.refreshing) return
-      const epoch = this.sessionEpoch
+
+    async refreshAccountData(force = false) {
+      if (!this.hasAccount || this.refreshing) return
       this.refreshing = true
-      this.repoSync.status = 'loading'; this.starSync.status = 'loading'
+      this.repoSync.status = 'loading'
+      this.starSync.status = 'loading'
+
       try {
-        const results = await Promise.allSettled([syncProfile(), syncRepositoryCollection('repos', { login: this.profile?.login }), syncRepositoryCollection('stars')])
-        if (epoch !== this.sessionEpoch) return
-        if (results[0].status === 'fulfilled') this.session.profile = results[0].value
-        for (const [index, kind, syncKey] of [[1, 'repos', 'repoSync'], [2, 'stars', 'starSync']]) {
-          const result = results[index]
-          if (result.status === 'fulfilled' && !result.value.aborted) {
-            this[syncKey] = { ...emptySync(), ...result.value, status: 'ready' }
-            await this.loadCollection(kind)
-          } else if (result.status === 'rejected') {
-            this[syncKey] = { ...this[syncKey], status: 'error', errorCode: result.reason.code || 'SYNC_FAILED', retryAt: result.reason.retryAt || null }
-          } else this[syncKey].status = 'idle'
-          if (epoch !== this.sessionEpoch) return
+        const { taskId } = await apiSyncAccount(['profile', 'repos', 'stars'], force)
+        this.activeSyncTaskId = taskId
+
+        // 轮询同步进度
+        const poll = async () => {
+          if (!this.activeSyncTaskId || this.activeSyncTaskId !== taskId) return
+          try {
+            const task = await apiReadTask(taskId)
+            if (!task || task.isEnded) {
+              this.refreshing = false
+              this.activeSyncTaskId = null
+              await this.loadCollection('repos')
+              await this.loadCollection('stars')
+              const snap = await readAccountSnapshot()
+              this.repoSync = { ...emptySync(), ...snap.repoSync }
+              this.starSync = { ...emptySync(), ...snap.starSync }
+              if (snap.profile) this.session.profile = snap.profile
+              return
+            }
+            setTimeout(poll, 1000)
+          } catch (_) {
+            this.refreshing = false
+            this.activeSyncTaskId = null
+          }
         }
-      } finally { if (epoch === this.sessionEpoch) this.refreshing = false }
+        setTimeout(poll, 1000)
+      } catch (err) {
+        this.refreshing = false
+        this.authError = err.message
+      }
     },
-    async setStar(repository, starred) {
-      if (!this.canWriteGitHub) return { success: false, error: '请登录 GitHub 后重试' }
-      const id = repository.repoId, epoch = this.sessionEpoch
-      if (this.starPendingByRepo[id]) return { success: false, error: '正在更新，请稍候' }
+
+    async setStar(repository, desiredStarred) {
+      if (!this.canWriteGitHub) {
+        return { confirmed: false, error: '请登录 GitHub 后操作' }
+      }
+
+      const id = repository.repoId || repository.canonicalKey
+      if (this.starPendingByRepo[id]) {
+        return { confirmed: false, error: '正在操作中，请稍候' }
+      }
+
       this.starPendingByRepo[id] = true
       try {
-        const result = await apiSetStar(repository, starred)
-        if (epoch !== this.sessionEpoch) return { success: false, error: '账号已变化' }
-        if (result.success && result.cacheSaved) {
+        const result = await apiSetStar(repository, desiredStarred)
+        if (result.confirmed) {
           await this.loadCollection('stars')
-          const snap = await nativeBridge.invoke('account.readSnapshot')
-          if (epoch === this.sessionEpoch && snap.ok) this.starSync = { ...this.starSync, ...snap.data.starSync }
+          const snap = await readAccountSnapshot()
+          this.starSync = { ...this.starSync, ...snap.starSync }
         }
         return result
-      } finally { if (epoch === this.sessionEpoch) this.starPendingByRepo[id] = false }
+      } finally {
+        this.starPendingByRepo[id] = false
+      }
     },
+
     async setHistoryEnabled(enabled) {
-      const epoch = this.sessionEpoch
-      const res = await nativeBridge.invoke('account.savePreferences', { historyEnabled: enabled, manualTags: this.preferences.manualTags })
-      if (!res.ok) throw new Error(res.error?.message || '保存历史设置失败')
-      if (epoch === this.sessionEpoch) this.preferences.historyEnabled = enabled
+      await apiSavePreferences({
+        historyEnabled: enabled,
+        manualTags: this.preferences.manualTags
+      })
+      this.preferences.historyEnabled = enabled
     },
+
     async saveManualTags(tags) {
-      const epoch = this.sessionEpoch, saved = await saveInterestPreferences(tags)
-      if (epoch === this.sessionEpoch) this.preferences.manualTags = saved
-      return saved
+      await apiSavePreferences({
+        historyEnabled: this.preferences.historyEnabled,
+        manualTags: tags
+      })
+      this.preferences.manualTags = tags
+      return tags
     }
   }
 })

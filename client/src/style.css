@@ -4,20 +4,20 @@
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   color-scheme: dark;
 
-  /* 统一语义色板 (project.md 规定) */
-  --color-bg: #0E1116;
-  --color-surface: #161B22;
-  --color-surface-raised: #1E252E;
-  --color-border: #303947;
-  --color-text: #EEF1F5;
-  --color-text-muted: #A5AEBB;
-  --color-text-subtle: #8793A5;
-  --color-primary: #F47768;
-  --color-primary-hover: #FF8B7D;
-  --color-on-primary: #1A1413;
-  --color-star: #DDB66B;
-  --color-success: #67B89A;
-  --color-danger: #F09595;
+  /* 统一语义色板 (project.md 第十节规定) */
+  --color-bg: #10151D;
+  --color-surface: #19222D;
+  --color-surface-raised: #222E3C;
+  --color-border: #354559;
+  --color-text: #F1F5FA;
+  --color-text-muted: #B3BFCE;
+  --color-text-subtle: #8E9EB2;
+  --color-primary: #EFA08D;
+  --color-primary-hover: #F7B19F;
+  --color-on-primary: #211B1B;
+  --color-star: #E3BE73;
+  --color-success: #85C6AC;
+  --color-danger: #EDAAA9;
 }
 
 body {

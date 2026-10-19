@@ -25,14 +25,15 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="happygit" android:host="oauth" android:path="/complete" />
-            </intent-filter>
 
         </activity>
+
+        <!-- 独立原生 GitHub 网页登录窗口 (无 Capacitor 桥，隔离运行) -->
+        <activity
+            android:name=".GitHubLoginActivity"
+            android:theme="@style/AppTheme.NoActionBar"
+            android:exported="false"
+            android:configChanges="orientation|screenSize" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

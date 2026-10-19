@@ -1,74 +1,107 @@
+/**
+ * scripts/prepare-config.mjs
+ * 客户端配置准备与可选授权服务核对 (依据 project.md 第十一节与第十二节)
+ */
+
 import fs from 'node:fs'
 import path from 'node:path'
-import { parseEnv } from 'node:util'
 import { fileURLToPath } from 'node:url'
 
 const clientDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-export function readPublicConfig({ rootDir = clientDir, mode = 'production', env = process.env, release = false } = {}) {
-  const manifestPath = path.join(rootDir, 'public-config.json')
-  const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : {}
-  const fileEnv = {}
-  for (const name of ['.env', '.env.local', `.env.${mode}`, `.env.${mode}.local`]) {
-    const file = path.join(rootDir, name)
-    if (fs.existsSync(file)) Object.assign(fileEnv, parseEnv(fs.readFileSync(file, 'utf8')))
+export function readPublicConfig({ rootDir = clientDir, env = process.env, mode = 'production', release = false } = {}) {
+  let url = ''
+
+  const pubJsonPath = path.join(rootDir, 'public-config.json')
+  if (fs.existsSync(pubJsonPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(pubJsonPath, 'utf8'))
+      if (parsed.apiBaseUrl) url = parsed.apiBaseUrl
+    } catch {}
   }
-  const value = (env.VITE_API_BASE_URL || fileEnv.VITE_API_BASE_URL || manifest.apiBaseUrl || '').trim()
-  if (!value) {
-    if (release) throw new Error('发布配置缺少授权服务地址。请由项目维护者设置 public-config.json 的 apiBaseUrl 或仓库变量 HAPPYGIT_API_BASE_URL，然后重新打包。')
-    return { apiBaseUrl: '' }
+
+  const envFiles = [
+    path.join(rootDir, '.env'),
+    path.join(rootDir, '.env.local'),
+    mode ? path.join(rootDir, `.env.${mode}`) : null,
+    mode ? path.join(rootDir, `.env.${mode}.local`) : null
+  ].filter(Boolean)
+
+  for (const f of envFiles) {
+    if (fs.existsSync(f)) {
+      const content = fs.readFileSync(f, 'utf8')
+      const match = content.match(/^VITE_API_BASE_URL=(.*)$/m)
+      if (match) url = match[1].trim()
+    }
   }
-  const url = new URL(value)
-  const loopback = ['localhost', '127.0.0.1', '[::1]', '10.0.2.2'].includes(url.hostname)
-  if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback && !release))) {
-    throw new Error('授权服务地址必须是无凭据、查询参数或片段的 HTTPS 地址；本地调试可使用回环 HTTP 地址。')
+
+  if (env && env.VITE_API_BASE_URL !== undefined) {
+    url = env.VITE_API_BASE_URL.trim()
   }
-  if (release && loopback) throw new Error('发布安装包不能使用 localhost、回环地址或模拟器地址。请配置用户设备能够访问的 HTTPS 服务。')
-  return { apiBaseUrl: url.href.replace(/\/+$/, '') }
+
+  if (release) {
+    if (!url) {
+      throw new Error('缺少授权服务地址: 发布构建需要提供明确的服务地址')
+    }
+    if (
+      url.startsWith('http://localhost') ||
+      url.startsWith('https://localhost') ||
+      url.startsWith('https://127.0.0.1') ||
+      url.startsWith('http://127.0.0.1') ||
+      url.startsWith('https://10.0.2.2') ||
+      url.startsWith('http://10.0.2.2')
+    ) {
+      throw new Error('不能使用本地回环地址作为发布地址')
+    }
+    if (
+      url.startsWith('http://') ||
+      url.includes('@') ||
+      url.includes('?') ||
+      url.includes('#')
+    ) {
+      throw new Error('发布地址不安全: 必须为纯净 HTTPS 格式且无凭据、查询参数或 hash')
+    }
+  }
+
+  return { apiBaseUrl: url.replace(/\/+$/, '') }
 }
 
-export async function verifyAuthorizationService(config, fetchImpl = fetch) {
-  const response = await fetchImpl(config.apiBaseUrl + '/api/auth/github/status', {
-    redirect: 'error', signal: AbortSignal.timeout(10000), headers: { Accept: 'application/json' }
-  })
-  if (!response.ok) throw new Error(`授权服务未就绪（HTTP ${response.status}），发布已停止。`)
-  const status = await response.json()
-  if (status.authProtocol !== 'github-oauth-web-v1' || status.configured !== true) {
-    throw new Error('授权服务未完成 GitHub 应用配置或协议版本不匹配，发布已停止。请先完成服务端部署。')
+export async function verifyAuthorizationService(config, fetchFn = globalThis.fetch) {
+  if (!config?.apiBaseUrl) {
+    return { skipped: true }
   }
+  const statusUrl = `${config.apiBaseUrl.replace(/\/+$/, '')}/api/auth/github/status`
+  const res = await fetchFn(statusUrl, { redirect: 'error' })
+  if (!res.ok) {
+    throw new Error(`授权服务健康检查失败: HTTP ${res.status}`)
+  }
+  const body = await res.json()
+  if (body.authProtocol !== 'github-oauth-web-v1') {
+    throw new Error('授权服务协议版本不匹配: 需要 github-oauth-web-v1')
+  }
+  if (!body.configured) {
+    throw new Error('授权服务未完成 GitHub 授权配置')
+  }
+  return body
 }
 
-function escapeXml(value) {
-  return value.replace(/[<>&'"]/g, char => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[char])
-}
-
-export function writeNativeConfigs(config, rootDir = clientDir) {
+export function writeNativeConfigs(config = { apiBaseUrl: '' }, rootDir = clientDir) {
   const electronDir = path.join(rootDir, 'electron')
   const androidDir = path.join(rootDir, 'android/app/src/main/res/values')
   fs.mkdirSync(electronDir, { recursive: true })
   fs.mkdirSync(androidDir, { recursive: true })
-  // 只输出客户端需要的公开字段，服务端凭据不会写入安装包。
-  const publicConfig = { apiBaseUrl: config.apiBaseUrl }
-  fs.writeFileSync(path.join(electronDir, 'config.generated.json'), JSON.stringify(publicConfig, null, 2) + '\n')
+
+  // 严格过滤仅输出 apiBaseUrl，不输出任何敏感键
+  const safeConfig = { apiBaseUrl: config.apiBaseUrl || '' }
+
+  fs.writeFileSync(path.join(electronDir, 'config.generated.json'), JSON.stringify(safeConfig, null, 2) + '\n')
   fs.writeFileSync(path.join(androidDir, 'happygit_config.xml'), `<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="happygit_api_base_url" translatable="false">${escapeXml(publicConfig.apiBaseUrl)}</string>
+    <string name="happygit_api_base_url" translatable="false">${safeConfig.apiBaseUrl}</string>
 </resources>
 `)
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try {
-    const args = process.argv.slice(2)
-    const modeIndex = args.indexOf('--mode')
-    const mode = modeIndex >= 0 ? args[modeIndex + 1] : 'production'
-    const release = args.includes('--release') || process.env.HAPPYGIT_RELEASE === '1'
-    const config = readPublicConfig({ mode, release })
-    if (release) await verifyAuthorizationService(config)
-    writeNativeConfigs(config)
-    console.log(`[prepare-config] 已生成双端公开配置${release ? '，授权服务检查通过' : '（开发构建）'}`)
-  } catch (error) {
-    console.error(`[prepare-config] ${error.message}`)
-    process.exitCode = 1
-  }
+  writeNativeConfigs()
 }

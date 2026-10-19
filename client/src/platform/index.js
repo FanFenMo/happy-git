@@ -33,7 +33,7 @@ export const nativeBridge = {
       result = await androidAdapter.invoke(operation, payload, contextId)
     }
     if (result) {
-      const personal = /^(account\.|sync\.|repositories\.|stars\.|history\.)/.test(operation) || (operation === 'github.request' && payload.resource !== 'searchTrending')
+      const personal = /^(account\.|sync\.|repositories\.|stars\.|history\.|recommendation\.)/.test(operation) || (operation === 'github.request' && payload.resource !== 'searchTrending')
       if (personal && contextId !== this.contextId) return { ok: false, error: { code: 'SESSION_CHANGED', message: '账号已变化' } }
       if (result.error?.code === 'AUTH_REQUIRED' && contextId === this.contextId) this.onAuthRequired?.()
       return result

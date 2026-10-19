@@ -37,4 +37,6 @@ Star 与取消 Star 分别调用 GitHub `PUT /user/starred/{owner}/{repo}` 和 `
 
 反向代理应对授权接口限制请求频率，关闭回调查询参数日志和授权请求体日志，并将全部 `/api/auth/github/*` 请求固定转发到同一后端实例。当前临时授权状态保存在单实例内存中，不适合无会话亲和的多实例部署。生产环境只暴露 HTTPS，不向公网直接暴露开发端口。
 
+部署依据：[Caddy 自动 HTTPS](https://caddyserver.com/docs/automatic-https)、[Compose 环境变量](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/)。
+
 配置依据：[GitHub 网页授权](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps)、[Star REST 接口](https://docs.github.com/en/rest/activity/starring)。

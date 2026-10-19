@@ -56,7 +56,12 @@ public class HappyGitPlugin extends Plugin {
                 } else dispatch(operation, payload, contextId, call);
             } catch (Exception e) {
                 e.printStackTrace();
-                resolveFailure(call, e.getMessage() != null && e.getMessage().matches("(AUTH_|CONFIG_|SYNC_|SESSION_|STORAGE_).*" ) ? e.getMessage() : "INTERNAL_ERROR", e.getMessage() != null ? e.getMessage() : "原生插件内部错误");
+                String code = e.getMessage() != null && e.getMessage().matches("(AUTH_|CONFIG_|SYNC_|SESSION_|STORAGE_).*" ) ? e.getMessage() : "INTERNAL_ERROR";
+                String message = "CONFIG_MISSING".equals(code) || "CONFIG_INVALID".equals(code)
+                        ? "此版本的登录服务尚未就绪，请更新应用或联系维护者"
+                        : "AUTH_SERVICE_ERROR".equals(code) ? "登录服务暂不可用，请稍后重试"
+                        : e.getMessage() != null ? e.getMessage() : "原生插件内部错误";
+                resolveFailure(call, code, message);
             }
         });
     }

@@ -40,7 +40,7 @@ function clearCredentials() {
   contextId = newContext()
 }
 async function broker(endpoint, body, signal) {
-  if (!apiBaseUrl) throw failure('CONFIG_MISSING', '请先配置 GitHub 授权服务地址')
+  if (!apiBaseUrl) throw failure('CONFIG_MISSING', '此版本的登录服务尚未就绪，请更新应用或联系维护者')
   const url = new URL(apiBaseUrl)
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
     throw failure('CONFIG_INVALID', '授权服务必须使用 HTTPS')
@@ -50,7 +50,7 @@ async function broker(endpoint, body, signal) {
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000)
   })
   if (!response.ok) throw failure(response.status === 401 ? 'AUTH_REQUIRED' : 'AUTH_SERVICE_ERROR',
-    response.status === 503 ? '服务端尚未配置 GitHub 网页授权' : 'GitHub 授权服务请求失败，请重试')
+    response.status === 503 ? '登录服务暂不可用，请稍后重试' : 'GitHub 授权服务请求失败，请重试')
   return response.json()
 }
 async function beginAuthorization() {

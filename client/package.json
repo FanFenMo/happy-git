@@ -8,7 +8,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "prebuild": "node scripts/prepare-config.mjs",
-    "dev": "node scripts/prepare-config.mjs && vite",
+    "dev": "node scripts/prepare-config.mjs --mode development && vite",
     "build": "vite build",
     "preview": "vite preview",
     "build:win": "node scripts/build-win.mjs",
@@ -16,7 +16,8 @@
     "cap:sync": "npm run build && cap sync",
     "cap:android": "npm run build && cap add android",
     "cap:ios": "npm run build && cap add ios",
-    "test": "node scripts/run-tests.mjs"
+    "test": "node scripts/run-tests.mjs",
+    "build:release": "node scripts/build-release.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

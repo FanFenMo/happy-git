@@ -27,7 +27,7 @@ const {
 } = require('./auth.cjs')
 
 // 读取构建时生成的受控公开配置
-let publicConfig = { githubClientId: '', apiBaseUrl: '' }
+let publicConfig = { apiBaseUrl: '' }
 try {
   const cfgPath = path.join(__dirname, 'config.generated.json')
   if (fs.existsSync(cfgPath)) {

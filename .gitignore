@@ -62,3 +62,9 @@ ios/.symlinks
 # OS files
 Thumbs.db
 [Ee]xpress/
+
+# Server deployment credentials
+deploy/.env
+server/.env
+server/.env.*
+!server/.env.example

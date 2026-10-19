@@ -15,7 +15,7 @@ console.log('🚀 开始打包 HappyGit Windows 原生独立桌面应用 (.exe).
 
 // 1. 确保前端产物最新
 console.log('📦 1/4 构建 Vite 前端资源...')
-execSync('npm run build', { cwd: rootDir, stdio: 'inherit' })
+execSync('npm run build:release', { cwd: rootDir, stdio: 'inherit' })
 
 // 2. 清理并准备输出目录
 console.log('📁 2/4 准备发布目录结构...')

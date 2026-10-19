@@ -16,6 +16,11 @@ public class GitHubOAuthController {
     public record Proof(String challengeId, String codeVerifier, String codeChallenge) {}
     public record Refresh(String refreshToken) {}
 
+    @GetMapping("/status")
+    public ResponseEntity<?> status() {
+        return json(Map.of("authProtocol", "github-oauth-web-v1", "configured", auth.isConfigured()));
+    }
+
     @PostMapping("/begin")
     public ResponseEntity<?> begin(@RequestBody Proof proof) { return json(auth.begin(proof.codeChallenge())); }
 

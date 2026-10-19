@@ -56,7 +56,7 @@ public class GitHubOAuthService {
     }
 
     public Map<String, Object> begin(String proof) {
-        if (clientId.isBlank() || clientSecret.isBlank() || callbackUrl.isBlank())
+        if (!isConfigured())
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "GitHub 网页授权尚未配置");
         if (proof == null || !proof.matches("[A-Za-z0-9_-]{43}"))
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "无效的授权请求");
@@ -124,6 +124,10 @@ public class GitHubOAuthService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
         return exchange(Map.of("client_id", clientId, "client_secret", clientSecret,
                 "grant_type", "refresh_token", "refresh_token", token));
+    }
+
+    public boolean isConfigured() {
+        return !clientId.isBlank() && !clientSecret.isBlank() && !callbackUrl.isBlank();
     }
 
     @Scheduled(fixedDelay = 60000)

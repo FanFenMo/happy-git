@@ -1,5 +1,7 @@
 # HappyGit 数据库软件设计说明书
 
+函数级实施设计补充（2026-10-29）：[统一契约](../design/v1/接口与数据契约.md)补齐计算输入、客户端运行状态、授权领取等表及回执字段；事务调用者见[服务端](../design/v1/服务端详细设计.md)与[客户端](../design/v1/客户端详细设计.md)详细设计。
+
 版本：2.0，2026-10-28。源码核对基线：`develop@74bf0d0`。状态：待实现设计。本文定义服务端 MySQL、HDFS 和客户端 SQLite 的数据职责及一致性；调用契约见[后端 SDD](后端SDD.md)，计算口径见[Hadoop SDD](HadoopSDD.md)，客户端使用方式见[前端 SDD](前端SDD.md)。文中的新增表和迁移均尚未执行。
 
 ## 1. 现有数据与目标分层
@@ -100,6 +102,7 @@ CREATE TABLE ingest_events (
   payload_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   payload_json JSON NULL,
   effective_at BIGINT NULL,
+  time_adjusted BOOLEAN NOT NULL DEFAULT FALSE,
   archive_batch_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
   received_at BIGINT NOT NULL,
   PRIMARY KEY (user_id, device_id, stream_epoch, device_seq),

@@ -48,6 +48,8 @@ public final class GitHubCollector {
     public List<ObjectNode> repository(String fullName) throws Exception {
         if (!fullName.matches("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")) throw new IllegalArgumentException("Expected owner/name");
         JsonNode raw = get("/repos/" + fullName, false);
+        // A credential may see private repositories: retain only a visibility tombstone.
+        if(raw.path("private").asBoolean()) return Collections.singletonList(visibilityTombstone(raw));
         ObjectNode result = Json.object().put("kind", "repository").put("schemaVersion", "1.0.0")
                 .put("repoId", raw.path("id").asText()).put("owner", raw.path("owner").path("login").asText())
                 .put("name", raw.path("name").asText()).put("fullName", raw.path("full_name").asText())
@@ -69,6 +71,11 @@ public final class GitHubCollector {
             }
         }
         return Collections.singletonList(result);
+    }
+    static ObjectNode visibilityTombstone(JsonNode raw) {
+        return Json.object().put("kind","repository").put("schemaVersion","1.0.0")
+                .put("repoId",raw.path("id").asText()).put("visibility","private")
+                .put("sourceKind","github_visibility").put("observedAt",System.currentTimeMillis());
     }
     public List<ObjectNode> collection(String login, String kind, String subjectId) throws Exception {
         if (!login.matches("[A-Za-z0-9-]{1,39}") || !(kind.equals("stars") || kind.equals("owned"))) throw new IllegalArgumentException("Invalid public collection");

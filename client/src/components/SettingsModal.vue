@@ -1,5 +1,5 @@
 <template>
-  <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in no-select">
+  <div v-if="isOpen" class="application-overlay settings-overlay fixed inset-0 z-50 no-select" role="dialog" aria-modal="true" aria-label="应用设置">
     <div class="w-full max-w-md modal-surface p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
       <!-- Header -->
       <div class="flex items-center justify-between pb-4 border-b border-[var(--color-border)] mb-4">
@@ -7,8 +7,9 @@
           <span>⚙️</span> 系统设置
         </h3>
         <button
+          aria-label="关闭应用设置"
           @click="$emit('close')"
-          class="p-1 rounded-full text-[var(--color-text-subtle)] hover:text-white hover:bg-[var(--color-surface-raised)] transition cursor-pointer"
+          class="p-1 rounded-full text-[var(--color-text-subtle)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-raised)] transition cursor-pointer"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

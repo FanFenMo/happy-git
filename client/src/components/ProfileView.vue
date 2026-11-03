@@ -1,7 +1,7 @@
 <template>
-  <div class="flex-1 flex flex-col h-full bg-[var(--color-bg)] text-[var(--color-text)] overflow-y-auto safe-area-bottom">
+  <div class="profile-page flex-1 flex flex-col text-[var(--color-text)] safe-area-bottom">
     <!-- Top Cover & Header -->
-    <div class="relative bg-gradient-to-b from-[var(--color-surface)] to-[var(--color-bg)] pt-6 px-4 pb-4 border-b border-[var(--color-border)] no-select">
+    <div class="profile-cover relative border-b border-[var(--color-border)] no-select">
       <!-- Top Utility Bar -->
       <div class="relative z-10 flex items-center justify-between mb-4">
         <div class="flex items-center gap-2 text-xs">
@@ -24,17 +24,10 @@
 
         <div class="flex items-center gap-2">
           <button
-            v-if="!userStore.hasAccount"
-            @click="$emit('open-login')"
-            class="px-3 py-1 rounded-full btn-primary text-xs !min-h-0 cursor-pointer"
-          >
-            <span>登录</span>
-          </button>
-          <button
-            v-else
+            v-if="userStore.hasAccount"
             @click="refreshData"
             :disabled="isRefreshing"
-            class="p-2 rounded-full bg-[var(--color-surface-raised)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)] text-[var(--color-text-muted)] hover:text-white transition cursor-pointer"
+            class="p-2 rounded-full bg-[var(--color-surface-raised)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition cursor-pointer"
             title="刷新个人数据"
           >
             <svg :class="['w-4 h-4', isRefreshing ? 'animate-spin text-[var(--color-primary)]' : '']" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -43,7 +36,7 @@
           </button>
           <button
             @click="$emit('open-settings')"
-            class="p-2 rounded-full bg-[var(--color-surface-raised)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)] text-[var(--color-text-muted)] hover:text-white transition cursor-pointer"
+            class="p-2 rounded-full bg-[var(--color-surface-raised)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition cursor-pointer"
             title="应用设置"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -57,7 +50,7 @@
       <!-- Reauth Notice Banner if token expired -->
       <div
         v-if="userStore.needsReauth"
-        class="relative z-10 mb-4 p-3 rounded-2xl bg-red-950/40 border border-[var(--color-danger)] flex items-center justify-between gap-3 text-xs"
+        class="relative z-10 mb-4 p-3 rounded-2xl bg-red-50 border border-[var(--color-danger)] flex items-center justify-between gap-3 text-xs"
       >
         <div class="text-[var(--color-danger)]">
           <div class="font-bold">授权已失效</div>
@@ -214,12 +207,12 @@
                 placeholder="搜索已访问仓库名称或简介..."
                 class="w-full bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl px-3 py-2 text-xs text-[var(--color-text)] focus:outline-none focus:border-[var(--color-primary)] transition"
               />
-              <span v-if="historyKeyword" @click="clearSearch" class="absolute right-2.5 top-2 text-xs text-[var(--color-text-subtle)] hover:text-white cursor-pointer">✕</span>
+              <span v-if="historyKeyword" @click="clearSearch" class="absolute right-2.5 top-2 text-xs text-[var(--color-text-subtle)] hover:text-[var(--color-text)] cursor-pointer">✕</span>
             </div>
             <button
               v-if="historyStore.items.length > 0"
               @click="confirmClearHistory"
-              class="px-2.5 py-2 text-xs text-[var(--color-danger)] hover:bg-red-950/20 rounded-xl transition cursor-pointer"
+              class="px-2.5 py-2 text-xs text-[var(--color-danger)] hover:bg-red-50 rounded-xl transition cursor-pointer"
             >
               清空
             </button>

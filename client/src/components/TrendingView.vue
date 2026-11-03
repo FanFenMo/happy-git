@@ -1,30 +1,34 @@
 <template>
-  <div class="flex-1 flex flex-col h-full bg-[var(--color-bg)] text-[var(--color-text)] overflow-hidden relative">
+  <div class="flex-1 flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] relative">
     <!-- Top Header bar -->
-    <header class="h-14 px-4 flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)]/90 backdrop-blur z-20 shrink-0 no-select">
+    <header class="feed-toolbar flex items-center justify-between bg-[var(--color-surface)] shrink-0 no-select">
       <!-- 双页签切换 -->
-      <div class="flex items-center gap-1.5 p-1 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)]">
+      <div role="tablist" aria-label="项目浏览方式" class="flex items-center gap-1.5 p-1 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)]">
         <button
+          role="tab"
+          :aria-selected="feedStore.isRecommendedTab"
           @click="switchTab('recommended')"
           :class="[
             'px-3 py-1 text-xs rounded-lg font-medium transition cursor-pointer',
             feedStore.isRecommendedTab
               ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] shadow'
-              : 'text-[var(--color-text-muted)] hover:text-white'
+              : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
           ]"
         >
-          ✨ 为你推荐
+          为你推荐
         </button>
         <button
+          role="tab"
+          :aria-selected="feedStore.isTrendingTab"
           @click="switchTab('trending')"
           :class="[
             'px-3 py-1 text-xs rounded-lg font-medium transition cursor-pointer',
             feedStore.isTrendingTab
               ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] shadow'
-              : 'text-[var(--color-text-muted)] hover:text-white'
+              : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
           ]"
         >
-          🔥 热门项目
+          热门项目
         </button>
       </div>
 
@@ -33,7 +37,7 @@
         <button
           @click="handleRefresh"
           :disabled="isLoading"
-          class="p-2 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)] text-[var(--color-text-muted)] hover:text-white transition flex items-center gap-1 text-xs cursor-pointer"
+          class="p-2 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition flex items-center gap-1 text-xs cursor-pointer"
           title="刷新列表"
         >
           <svg
@@ -50,7 +54,7 @@
     </header>
 
     <!-- Sub Header Status -->
-    <div class="px-4 py-2 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex items-center justify-between text-xs text-[var(--color-text-muted)] shrink-0 no-select">
+    <div class="feed-summary py-3 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex items-center justify-between text-xs text-[var(--color-text-muted)] shrink-0 no-select">
       <div class="flex items-center gap-2">
         <span class="w-2 h-2 rounded-full" :class="feedStore.isRecommendedTab ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-success)]'"></span>
         <span>{{ feedStore.isRecommendedTab ? '本地画像与技术标签排序' : '近 3 个月 GitHub 趋势' }}</span>
@@ -61,9 +65,9 @@
     </div>
 
     <!-- Main Content List -->
-    <div class="flex-1 overflow-y-auto p-4 space-y-3.5 safe-area-bottom">
+    <div class="feed-grid safe-area-bottom">
       <!-- Loading Skeleton -->
-      <div v-if="isLoading && currentList.length === 0" class="space-y-3">
+      <div v-if="isLoading && currentList.length === 0" class="feed-state space-y-3" role="status" aria-label="正在加载项目">
         <div v-for="i in 4" :key="i" class="p-4 rounded-2xl card-surface animate-pulse space-y-3">
           <div class="h-4 bg-[var(--color-surface-raised)] rounded w-1/3"></div>
           <div class="h-16 bg-[var(--color-surface-raised)]/60 rounded-xl"></div>
@@ -75,7 +79,7 @@
       <div
         v-for="item in currentList"
         :key="itemKey(item)"
-        class="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-text-subtle)] p-4 shadow-sm transition-all duration-200 group flex flex-col justify-between"
+        class="project-card border border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-text-subtle)] transition-colors duration-150 group flex flex-col justify-between"
       >
         <!-- 推荐理由胶囊 (若有) -->
         <div v-if="item.reasons && item.reasons.length > 0" class="mb-2 flex flex-wrap items-center gap-1.5 no-select">
@@ -113,7 +117,7 @@
         </div>
 
         <!-- Rectangular Text Summary Box -->
-        <div class="my-2.5 p-3 rounded-xl bg-[var(--color-bg)] border border-[var(--color-border)] text-xs text-[var(--color-text)] leading-relaxed font-sans selectable">
+        <div class="project-description my-2.5 text-[var(--color-text-muted)] font-sans selectable">
           <p class="line-clamp-3">
             {{ repoOf(item).description || '该开源仓库暂未提供简介，点击下方链接可在 GitHub 查阅详细源码与 README。' }}
           </p>
@@ -163,7 +167,7 @@
               :class="[
                 isRepoStarred(repoOf(item))
                   ? 'bg-amber-500/15 border-amber-500/40 text-[var(--color-star)]'
-                  : 'bg-[var(--color-surface-raised)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-white'
+                  : 'bg-[var(--color-surface-raised)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
               ]"
             >
               <span v-if="userStore.starPendingByRepo[repoOf(item).repoId || repoOf(item).canonicalKey]" class="w-3 h-3 border-2 border-[var(--color-star)] border-t-transparent rounded-full animate-spin"></span>
@@ -185,7 +189,7 @@
       </div>
 
       <!-- 加载更多推荐 (滚动分页) -->
-      <div v-if="feedStore.isRecommendedTab && feedStore.recHasMore" class="text-center py-4">
+      <div v-if="feedStore.isRecommendedTab && feedStore.recHasMore" class="feed-state text-center py-4">
         <button
           @click="feedStore.loadMoreRecommendations"
           :disabled="feedStore.recLoading"
@@ -196,8 +200,11 @@
       </div>
 
       <!-- 空状态提示 -->
-      <div v-if="!isLoading && currentList.length === 0" class="text-center py-16 text-[var(--color-text-subtle)] text-xs no-select">
-        {{ feedStore.isRecommendedTab ? '正在整理推荐或暂无足够偏好，请切换至热门浏览。' : '暂无热门项目，请检查网络后刷新。' }}
+      <div v-if="!isLoading && currentList.length === 0" class="feed-state card-surface text-center py-16 px-6 no-select" role="status">
+        <h2 class="text-base font-semibold mb-2">{{ feedStore.recError && feedStore.isRecommendedTab ? '推荐暂时无法生成' : '暂时没有可展示的项目' }}</h2>
+        <p class="text-sm text-[var(--color-text-muted)] leading-relaxed">{{ feedStore.recError && feedStore.isRecommendedTab ? feedStore.recError : userStore.hasAccount ? '稍后刷新，或切换浏览方式继续探索。' : '游客可以浏览公开项目；连接 GitHub 后可使用个人兴趣推荐。' }}</p>
+        <button v-if="!userStore.hasAccount" class="btn-primary px-4 text-sm mt-5" @click="$emit('request-login')">连接 GitHub</button>
+        <button v-else class="btn-secondary px-4 text-sm mt-5" @click="handleRefresh">重新加载</button>
       </div>
     </div>
 

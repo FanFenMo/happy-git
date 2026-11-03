@@ -6,6 +6,9 @@ java_home="$(find "$runtime_root" -mindepth 1 -maxdepth 1 -type d -name 'jdk-*' 
 demo_root="${1:-/tmp/happygit-demo-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$demo_root"
 classpath="$(cat "$repo_dir/data-platform/target/classpath.txt")"
+if [[ "${2:-}" == --foreground ]]; then
+  exec "$java_home/bin/java" -Xmx768m -cp "$repo_dir/data-platform/target/test-classes:$repo_dir/data-platform/target/classes:$classpath" com.happygit.data.LocalDemo "$demo_root"
+fi
 nohup "$java_home/bin/java" -Xmx768m -cp "$repo_dir/data-platform/target/test-classes:$repo_dir/data-platform/target/classes:$classpath" com.happygit.data.LocalDemo "$demo_root" > "$demo_root/console.log" 2>&1 < /dev/null &
 printf '%s\n' "$!" > "$demo_root/pid"
 printf '%s\n' "$demo_root"

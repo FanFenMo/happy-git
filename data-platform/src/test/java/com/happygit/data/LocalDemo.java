@@ -32,7 +32,7 @@ public final class LocalDemo {
         for(String repo:Arrays.asList("apache/hadoop","vuejs/core","spring-projects/spring-boot","apache/spark"))
             store.enqueue("repository","public",repo,Json.object(),"local-public-catalog");
         new ConsoleServer(store,conf,"/happygit/data",Collections.singletonMap("port","8090")).start();
-        ObjectNode started=Json.object().put("storage","HDFS MiniDFSCluster").put("dataNodeProcesses",3).put("physicalHosts",1)
+        ObjectNode started=Json.object().put("storage","HDFS MiniDFSCluster").put("dataNodeInstances",3).put("physicalHosts",1)
                 .put("mapreduceMode","local").put("zookeeper",zookeeper.getConnectString()).put("hdfs",cluster.getFileSystem().getUri().toString()).put("console","http://localhost:8090");
         Files.writeString(root.resolve("started.json"),started.toPrettyString());System.out.println("HG_LOCAL_DEMO "+started);
         Runtime.getRuntime().addShutdownHook(new Thread(()->{

@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class HdfsStorageTest {
     @TempDir java.nio.file.Path temporary;
-    @Test void archiveIsReadableAfterOneReplicaHostProcessStops()throws Exception{
+    @Test void archiveIsReadableAfterOneReplicaDataNodeStops()throws Exception{
         Configuration conf=new HdfsConfiguration();
         conf.set(MiniDFSCluster.HDFS_MINIDFS_BASEDIR,temporary.resolve("hdfs").toString());
         conf.setInt("dfs.replication",2);conf.setInt("dfs.client.socket-timeout",2000);

@@ -41,6 +41,9 @@ mvnw
 mvnw.cmd
 
 # Hadoop / MapReduce
+.local-tools/
+deploy/ubuntu/generated/
+data-platform/local-run/
 *.jar
 !gradle-wrapper.jar
 *.war

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${HADOOP_HOME:?Set HADOOP_HOME}"
+: "${JAVA_HOME:?Set JAVA_HOME to JDK 11}"
+platform_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+platform_jar="${HG_PLATFORM_JAR:-$platform_dir/happygit-data-platform.jar}"
+exec "$HADOOP_HOME/bin/hadoop" jar "$platform_jar" com.happygit.data.Main "$@"

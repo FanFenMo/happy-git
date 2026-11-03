@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${HADOOP_HOME:?Set HADOOP_HOME}"
+: "${JAVA_HOME:?Set JAVA_HOME}"
+: "${HADOOP_CONF_DIR:?Set HADOOP_CONF_DIR}"
+platform_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+platform_jar="${HG_PLATFORM_JAR:-$platform_dir/happygit-data-platform.jar}"
+exec "$JAVA_HOME/bin/java" -Xmx128m -cp "$platform_jar:$($HADOOP_HOME/bin/hadoop classpath --glob)" org.apache.zookeeper.server.quorum.QuorumPeerMain "$HADOOP_CONF_DIR/zoo.cfg"

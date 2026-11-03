@@ -13,7 +13,7 @@ class TaskStoreTest {
         public static void main(String[] args)throws Exception{
             try(TaskStore store=new TaskStore(args[0],"/crash-test",4000,null)){
                 ObjectNode claim=store.claim(args[1],"killed-worker");
-                System.out.println(claim.toString());System.out.flush();
+                System.out.println("HG_CLAIM "+claim.toString());System.out.flush();
                 Thread.sleep(120000);
             }
         }
@@ -27,8 +27,12 @@ class TaskStoreTest {
             ObjectNode old;
             try(BufferedReader output=new BufferedReader(new InputStreamReader(process.getInputStream()))){
                 long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
-                while(!output.ready()&&process.isAlive()&&System.nanoTime()<deadline)Thread.sleep(50);
-                assertTrue(output.ready(),"child acquired lease");old=Json.parse(output.readLine());
+                String receipt=null;
+                while(process.isAlive()&&System.nanoTime()<deadline){
+                    if(!output.ready()){Thread.sleep(50);continue;}
+                    String line=output.readLine();if(line!=null&&line.startsWith("HG_CLAIM ")){receipt=line.substring(9);break;}
+                }
+                assertNotNull(receipt,"child acquired lease");old=Json.parse(receipt);
                 assertNull(survivor.claim(id,"survivor"),"live lease excludes other workers");
                 process.destroyForcibly();assertTrue(process.waitFor(10,TimeUnit.SECONDS));
             }finally{if(process.isAlive())process.destroyForcibly();}

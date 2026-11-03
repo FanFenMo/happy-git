@@ -1,0 +1,12 @@
+{
+  "clusterName": "happygit",
+  "installRoot": "/opt/happygit",
+  "dataRoot": "/var/lib/happygit",
+  "serviceUser": "happygit",
+  "fencingMethods": "sshfence(happygit:22)",
+  "nodes": [
+    {"name": "hg-1", "address": "10.0.0.11", "ssh": "hg-1", "yarnMemoryMb": 2048, "vcores": 2},
+    {"name": "hg-2", "address": "10.0.0.12", "ssh": "hg-2", "yarnMemoryMb": 2048, "vcores": 2},
+    {"name": "hg-3", "address": "10.0.0.13", "ssh": "hg-3", "yarnMemoryMb": 2048, "vcores": 2}
+  ]
+}

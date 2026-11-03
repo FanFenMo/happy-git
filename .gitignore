@@ -44,6 +44,9 @@ mvnw.cmd
 .local-tools/
 deploy/ubuntu/generated/
 data-platform/local-run/
+__pycache__/
+deploy/ubuntu/inventory.actual.json
+deploy/ubuntu/platform.env
 *.jar
 !gradle-wrapper.jar
 *.war

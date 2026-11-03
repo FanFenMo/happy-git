@@ -1,6 +1,6 @@
 # HappyGit 数据采集与 Hadoop 处理
 
-本模块实现公开项目/README/公开集合采集、HDFS 不可变归档、ZooKeeper 任务领取与版本隔离、12 阶段 Java MapReduce 以及管理端和客户端目录的新界面。用户应用身份、云端行为授权上传、MySQL 在线推荐表和现有 Electron/Android 页面切换尚不属于这个模块的已完成能力。
+本模块实现公开项目/README/公开集合采集、HDFS 不可变归档、ZooKeeper 任务领取与版本隔离、12 阶段 Java MapReduce 以及管理端和客户端目录的新界面。现有 Vue/Electron/Android 共用前端也已改为同一视觉规范的响应式布局；正式 Hadoop 推荐包接入、用户应用身份、云端行为授权上传和 MySQL 在线推荐表尚未完成。
 
 ## 运行边界
 
@@ -54,8 +54,23 @@ bash data-platform/bin/data-platform serve --bind 127.0.0.1 --port 8090
 
 管理端 `/` 为真实任务查询表格、3—4核心指标、在线采集进程和创建采集任务表单；客户端新设计预览 `/client` 显示实际已采集公开目录、主题、维护时间和项目证据。两个界面均采用已安装 b-end-design-system 的语义色、轻边框、唯一主操作、表格对齐和五态。未完成的质量/画像明确标注，不产生随机指标。原生 `<details>` 提供轻量同页展开，未引入自制阻断浮层。
 
-客户端预览尚未替换现有 Electron/Android 应用入口，也没有将公开目录标成个性化结果。五态包括连接中、实际列表、空输入、请求失败、无凭据受限；两主机模式始终显示控制面限制。管理凭据只存当前页面内存，默认只绑定回环地址。
+`/client` 是数据平台的公开目录预览，与现有 Vue 应用入口分别提供。现有应用已经修改侧栏、移动导航、项目卡片、个人页、登录与兴趣弹窗以及设置抽屉，原有本机账号和推荐调用仍保留；它没有接入正式 Hadoop 个性化结果。目录五态包括连接中、实际列表、空输入、请求失败、无凭据受限；两主机模式始终显示控制面限制。管理凭据只存当前页面内存，默认只绑定回环地址。
 
 ## 验证与后续接入
 
-按项目约定功能合入 develop 后执行目标测试；测试覆盖受控 worker 进程被杀后的租约转移、旧 token 无法发布、输入幂等冲突和完整12阶段固定输入。真正 3—4 台 Ubuntu 的节点分配、YARN attempt 迁移、NameNode/RM active切换与 fencing 仍须在指定主机上保存独立证据。具体本轮运行结果写入验证记录，不在这里预填通过。
+按项目约定功能合入 develop 后执行目标测试；测试覆盖受控 worker 进程被杀后的租约转移、旧 token 无法发布、输入幂等冲突、完整12阶段固定输入、HDFS 副本读取与最新可见性。真实采集的四个公开项目也已完整运行12阶段，记录见[本轮验收](../docs/validation/2026-11-03-data-platform.md)。真正 3—4 台 Ubuntu 的节点分配、YARN attempt 迁移、NameNode/RM active切换与 fencing 仍须在指定主机上保存独立证据。
+
+## 本机复现
+
+以下命令在仓库根目录的 Ubuntu/WSL 执行。运行时只写入专用目录，不替换系统 Java。首次下载 Hadoop 约1 GiB，解压和 Maven 依赖还需额外空间。
+
+```bash
+python3 tools/bootstrap_data_runtime.py --dest /tmp/happygit-runtime/v2 --hadoop
+bash tools/data_local.sh build
+bash tools/data_local.sh classpath
+bash tools/start_data_demo.sh /tmp/happygit-demo-new --foreground
+```
+
+演示使用全新的临时目录，启动一个 MiniDFSCluster（3个 DataNode 实例）、一个本机 ZK 和两个独立 worker JVM；自动采集4个真实公开项目。`started.json` 保存实际 HDFS/ZK 端口。MapReduce 使用 local 模式；这个演示不包含 YARN 或控制面 HA 演练。停止前台进程时关闭所属 worker 与临时集群，不删除演示目录。
+
+Ubuntu 上访问 `http://127.0.0.1:8090`。Windows 未启用 WSL 回环转发时，在 Windows 仓库根目录另开终端运行 `python tools/windows_demo_bridge.py --distro Ubuntu-22.04`，通过 `http://127.0.0.1:8190` 访问；发行版名称按本机实际值填写。桥接仅监听 Windows 回环，不修改系统转发设置。目录预览为 `/client`，现有 Vue 客户端用 `cd client && npm run dev -- --host 127.0.0.1 --port 4190` 启动。

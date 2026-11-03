@@ -4,7 +4,7 @@
 
 新架构的实施依据见[第一版函数级设计文档](docs/design/v1/README.md)，包含服务端、Hadoop 计算、客户端和统一契约；它承接 `docs/sdd/` 中的四份 SDD，明确区分现有代码与待实现能力。
 
-2026-11-03 的[当前完成情况清单](docs/roadmap/2026-11-03-完成情况清单.md)和[下一代应用迭代方案](docs/roadmap/2026-11-03-下一代应用迭代方案.md)用于本轮审阅；下一代方案尚未批准执行。
+2026-11-03 的[完成情况清单](docs/roadmap/2026-11-03-完成情况清单.md)保留实施前基线；随后按用户要求执行了数据采集、Hadoop 处理、Ubuntu 部署适配和双端 UI 改造。当前实现入口为[数据平台](data-platform/README.md)，本轮实际结果见[验收记录](docs/validation/2026-11-03-data-platform.md)，主机准备见[Ubuntu 部署](deploy/ubuntu/README.md)。[下一代迭代方案](docs/roadmap/2026-11-03-下一代应用迭代方案.md)中其余应用会话、授权上传和在线发布等能力仍待后续实施。
 
 ---
 
@@ -45,7 +45,8 @@ happy-git/
 │   ├── electron/        # Windows 原生桌面端主进程 (无端口本地独立运行)
 │   └── src/             # 类抖音个人主页与热门项目流前端源码
 ├── server/              # 在线后端服务 (Spring Boot / API)
-├── mapreduce/           # Hadoop 离线批处理计算任务 (特征工程/推荐计算)
+├── data-platform/       # 已实现的 Java 采集、HDFS、ZK 调度与 J01—J12 MapReduce
+├── deploy/ubuntu/       # 2—4 台 Ubuntu 角色配置、systemd 与部署步骤
 ├── docs/                # 项目架构与设计文档
 ├── 启动HappyGit桌面端.bat # Windows 桌面端极速启动入口
 └── README.md

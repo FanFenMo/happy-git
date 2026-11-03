@@ -1,6 +1,6 @@
 # Ubuntu 2—4 主机数据平台部署
 
-本目录是实际配置生成器的输入和运维步骤。示例 IP 不是用户实际主机。本轮先在本机 Ubuntu 验证；没有把本机多个进程称为多个物理主机。支持 Ubuntu 20.04/22.04/24.04 的原生 systemd 部署，运行 JDK 11、Hadoop 3.4.2。其他版本须先记录发行版/架构与兼容结果。
+本目录是实际配置生成器的输入和运维步骤。示例 IP 不是用户实际主机。本轮先在本机 Ubuntu 验证；没有把本机多个进程称为多个物理主机。部署适配目标为 Ubuntu 20.04/22.04/24.04 的原生 systemd，运行 JDK 11、Hadoop 3.4.2；实际本机运行验证为 Ubuntu 22.04.5 x86_64，20.04/24.04 和其他架构尚未逐一运行。真实主机部署时记录版本、架构及兼容结果。
 
 ## 角色与故障范围
 
@@ -14,7 +14,7 @@ NameNode 的 fencing 必须真实可执行。示例使用服务账号的 SSH 密
 
 ## 生成每台主机配置
 
-复制 inventory.example.json，填写两至四台 Ubuntu 的唯一主机名、私网地址、SSH 别名和 YARN 预算。每台至少预留 Java 守护进程、OS 和任务容器内存；yarnMemoryMb 不是整机内存。三台各 4 GiB 是较宽松的入门预算，真实资源以主机情况调整。
+复制 inventory.example.json，填写两至四台 Ubuntu 的唯一主机名、私网地址、SSH 别名和 YARN 预算。每台至少预留 Java 守护进程、OS 和任务容器内存；yarnMemoryMb 不是整机内存。多角色共置建议每台8 GiB；4 GiB 仅作为低并发实验预算，需下调容器/堆上限并按实际 RSS 峰值验收，不能把 Swap 算作可用任务容量。
 
 ```bash
 python3 tools/ubuntu_cluster.py \
@@ -37,9 +37,21 @@ JDK 具体目录以脚本输出为准。脚本通过 Adoptium 校验值与 Apach
 
 服务账号需可写 `/var/lib/happygit` 中的 namenode/datanode/journal/zookeeper/tmp/logs 目录；安装文件与 XML 只读。所有主机必须能解析 inventory 中的其他主机名，时钟保持同步，集群端口仅在私网互通。操作系统预备项目为 OpenSSH、psmisc、Python 3 与 chrony/systemd-timesyncd；不对外暴露 HDFS/YARN/ZK。
 
+在对应 Ubuntu 主机上可使用安装脚本复制该节点配置和 systemd 单元，参数明确指定已准备的运行时。脚本不启动、停止或格式化 Hadoop；它从仓库路径读取 bin 启动器，所以需保留仓库中对应文件。
+
+```bash
+sudo bash deploy/ubuntu/install-node.sh \
+  deploy/ubuntu/generated/hg-1 \
+  data-platform/target/happygit-data-platform-1.0.0.jar \
+  /opt/happygit-runtimes/hadoop-3.4.2 \
+  /opt/happygit-runtimes/jdk-11.0.32.1+1
+```
+
+上例要求先把运行时放在持久、服务账号可遍历读取的专用目录，不能长期依赖会被清理的 `/tmp`。每台选择自己的 hg-N 配置，实际根路径与生成配置一致。
+
 ## 首次初始化与启动顺序
 
-先由维护者创建服务用户和数据目录，安装对应 systemd 单元，复制 platform.env.example 为权限 0600 的 platform.env。各数据 worker 使用相同 HG_ZK_AUTH；控制台远程监听时必须设置足够长度 HG_ADMIN_TOKEN，默认只监听 127.0.0.1，可通过 SSH 隧道访问。
+安装脚本创建服务用户、目录和 systemd 单元，复制环境样例为 root 所有、服务组可读的0640 `platform.env`；也可手工设置为服务账号所有的0600，保证该账号可读。各数据 worker 使用相同 HG_ZK_AUTH；控制台远程监听时必须设置足够长度 HG_ADMIN_TOKEN，默认只监听127.0.0.1，可通过 SSH 隧道访问。
 
 先启动仲裁节点上的 ZooKeeper；三主机模式再启动 JournalNode。在**确认是全新、隔离的数据目录**后，按下面命令初始化第一 NameNode。已有 VERSION 文件的 NameNode 直接恢复运行，不再次格式化。
 

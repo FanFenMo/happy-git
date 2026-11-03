@@ -1,0 +1,67 @@
+{
+  "integratedCommit": "14bc173",
+  "source": "Maven Surefire XML",
+  "completedAt": "2026-11-03T16:56:08+08:00",
+  "suites": [
+    {
+      "suite": "com.happygit.data.HdfsStorageTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "cases": [
+        {
+          "name": "archiveIsReadableAfterOneReplicaDataNodeStops",
+          "seconds": 13.103
+        }
+      ]
+    },
+    {
+      "suite": "com.happygit.data.PipelineTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "cases": [
+        {
+          "name": "fullFrozenPipelineDeduplicatesEventsBuildsProfilesAndRecall",
+          "seconds": 16.89
+        }
+      ]
+    },
+    {
+      "suite": "com.happygit.data.PublicVisibilityTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "cases": [
+        {
+          "name": "newerPrivateStateCannotBeResurrectedByOldPublicArchive",
+          "seconds": 0.013
+        },
+        {
+          "name": "privateObservationDoesNotArchivePrivateMetadata",
+          "seconds": 0.024
+        }
+      ]
+    },
+    {
+      "suite": "com.happygit.data.TaskStoreTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "cases": [
+        {
+          "name": "killedWorkerLeaseCanBeReclaimedAndOldTokenCannotPublish",
+          "seconds": 8.058
+        },
+        {
+          "name": "requestIdentityDoesNotSilentlyChangeInput",
+          "seconds": 0.15
+        }
+      ]
+    }
+  ]
+}

@@ -51,12 +51,11 @@ public final class ConsoleServer {
                 Map<String,ObjectNode> repositories=new TreeMap<>();
                 for(ObjectNode task:store.committed(namespace))if(task.path("type").asText().equals("repository")){
                     for(ObjectNode row:HdfsFiles.readJsonLines(conf,new Path(task.path("result").path("path").asText()))){
-                        String id=Json.text(row,"repoId");ObjectNode old=repositories.get(id);
-                        if(row.path("visibility").asText().equals("public")&&(old==null||old.path("observedAt").asLong()<row.path("observedAt").asLong())){
-                            row.remove("readmeText");repositories.put(id,row);}
+                        observeRepository(repositories,row);
                     }
                 }
                 ObjectNode result=Json.object().put("source","collected_public_catalog").put("personalized",false);
+                repositories.values().removeIf(row->!row.path("visibility").asText().equals("public"));
                 result.set("items",Json.MAPPER.valueToTree(repositories.values()));send(exchange,200,result);
             }else if(exchange.getRequestMethod().equals("POST")&&path.equals("/api/platform/tasks")){
                 String origin=exchange.getRequestHeaders().getFirst("Origin");
@@ -70,6 +69,12 @@ public final class ConsoleServer {
         }catch(IllegalArgumentException e){send(exchange,400,Json.object().put("error",e.getMessage()));}
         catch(Exception e){System.err.println("Console request failed: "+e.getClass().getSimpleName());send(exchange,503,Json.object().put("error","数据平台暂不可用，请稍后重试"));}
         finally{exchange.close();}
+    }
+    static void observeRepository(Map<String,ObjectNode> repositories,ObjectNode row){
+        String id=Json.text(row,"repoId");ObjectNode old=repositories.get(id);
+        if(old==null||old.path("observedAt").asLong()<row.path("observedAt").asLong()){
+            ObjectNode metadata=row.deepCopy();metadata.remove("readmeText");repositories.put(id,metadata);
+        }
     }
     private void send(HttpExchange exchange,int code,ObjectNode value)throws IOException{
         byte[] bytes=Json.bytes(value);exchange.getResponseHeaders().set("Content-Type","application/json; charset=utf-8");exchange.getResponseHeaders().set("Cache-Control","no-store");

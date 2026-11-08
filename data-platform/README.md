@@ -1,6 +1,6 @@
 # HappyGit 数据采集与 Hadoop 处理
 
-本模块实现公开项目/README/公开集合采集、HDFS 不可变归档、ZooKeeper 任务领取与版本隔离、12 阶段 Java MapReduce 以及管理端和客户端目录的新界面。现有 Vue/Electron/Android 共用前端也已改为同一视觉规范的响应式布局；正式 Hadoop 推荐包接入、用户应用身份、云端行为授权上传和 MySQL 在线推荐表尚未完成。
+本模块实现公开项目/README/公开集合采集、HDFS 不可变归档、ZooKeeper 任务领取与版本隔离、12 阶段 Java MapReduce 以及管理端和客户端目录的新界面。本轮增加有预算的批量采集计划、条件请求缓存、关联项目补抓、冻结目录导出，以及对 Spring MySQL 接收服务的云端归档桥接；部署及实现状态见[接入交接](../docs/implementation/服务端数据接入交接.md)。正式 Hadoop 画像发布和客户端接入仍按后续轮次实现。
 
 ## 运行边界
 
@@ -10,7 +10,7 @@
 
 失败的处理尝试可能从冻结输入重算，不能宣称从任意指令断点继续；已经运行的旧 YARN application 也可能在原 worker 故障后继续计算，但没有当前 token 就不能发布。所有输出目录带 taskId/attemptToken，不覆盖已有结果。该设计保证提交权限和可重放，不保证网络请求或计算恰好执行一次。
 
-此阶段控制队列不依赖尚未实现的业务 MySQL；用户业务层仍按后续 SDD 接入。公开集合导入不等于用户同意上传本机浏览日志。CLI import 只供受信任维护者导入已授权或明确标记为合成的输入。
+公开控制队列继续使用 ZK，云端身份和接收记录由 Spring cloud profile 的 MySQL 管理。两者通过服务凭据和冻结归档协议连接，Spring 请求线程不加载 Hadoop。公开集合导入不等于用户同意上传本机浏览日志。CLI import 只供受信任维护者导入已授权或明确标记为合成的输入。
 
 ## 编译与操作
 
@@ -48,7 +48,7 @@ bash data-platform/bin/data-platform serve --bind 127.0.0.1 --port 8090
 
 当前作业以独立阶段的 JSONL 和稳定键编排，J06 也保留标准 Reduce 输出，尚未做 SequenceFile/map-only 优化。J11 首版缓存上限1000用户/32MiB，超限明确失败，后续需用户分块；不宣称无限扩展。公开群体人数少于10时抑制细分报告，合成通道显示来源。公共关注度命名 popularityScore，不称为项目质量。
 
-当前版本不输出客户端上传 processedThrough 水位，因为设备上传接入尚未实现；不能把 process 完成等同于客户端日志接续完成。业务 API 后续需把同版画像、候选、向量和水位组装成正式包；本模块的结果 Manifest 是该步骤的输入。
+本轮接收 API 分开保存 acceptedThrough、exportedThrough、processedThrough，归档仅推进 exportedThrough；processedThrough 保持0，等待第二轮同代画像实际发布。现有 process 不组装个人云端快照，不直接处理 cloud-export 历史，不能把12阶段完成等同于客户端日志接续完成。
 
 ## UI 新设计
 

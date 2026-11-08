@@ -1,0 +1,24 @@
+{
+  "planId": "public-catalog-20261108",
+  "namespace": "public",
+  "requestBudget": 1200,
+  "maxPagesPerQuery": 1,
+  "queries": [
+    "language:Java stars:10..100 archived:false",
+    "language:Java stars:101..1000 archived:false",
+    "language:Java stars:>1000 archived:true",
+    "language:Python stars:10..100 archived:false",
+    "language:Python stars:101..1000 archived:false",
+    "language:Python stars:>1000 archived:true",
+    "language:JavaScript stars:10..100 archived:false",
+    "language:TypeScript stars:101..1000 archived:false",
+    "language:Go stars:10..1000 archived:false",
+    "language:Rust stars:10..1000 archived:false",
+    "language:C++ stars:10..1000 archived:false",
+    "topic:database stars:10..1000 archived:false",
+    "topic:machine-learning stars:10..1000 archived:false",
+    "topic:developer-tools stars:10..1000 archived:false"
+  ],
+  "seeds": ["apache/hadoop", "torvalds/linux"],
+  "publicUsers": []
+}

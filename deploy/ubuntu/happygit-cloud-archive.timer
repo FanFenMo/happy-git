@@ -1,0 +1,10 @@
+[Unit]
+Description=Queue received cloud data for HDFS archival
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=15s
+Unit=happygit-cloud-archive.service
+
+[Install]
+WantedBy=timers.target

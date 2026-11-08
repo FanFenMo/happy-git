@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "1.0.0",
+  "valid": true,
+  "scale": "pilot",
+  "catalogMode": "synthetic_fixture",
+  "datasetVersion": "hg-pilot-synthetic_fixture-20261103",
+  "status": "ready_for_format_and_pipeline_verification",
+  "counts": {
+    "repositories": 240,
+    "realRepositoriesIncluded": 4,
+    "syntheticFixtureRepositoriesIncluded": 236,
+    "subjects": 50,
+    "subjectsBySplit": {
+      "train": 40,
+      "validation": 5,
+      "test": 5
+    },
+    "collections": 100,
+    "events": 5000,
+    "targetSubjects": 50,
+    "targetEvents": 5000
+  },
+  "checks": {
+    "fileDigestsMatch": true,
+    "scaleQuotasMatch": true,
+    "repositoriesValid": true,
+    "splitIsolationAndCounts": true,
+    "collectionsValid": true,
+    "eventsWindowAndSpacingValid": true,
+    "runtimeIsolationAndShardsValid": true,
+    "evidenceViewsAndHashesValid": true
+  },
+  "errors": [],
+  "warnings": []
+}

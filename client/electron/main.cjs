@@ -18,6 +18,7 @@ const { PageTaskScheduler } = require('./task-scheduler.cjs')
 const { SessionManager } = require('./session-manager.cjs')
 const { AccountSyncService } = require('./account-sync.cjs')
 const { StarService } = require('./star-service.cjs')
+const { CloudService } = require('./cloud-service.cjs')
 const { IpcRouter } = require('./ipc-router.cjs')
 
 let mainWindow = null
@@ -97,6 +98,7 @@ async function initializeApp() {
   const pageExecutorFactory = (webContents) => new PageExecutor(webContents)
 
   const dbProxy = { callDatabase }
+  const cloudService = new CloudService({ database: dbProxy })
 
   sessionManager = new SessionManager({
     database: dbProxy,
@@ -110,7 +112,8 @@ async function initializeApp() {
     browser: githubBrowser,
     scheduler,
     pageExecutorFactory,
-    routes
+    routes,
+    cloudService
   })
 
   const starService = new StarService({
@@ -125,6 +128,7 @@ async function initializeApp() {
     sessionManager,
     accountSyncService,
     starService,
+    cloudService,
     database: dbProxy,
     browser: githubBrowser,
     scheduler,

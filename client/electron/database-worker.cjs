@@ -1,14 +1,41 @@
 /**
  * database-worker.cjs
  * 运行在 Node worker_threads 中，持有唯一 DatabaseSync 连接
- * 执行 SQLite 建表、v2增量迁移与领域操作 (依据 project.md 第八节与第九节)
+ * 执行 SQLite 建表、v2/v3 增量迁移与领域操作 (依据 project.md 第八节、第九节及阶段二云端协同契约)
  */
 const { parentPort } = require('node:worker_threads')
 const { DatabaseSync } = require('node:sqlite')
+const crypto = require('node:crypto')
 const path = require('node:path')
 const fs = require('node:fs')
 
 let db = null
+
+function computeOpenPayloadHash(eventId, streamEpoch, deviceSeq, analysisEpoch, repoId, occurredAt, source = 'browse') {
+  const tuple = [
+    '1.0.0',
+    String(eventId),
+    Number(streamEpoch),
+    Number(deviceSeq),
+    Number(analysisEpoch),
+    String(repoId),
+    Number(occurredAt),
+    String(source)
+  ]
+  return crypto.createHash('sha256').update(JSON.stringify(tuple), 'utf8').digest('hex')
+}
+
+function computeDiscardPayloadHash(eventId, streamEpoch, deviceSeq, analysisEpoch) {
+  const tuple = [
+    '1.0.0',
+    String(eventId),
+    Number(streamEpoch),
+    Number(deviceSeq),
+    Number(analysisEpoch),
+    'discard'
+  ]
+  return crypto.createHash('sha256').update(JSON.stringify(tuple), 'utf8').digest('hex')
+}
 
 function openDatabase(dbPath) {
   const dir = path.dirname(dbPath)
@@ -44,12 +71,19 @@ function initOrMigrateDatabase() {
   if (userVersion === 0) {
     initTablesV1()
     initTablesV2()
-    db.exec('PRAGMA user_version = 2;')
+    initTablesV3()
+    db.exec('PRAGMA user_version = 3;')
   } else if (userVersion === 1) {
     migrateV1ToV2()
-    db.exec('PRAGMA user_version = 2;')
+    migrateV2ToV3()
+    db.exec('PRAGMA user_version = 3;')
+  } else if (userVersion === 2) {
+    initTablesV2()
+    migrateV2ToV3()
+    db.exec('PRAGMA user_version = 3;')
   } else {
     initTablesV2()
+    initTablesV3()
   }
 }
 
@@ -262,6 +296,112 @@ function initTablesV2() {
   `)
 }
 
+function initTablesV3() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cloud_account_state (
+      account_id TEXT PRIMARY KEY NOT NULL,
+      subject_id TEXT,
+      device_id TEXT,
+      installation_id TEXT NOT NULL,
+      stream_epoch INTEGER NOT NULL DEFAULT 1,
+      analysis_epoch INTEGER NOT NULL DEFAULT 1,
+      analysis_enabled INTEGER NOT NULL DEFAULT 1,
+      cloud_bound INTEGER NOT NULL DEFAULT 0,
+      cloud_account_id TEXT,
+      session_expires_at INTEGER,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS local_activity_events (
+      event_id TEXT PRIMARY KEY NOT NULL,
+      account_id TEXT NOT NULL,
+      repo_id TEXT NOT NULL,
+      full_name TEXT NOT NULL,
+      record_kind TEXT NOT NULL DEFAULT 'open' CHECK (record_kind IN ('open', 'discard')),
+      source TEXT NOT NULL DEFAULT 'browse',
+      entry_source TEXT NOT NULL DEFAULT 'unknown',
+      occurred_at INTEGER NOT NULL,
+      effective_at INTEGER NOT NULL,
+      time_flag TEXT NOT NULL DEFAULT 'normal',
+      analysis_epoch INTEGER NOT NULL DEFAULT 1,
+      repository_json TEXT,
+      FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_local_activity_account_time
+      ON local_activity_events(account_id, occurred_at DESC, event_id DESC);
+    CREATE INDEX IF NOT EXISTS idx_local_activity_account_repo
+      ON local_activity_events(account_id, repo_id, occurred_at DESC);
+
+    CREATE TABLE IF NOT EXISTS event_outbox (
+      account_id TEXT NOT NULL,
+      stream_epoch INTEGER NOT NULL,
+      device_seq INTEGER NOT NULL,
+      event_id TEXT NOT NULL,
+      analysis_epoch INTEGER NOT NULL,
+      record_kind TEXT NOT NULL CHECK (record_kind IN ('open', 'discard')),
+      repo_id TEXT,
+      source TEXT,
+      entry_source TEXT,
+      occurred_at INTEGER,
+      payload_hash TEXT NOT NULL,
+      payload_json TEXT,
+      acknowledged INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (account_id, stream_epoch, device_seq),
+      UNIQUE (account_id, event_id),
+      FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_event_outbox_pending
+      ON event_outbox(account_id, stream_epoch, acknowledged, device_seq ASC);
+
+    CREATE TABLE IF NOT EXISTS local_sync_state (
+      account_id TEXT PRIMARY KEY NOT NULL,
+      stream_epoch INTEGER NOT NULL DEFAULT 1,
+      analysis_epoch INTEGER NOT NULL DEFAULT 1,
+      next_device_seq INTEGER NOT NULL DEFAULT 1,
+      accepted_through INTEGER NOT NULL DEFAULT 0,
+      exported_through INTEGER NOT NULL DEFAULT 0,
+      processed_through INTEGER NOT NULL DEFAULT 0,
+      last_sync_at INTEGER,
+      last_server_time INTEGER,
+      last_error_code TEXT,
+      retry_at INTEGER,
+      in_flight_request_id TEXT,
+      in_flight_first_seq INTEGER,
+      in_flight_last_seq INTEGER,
+      FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS cloud_collection_sync (
+      account_id TEXT NOT NULL,
+      collection_kind TEXT NOT NULL CHECK (collection_kind IN ('stars', 'owned')),
+      synced_revision INTEGER NOT NULL DEFAULT 0,
+      synced_complete INTEGER NOT NULL DEFAULT 0,
+      synced_hash TEXT,
+      last_synced_at INTEGER,
+      last_operation_id TEXT,
+      PRIMARY KEY (account_id, collection_kind),
+      FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS client_mutation_outbox (
+      operation_id TEXT PRIMARY KEY NOT NULL,
+      account_id TEXT NOT NULL,
+      mutation_kind TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      error_code TEXT,
+      FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+    );
+  `)
+}
+
 function migrateV1ToV2() {
   const syncCols = db.prepare('PRAGMA table_info(sync_state);').all().map(c => c.name)
   if (!syncCols.includes('staging_next_url')) {
@@ -279,14 +419,63 @@ function migrateV1ToV2() {
   db.exec('INSERT OR IGNORE INTO account_revisions (account_id) SELECT account_id FROM accounts;')
 }
 
+function getOrCreateInstallationId() {
+  const row = db.prepare(`SELECT value_json FROM app_settings WHERE setting_key = 'installation_id';`).get()
+  if (row && row.value_json) {
+    try {
+      const parsed = JSON.parse(row.value_json)
+      if (typeof parsed === 'string' && parsed.length >= 8) return parsed
+    } catch (_) {}
+  }
+  const newId = 'inst_' + crypto.randomUUID().replace(/-/g, '')
+  db.prepare(`
+    INSERT INTO app_settings (setting_key, value_json)
+    VALUES ('installation_id', ?)
+    ON CONFLICT(setting_key) DO UPDATE SET value_json = excluded.value_json;
+  `).run(JSON.stringify(newId))
+  return newId
+}
+
+function ensureAccountV3State(accountId, now = Date.now()) {
+  const installationId = getOrCreateInstallationId()
+  db.prepare(`
+    INSERT OR IGNORE INTO cloud_account_state (
+      account_id, installation_id, stream_epoch, analysis_epoch, analysis_enabled, cloud_bound, updated_at
+    ) VALUES (?, ?, 1, 1, 1, 0, ?);
+  `).run(accountId, installationId, now)
+
+  db.prepare(`
+    INSERT OR IGNORE INTO local_sync_state (
+      account_id, stream_epoch, analysis_epoch, next_device_seq, accepted_through, exported_through, processed_through
+    ) VALUES (?, 1, 1, 1, 0, 0, 0);
+  `).run(accountId)
+}
+
+function migrateV2ToV3() {
+  initTablesV3()
+  const now = Date.now()
+  for (const row of db.prepare('SELECT account_id FROM accounts;').all()) {
+    ensureAccountV3State(row.account_id, now)
+  }
+}
+
+let txDepth = 0
 function withTransaction(work) {
+  if (txDepth > 0) {
+    return work()
+  }
+  txDepth += 1
   db.exec('BEGIN IMMEDIATE;')
   try {
     const result = work()
     db.exec('COMMIT;')
+    txDepth -= 1
     return result
   } catch (err) {
-    db.exec('ROLLBACK;')
+    txDepth -= 1
+    try {
+      db.exec('ROLLBACK;')
+    } catch (_) {}
     throw err
   }
 }
@@ -356,8 +545,63 @@ function saveProfile(accountId, profile) {
       updStmt.run(profile.login, profileJson, now, accountId)
     }
 
+    ensureAccountV3State(accountId, now)
     bumpRevision(accountId, 'profile_revision')
   })
+}
+
+function readCloudSyncState(accountId) {
+  if (!accountId) return null
+  const act = db.prepare('SELECT 1 FROM accounts WHERE account_id = ?;').get(accountId)
+  if (!act) return null
+  ensureAccountV3State(accountId)
+
+  const cloudAcc = db.prepare('SELECT * FROM cloud_account_state WHERE account_id = ?;').get(accountId)
+  const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+  const pendingRow = db.prepare(`
+    SELECT COUNT(*) as cnt FROM event_outbox
+    WHERE account_id = ? AND stream_epoch = ? AND acknowledged = 0;
+  `).get(accountId, syncRow ? syncRow.stream_epoch : 1)
+
+  const collRows = db.prepare('SELECT * FROM cloud_collection_sync WHERE account_id = ?;').all(accountId)
+  const collections = {}
+  for (const r of collRows) {
+    collections[r.collection_kind] = {
+      syncedRevision: r.synced_revision || 0,
+      syncedComplete: Boolean(r.synced_complete),
+      lastSyncedAt: r.last_synced_at || null
+    }
+  }
+
+  const accountMatched = Boolean(
+    cloudAcc?.cloud_bound &&
+    cloudAcc?.cloud_account_id &&
+    String(cloudAcc.cloud_account_id) === String(accountId)
+  )
+
+  return {
+    accountId,
+    subjectId: cloudAcc?.subject_id || null,
+    deviceId: cloudAcc?.device_id || null,
+    installationId: cloudAcc?.installation_id || getOrCreateInstallationId(),
+    cloudBound: Boolean(cloudAcc?.cloud_bound),
+    cloudAccountId: cloudAcc?.cloud_account_id || null,
+    accountMatched,
+    analysisEnabled: cloudAcc ? Boolean(cloudAcc.analysis_enabled) : true,
+    sessionExpiresAt: cloudAcc?.session_expires_at || null,
+    streamEpoch: syncRow ? syncRow.stream_epoch : 1,
+    analysisEpoch: syncRow ? syncRow.analysis_epoch : 1,
+    nextDeviceSeq: syncRow ? syncRow.next_device_seq : 1,
+    acceptedThrough: syncRow ? syncRow.accepted_through : 0,
+    exportedThrough: syncRow ? syncRow.exported_through : 0,
+    processedThrough: syncRow ? syncRow.processed_through : 0,
+    pendingCount: pendingRow ? pendingRow.cnt : 0,
+    lastSyncAt: syncRow?.last_sync_at || null,
+    lastServerTime: syncRow?.last_server_time || null,
+    lastErrorCode: syncRow?.last_error_code || null,
+    retryAt: syncRow?.retry_at || null,
+    collections
+  }
 }
 
 function readAccountSnapshot(accountId) {
@@ -367,9 +611,18 @@ function readAccountSnapshot(accountId) {
 
   const prefStmt = db.prepare('SELECT history_enabled, manual_tags_json FROM account_preferences WHERE account_id = ?;')
   const pref = prefStmt.get(accountId)
+  const cloudState = act ? readCloudSyncState(accountId) : null
   const preferences = pref
-    ? { historyEnabled: Boolean(pref.history_enabled), manualTags: JSON.parse(pref.manual_tags_json || '[]') }
-    : { historyEnabled: true, manualTags: [] }
+    ? {
+        historyEnabled: Boolean(pref.history_enabled),
+        analysisEnabled: cloudState ? cloudState.analysisEnabled : true,
+        manualTags: JSON.parse(pref.manual_tags_json || '[]')
+      }
+    : {
+        historyEnabled: true,
+        analysisEnabled: cloudState ? cloudState.analysisEnabled : true,
+        manualTags: []
+      }
 
   const syncStmt = db.prepare('SELECT * FROM sync_state WHERE account_id = ?;')
   const syncRows = syncStmt.all(accountId)
@@ -395,13 +648,14 @@ function readAccountSnapshot(accountId) {
     preferences,
     repoSync: findSync('repos'),
     starSync: findSync('stars'),
-    revisions: getAccountRevisions(accountId)
+    revisions: getAccountRevisions(accountId),
+    cloudSync: cloudState
   }
 }
 
 function savePreferences(accountId, preferences) {
   const manualJson = JSON.stringify(preferences.manualTags || [])
-  const historyVal = preferences.historyEnabled ? 1 : 0
+  const historyVal = preferences.historyEnabled !== false ? 1 : 0
   const now = Date.now()
   withTransaction(() => {
     const stmt = db.prepare(`
@@ -413,6 +667,16 @@ function savePreferences(accountId, preferences) {
         updated_at = excluded.updated_at;
     `)
     stmt.run(accountId, historyVal, manualJson, now)
+
+    if (typeof preferences.analysisEnabled === 'boolean') {
+      ensureAccountV3State(accountId, now)
+      db.prepare(`
+        UPDATE cloud_account_state
+        SET analysis_enabled = ?, updated_at = ?
+        WHERE account_id = ?;
+      `).run(preferences.analysisEnabled ? 1 : 0, now, accountId)
+    }
+
     bumpRevision(accountId, 'preference_revision')
   })
 }
@@ -615,7 +879,6 @@ function applyConfirmedStar(accountId, repository, starred) {
     const updStmt = db.prepare(`UPDATE sync_state SET active_count = ? WHERE account_id = ? AND kind = 'stars';`)
     updStmt.run(newCount, accountId)
 
-    // 更新 star_state 表
     if (repository.repoId) {
       const starStateStmt = db.prepare(`
         INSERT INTO star_state (account_id, repo_id, starred, observed_at, mutation_revision)
@@ -641,7 +904,6 @@ function readStarState(accountId, repoId, fullName) {
     }
   }
 
-  // 检查 active stars cache
   const isStarred = isRepositoryStarred(accountId, repoId || fullName.toLowerCase())
   if (isStarred.known) {
     return { state: isStarred.starred ? 'starred' : 'unstarred', observedAt: Date.now() }
@@ -668,10 +930,21 @@ function isRepositoryStarred(accountId, repoId) {
 
 function recordBrowse(accountId, repository, source = 'trending', viewedAt = Date.now()) {
   return withTransaction(() => {
-    const repoKey = repository.repoId || repository.canonicalKey
+    const prefRow = db.prepare('SELECT history_enabled FROM account_preferences WHERE account_id = ?;').get(accountId)
+    if (prefRow && prefRow.history_enabled === 0) {
+      return {
+        skipped: true,
+        reason: 'HISTORY_DISABLED',
+        accountId,
+        repoId: repository.repoId || repository.canonicalKey
+      }
+    }
+
+    const repoKey = String(repository.repoId || repository.canonicalKey)
     const selStmt = db.prepare('SELECT * FROM browse_history WHERE account_id = ? AND repo_id = ?;')
     const old = selStmt.get(accountId, repoKey)
 
+    let shouldCount = true
     if (!old) {
       const insStmt = db.prepare(`
         INSERT INTO browse_history (
@@ -685,7 +958,7 @@ function recordBrowse(accountId, repository, source = 'trending', viewedAt = Dat
       )
     } else {
       const nextViewedAt = Math.max(old.last_viewed_at, viewedAt)
-      const shouldCount = (viewedAt - old.last_counted_at) >= 30000
+      shouldCount = (viewedAt - old.last_counted_at) >= 30000
       const nextCount = shouldCount ? (old.visit_count + 1) : old.visit_count
       const nextCountedAt = shouldCount ? viewedAt : old.last_counted_at
 
@@ -701,6 +974,95 @@ function recordBrowse(accountId, repository, source = 'trending', viewedAt = Dat
       )
     }
 
+    let createdEventId = null
+    let enqueuedSeq = null
+
+    if (shouldCount) {
+      ensureAccountV3State(accountId, viewedAt)
+      const cloudAcc = db.prepare('SELECT * FROM cloud_account_state WHERE account_id = ?;').get(accountId)
+      const syncState = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+      const analysisEpoch = syncState ? syncState.analysis_epoch : 1
+      const streamEpoch = syncState ? syncState.stream_epoch : 1
+      const randSuffix = crypto.randomBytes(4).toString('hex')
+      const safeAccount = String(accountId).replace(/[^A-Za-z0-9_.-]/g, '_')
+      createdEventId = `evt_${safeAccount}_${viewedAt}_${randSuffix}`
+
+      db.prepare(`
+        INSERT INTO local_activity_events (
+          event_id, account_id, repo_id, full_name, record_kind,
+          source, entry_source, occurred_at, effective_at, time_flag,
+          analysis_epoch, repository_json
+        ) VALUES (?, ?, ?, ?, 'open', 'browse', ?, ?, ?, 'normal', ?, ?);
+      `).run(
+        createdEventId,
+        accountId,
+        repoKey,
+        repository.fullName || repoKey,
+        source || 'browse',
+        viewedAt,
+        viewedAt,
+        analysisEpoch,
+        JSON.stringify(repository)
+      )
+
+      // 仅当云端兴趣分析开启且具有有效 repoId 时写入待上传队列 event_outbox
+      const analysisEnabled = cloudAcc ? Boolean(cloudAcc.analysis_enabled) : true
+      const canonicalRepoId = String(repository.repoId || repoKey).trim()
+      if (analysisEnabled && canonicalRepoId) {
+        const deviceSeq = syncState ? syncState.next_device_seq : 1
+        enqueuedSeq = deviceSeq
+        const payloadHash = computeOpenPayloadHash(
+          createdEventId,
+          streamEpoch,
+          deviceSeq,
+          analysisEpoch,
+          canonicalRepoId,
+          viewedAt,
+          'browse'
+        )
+        const eventPayload = {
+          schemaVersion: '1.0.0',
+          eventId: createdEventId,
+          streamEpoch,
+          deviceSeq,
+          analysisEpoch,
+          recordKind: 'open',
+          repoId: canonicalRepoId,
+          source: 'browse',
+          entrySource: source || 'browse',
+          occurredAt: viewedAt,
+          payloadHash
+        }
+
+        db.prepare(`
+          INSERT INTO event_outbox (
+            account_id, stream_epoch, device_seq, event_id, analysis_epoch,
+            record_kind, repo_id, source, entry_source, occurred_at,
+            payload_hash, payload_json, acknowledged, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'open', ?, 'browse', ?, ?, ?, ?, 0, ?, ?);
+        `).run(
+          accountId,
+          streamEpoch,
+          deviceSeq,
+          createdEventId,
+          analysisEpoch,
+          canonicalRepoId,
+          source || 'browse',
+          viewedAt,
+          payloadHash,
+          JSON.stringify(eventPayload),
+          viewedAt,
+          viewedAt
+        )
+
+        db.prepare(`
+          UPDATE local_sync_state
+          SET next_device_seq = ?
+          WHERE account_id = ?;
+        `).run(deviceSeq + 1, accountId)
+      }
+    }
+
     pruneHistory(accountId, viewedAt)
     bumpRevision(accountId, 'history_revision')
 
@@ -714,7 +1076,10 @@ function recordBrowse(accountId, repository, source = 'trending', viewedAt = Dat
       lastViewedAt: finalRow.last_viewed_at,
       lastCountedAt: finalRow.last_counted_at,
       visitCount: finalRow.visit_count,
-      lastSource: finalRow.last_source
+      lastSource: finalRow.last_source,
+      countedVisit: shouldCount,
+      eventId: createdEventId,
+      deviceSeq: enqueuedSeq
     }
   })
 }
@@ -723,6 +1088,7 @@ function pruneHistory(accountId, now = Date.now()) {
   const ninetyDaysAgo = now - (90 * 24 * 60 * 60 * 1000)
   const delOldStmt = db.prepare('DELETE FROM browse_history WHERE account_id = ? AND last_viewed_at < ?;')
   delOldStmt.run(accountId, ninetyDaysAgo)
+  db.prepare('DELETE FROM local_activity_events WHERE account_id = ? AND occurred_at < ?;').run(accountId, ninetyDaysAgo)
 
   const countStmt = db.prepare('SELECT COUNT(*) as cnt FROM browse_history WHERE account_id = ?;')
   const countRow = countStmt.get(accountId)
@@ -795,10 +1161,50 @@ function listHistory(accountId, cursor = null, limit = 30, keyword = '') {
   }
 }
 
+function convertPendingOutboxToDiscard(accountId, repoId = null) {
+  const now = Date.now()
+  const rows = repoId
+    ? db.prepare(`
+        SELECT * FROM event_outbox
+        WHERE account_id = ? AND repo_id = ? AND acknowledged = 0 AND record_kind = 'open';
+      `).all(accountId, String(repoId))
+    : db.prepare(`
+        SELECT * FROM event_outbox
+        WHERE account_id = ? AND acknowledged = 0 AND record_kind = 'open';
+      `).all(accountId)
+
+  const updStmt = db.prepare(`
+    UPDATE event_outbox
+    SET record_kind = 'discard',
+        repo_id = NULL,
+        source = NULL,
+        entry_source = NULL,
+        occurred_at = NULL,
+        payload_hash = ?,
+        payload_json = NULL,
+        updated_at = ?
+    WHERE account_id = ? AND stream_epoch = ? AND device_seq = ?;
+  `)
+
+  for (const r of rows) {
+    const discardHash = computeDiscardPayloadHash(r.event_id, r.stream_epoch, r.device_seq, r.analysis_epoch)
+    updStmt.run(discardHash, now, accountId, r.stream_epoch, r.device_seq)
+  }
+
+  // 清除飞行中的批次绑定以便重新组装含 discard 的批次
+  db.prepare(`
+    UPDATE local_sync_state
+    SET in_flight_request_id = NULL, in_flight_first_seq = NULL, in_flight_last_seq = NULL
+    WHERE account_id = ?;
+  `).run(accountId)
+}
+
 function deleteHistory(accountId, repoId) {
   withTransaction(() => {
     const stmt = db.prepare('DELETE FROM browse_history WHERE account_id = ? AND repo_id = ?;')
     stmt.run(accountId, repoId)
+    db.prepare('DELETE FROM local_activity_events WHERE account_id = ? AND repo_id = ?;').run(accountId, String(repoId))
+    convertPendingOutboxToDiscard(accountId, repoId)
     bumpRevision(accountId, 'history_revision')
     db.prepare('DELETE FROM interest_profiles WHERE account_id = ?;').run(accountId)
     db.prepare('DELETE FROM recommendation_batches WHERE account_id = ?;').run(accountId)
@@ -809,6 +1215,8 @@ function clearHistory(accountId) {
   withTransaction(() => {
     const stmt = db.prepare('DELETE FROM browse_history WHERE account_id = ?;')
     stmt.run(accountId)
+    db.prepare('DELETE FROM local_activity_events WHERE account_id = ?;').run(accountId)
+    convertPendingOutboxToDiscard(accountId, null)
     bumpRevision(accountId, 'history_revision')
     db.prepare('DELETE FROM interest_profiles WHERE account_id = ?;').run(accountId)
     db.prepare('DELETE FROM discovery_cache WHERE account_id = ?;').run(accountId)
@@ -820,6 +1228,498 @@ function countHistory(accountId) {
   const stmt = db.prepare('SELECT COUNT(*) as cnt FROM browse_history WHERE account_id = ?;')
   const row = stmt.get(accountId)
   return row ? row.cnt : 0
+}
+
+function listLocalActivityEvents(accountId, limit = 100) {
+  const rows = db.prepare(`
+    SELECT * FROM local_activity_events
+    WHERE account_id = ?
+    ORDER BY occurred_at DESC, event_id DESC
+    LIMIT ?;
+  `).all(accountId, Math.max(1, Math.min(500, limit)))
+  return rows.map((r) => ({
+    eventId: r.event_id,
+    accountId: r.account_id,
+    repoId: r.repo_id,
+    fullName: r.full_name,
+    recordKind: r.record_kind,
+    source: r.source,
+    entrySource: r.entry_source,
+    occurredAt: r.occurred_at,
+    effectiveAt: r.effective_at,
+    timeFlag: r.time_flag,
+    analysisEpoch: r.analysis_epoch
+  }))
+}
+
+function saveCloudAccountState(accountId, patch = {}) {
+  return withTransaction(() => {
+    ensureAccountV3State(accountId)
+    const curr = db.prepare('SELECT * FROM cloud_account_state WHERE account_id = ?;').get(accountId)
+    const now = Date.now()
+    const nextSubjectId = patch.subjectId !== undefined ? patch.subjectId : curr.subject_id
+    const nextDeviceId = patch.deviceId !== undefined ? patch.deviceId : curr.device_id
+    const nextStreamEpoch = patch.streamEpoch !== undefined ? Number(patch.streamEpoch) : curr.stream_epoch
+    const nextAnalysisEpoch = patch.analysisEpoch !== undefined ? Number(patch.analysisEpoch) : curr.analysis_epoch
+    const nextAnalysisEnabled = patch.analysisEnabled !== undefined ? (patch.analysisEnabled ? 1 : 0) : curr.analysis_enabled
+    const nextCloudBound = patch.cloudBound !== undefined ? (patch.cloudBound ? 1 : 0) : curr.cloud_bound
+    const nextCloudAccountId = patch.cloudAccountId !== undefined ? patch.cloudAccountId : curr.cloud_account_id
+    const nextExpiresAt = patch.sessionExpiresAt !== undefined ? patch.sessionExpiresAt : curr.session_expires_at
+
+    db.prepare(`
+      UPDATE cloud_account_state
+      SET subject_id = ?,
+          device_id = ?,
+          stream_epoch = ?,
+          analysis_epoch = ?,
+          analysis_enabled = ?,
+          cloud_bound = ?,
+          cloud_account_id = ?,
+          session_expires_at = ?,
+          updated_at = ?
+      WHERE account_id = ?;
+    `).run(
+      nextSubjectId,
+      nextDeviceId,
+      nextStreamEpoch,
+      nextAnalysisEpoch,
+      nextAnalysisEnabled,
+      nextCloudBound,
+      nextCloudAccountId,
+      nextExpiresAt,
+      now,
+      accountId
+    )
+    return readCloudSyncState(accountId)
+  })
+}
+
+function syncCloudStreamState(accountId, serverState = {}) {
+  return withTransaction(() => {
+    ensureAccountV3State(accountId)
+    const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+    const oldStreamEpoch = syncRow.stream_epoch
+    const oldAnalysisEpoch = syncRow.analysis_epoch
+
+    const newStreamEpoch = Number(serverState.streamEpoch || oldStreamEpoch || 1)
+    const newAnalysisEpoch = Number(serverState.analysisEpoch || oldAnalysisEpoch || 1)
+    const acceptedThrough = Number(serverState.acceptedThrough ?? syncRow.accepted_through ?? 0)
+    const exportedThrough = Number(serverState.exportedThrough ?? syncRow.exported_through ?? 0)
+    // 注意：processedThrough 绝不等于 acceptedThrough，必须独立记录服务端已完成画像消费的真实水位
+    const processedThrough = Number(serverState.processedThrough ?? syncRow.processed_through ?? 0)
+    const now = Date.now()
+
+    if (serverState.deviceId || serverState.preferences) {
+      const analysisEnabledPatch = serverState.preferences?.analysisEnabled
+      saveCloudAccountState(accountId, {
+        deviceId: serverState.deviceId,
+        streamEpoch: newStreamEpoch,
+        analysisEpoch: newAnalysisEpoch,
+        ...(typeof analysisEnabledPatch === 'boolean' ? { analysisEnabled: analysisEnabledPatch } : {})
+      })
+    }
+
+    // 确认 <= acceptedThrough 的旧队列项
+    if (oldStreamEpoch === newStreamEpoch && acceptedThrough > 0) {
+      db.prepare(`
+        UPDATE event_outbox
+        SET acknowledged = 1, payload_json = NULL, updated_at = ?
+        WHERE account_id = ? AND stream_epoch = ? AND device_seq <= ?;
+      `).run(now, accountId, newStreamEpoch, acceptedThrough)
+    }
+
+    // 若 streamEpoch 或 analysisEpoch 发生变化，将尚未确认的本地事件迁移到最新 epoch 并从 acceptedThrough + 1 连续编排
+    const pendingRows = db.prepare(`
+      SELECT * FROM event_outbox
+      WHERE account_id = ? AND acknowledged = 0
+      ORDER BY stream_epoch ASC, device_seq ASC;
+    `).all(accountId)
+
+    let nextSeq = Math.max(acceptedThrough + 1, syncRow.next_device_seq)
+    if (oldStreamEpoch !== newStreamEpoch || oldAnalysisEpoch !== newAnalysisEpoch || (pendingRows.length > 0 && pendingRows[0].device_seq !== acceptedThrough + 1)) {
+      db.prepare('DELETE FROM event_outbox WHERE account_id = ? AND acknowledged = 0;').run(accountId)
+      let seqCursor = acceptedThrough + 1
+      const insStmt = db.prepare(`
+        INSERT INTO event_outbox (
+          account_id, stream_epoch, device_seq, event_id, analysis_epoch,
+          record_kind, repo_id, source, entry_source, occurred_at,
+          payload_hash, payload_json, acknowledged, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?);
+      `)
+
+      for (const row of pendingRows) {
+        if (oldStreamEpoch === newStreamEpoch && row.device_seq <= acceptedThrough) continue
+        const seq = seqCursor++
+        if (row.record_kind === 'open' && row.repo_id && row.occurred_at) {
+          const hash = computeOpenPayloadHash(
+            row.event_id,
+            newStreamEpoch,
+            seq,
+            newAnalysisEpoch,
+            row.repo_id,
+            row.occurred_at,
+            row.source || 'browse'
+          )
+          const payloadObj = {
+            schemaVersion: '1.0.0',
+            eventId: row.event_id,
+            streamEpoch: newStreamEpoch,
+            deviceSeq: seq,
+            analysisEpoch: newAnalysisEpoch,
+            recordKind: 'open',
+            repoId: row.repo_id,
+            source: row.source || 'browse',
+            entrySource: row.entry_source || 'browse',
+            occurredAt: row.occurred_at,
+            payloadHash: hash
+          }
+          insStmt.run(
+            accountId,
+            newStreamEpoch,
+            seq,
+            row.event_id,
+            newAnalysisEpoch,
+            'open',
+            row.repo_id,
+            row.source || 'browse',
+            row.entry_source || 'browse',
+            row.occurred_at,
+            hash,
+            JSON.stringify(payloadObj),
+            row.created_at,
+            now
+          )
+        } else {
+          const hash = computeDiscardPayloadHash(row.event_id, newStreamEpoch, seq, newAnalysisEpoch)
+          insStmt.run(
+            accountId,
+            newStreamEpoch,
+            seq,
+            row.event_id,
+            newAnalysisEpoch,
+            'discard',
+            null,
+            null,
+            null,
+            null,
+            hash,
+            null,
+            row.created_at,
+            now
+          )
+        }
+      }
+      nextSeq = seqCursor
+    }
+
+    db.prepare(`
+      UPDATE local_sync_state
+      SET stream_epoch = ?,
+          analysis_epoch = ?,
+          next_device_seq = ?,
+          accepted_through = ?,
+          exported_through = ?,
+          processed_through = ?,
+          last_server_time = COALESCE(?, last_server_time),
+          last_error_code = NULL,
+          retry_at = NULL,
+          in_flight_request_id = NULL,
+          in_flight_first_seq = NULL,
+          in_flight_last_seq = NULL
+      WHERE account_id = ?;
+    `).run(
+      newStreamEpoch,
+      newAnalysisEpoch,
+      nextSeq,
+      acceptedThrough,
+      exportedThrough,
+      processedThrough,
+      serverState.serverTime || null,
+      accountId
+    )
+
+    return readCloudSyncState(accountId)
+  })
+}
+
+function readOutboxBatch(accountId, maxItems = 500, maxBytes = 1048576) {
+  return withTransaction(() => {
+    ensureAccountV3State(accountId)
+    const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+    const streamEpoch = syncRow.stream_epoch
+    const analysisEpoch = syncRow.analysis_epoch
+    const expectedFirstSeq = (syncRow.accepted_through || 0) + 1
+
+    const rows = db.prepare(`
+      SELECT * FROM event_outbox
+      WHERE account_id = ? AND stream_epoch = ? AND acknowledged = 0 AND device_seq >= ?
+      ORDER BY device_seq ASC
+      LIMIT ?;
+    `).all(accountId, streamEpoch, expectedFirstSeq, Math.min(500, Math.max(1, maxItems)))
+
+    if (!rows.length) {
+      return { hasBatch: false, events: [] }
+    }
+
+    const events = []
+    let expectedSeq = rows[0].device_seq
+    let accumulatedBytes = 128
+
+    for (const r of rows) {
+      if (r.device_seq !== expectedSeq) {
+        break
+      }
+      const ev = r.record_kind === 'discard'
+        ? {
+            eventId: r.event_id,
+            deviceSeq: r.device_seq,
+            recordKind: 'discard',
+            payloadHash: r.payload_hash
+          }
+        : {
+            eventId: r.event_id,
+            deviceSeq: r.device_seq,
+            recordKind: 'open',
+            repoId: r.repo_id,
+            occurredAt: r.occurred_at,
+            source: r.source || 'browse',
+            entrySource: r.entry_source || 'browse',
+            payloadHash: r.payload_hash
+          }
+      const itemBytes = Buffer.byteLength(JSON.stringify(ev), 'utf8') + 2
+      if (events.length > 0 && (accumulatedBytes + itemBytes > maxBytes)) {
+        break
+      }
+      events.push(ev)
+      accumulatedBytes += itemBytes
+      expectedSeq += 1
+    }
+
+    const firstSeq = events[0].deviceSeq
+    const lastSeq = events[events.length - 1].deviceSeq
+    let requestId = syncRow.in_flight_request_id
+    if (!requestId || syncRow.in_flight_first_seq !== firstSeq || syncRow.in_flight_last_seq !== lastSeq) {
+      requestId = 'req_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex')
+      db.prepare(`
+        UPDATE local_sync_state
+        SET in_flight_request_id = ?, in_flight_first_seq = ?, in_flight_last_seq = ?
+        WHERE account_id = ?;
+      `).run(requestId, firstSeq, lastSeq, accountId)
+    }
+
+    return {
+      hasBatch: true,
+      requestId,
+      streamEpoch,
+      analysisEpoch,
+      firstSeq,
+      lastSeq,
+      events
+    }
+  })
+}
+
+function applyOutboxAck(accountId, ackPayload = {}) {
+  return withTransaction(() => {
+    ensureAccountV3State(accountId)
+    const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+    const streamEpoch = Number(ackPayload.streamEpoch || syncRow.stream_epoch)
+    const analysisEpoch = Number(ackPayload.analysisEpoch || syncRow.analysis_epoch)
+    const acceptedThrough = Math.max(syncRow.accepted_through || 0, Number(ackPayload.acceptedThrough || 0))
+    const exportedThrough = Math.max(syncRow.exported_through || 0, Number(ackPayload.exportedThrough || 0))
+    // 严格区分 acceptedThrough 与 processedThrough，绝不将上传 ACK 等同于已被离线画像消费
+    const processedThrough = ackPayload.processedThrough !== undefined
+      ? Math.max(syncRow.processed_through || 0, Number(ackPayload.processedThrough || 0))
+      : (syncRow.processed_through || 0)
+    const now = Date.now()
+
+    db.prepare(`
+      UPDATE event_outbox
+      SET acknowledged = 1, payload_json = NULL, updated_at = ?
+      WHERE account_id = ? AND stream_epoch = ? AND device_seq <= ?;
+    `).run(now, accountId, streamEpoch, acceptedThrough)
+
+    if (Array.isArray(ackPayload.timeAdjustments)) {
+      const adjStmt = db.prepare(`
+        UPDATE local_activity_events
+        SET effective_at = ?, time_flag = ?
+        WHERE account_id = ? AND event_id = ?;
+      `)
+      for (const adj of ackPayload.timeAdjustments) {
+        if (adj && adj.eventId && adj.effectiveAt != null) {
+          adjStmt.run(Number(adj.effectiveAt), String(adj.timeFlag || 'adjusted'), accountId, String(adj.eventId))
+        }
+      }
+    }
+
+    db.prepare(`
+      UPDATE local_sync_state
+      SET stream_epoch = ?,
+          analysis_epoch = ?,
+          accepted_through = ?,
+          exported_through = ?,
+          processed_through = ?,
+          last_sync_at = ?,
+          last_server_time = COALESCE(?, last_server_time),
+          last_error_code = NULL,
+          retry_at = NULL,
+          in_flight_request_id = NULL,
+          in_flight_first_seq = NULL,
+          in_flight_last_seq = NULL
+      WHERE account_id = ?;
+    `).run(
+      streamEpoch,
+      analysisEpoch,
+      acceptedThrough,
+      exportedThrough,
+      processedThrough,
+      now,
+      ackPayload.serverTime || null,
+      accountId
+    )
+
+    return readCloudSyncState(accountId)
+  })
+}
+
+function recordOutboxError(accountId, errorCode, retryAt = null) {
+  ensureAccountV3State(accountId)
+  db.prepare(`
+    UPDATE local_sync_state
+    SET last_error_code = ?, retry_at = ?
+    WHERE account_id = ?;
+  `).run(errorCode || null, retryAt || null, accountId)
+  return readCloudSyncState(accountId)
+}
+
+function resetCloudAnalysisLocalState(accountId, newAnalysisEpoch) {
+  return withTransaction(() => {
+    ensureAccountV3State(accountId)
+    const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+    const nextEpoch = Number(newAnalysisEpoch || ((syncRow?.analysis_epoch || 1) + 1))
+    const now = Date.now()
+
+    // 将旧 analysisEpoch 下尚未确认的上传项转为 discard 墓碑，保持 deviceSeq 连续且不泄漏旧周期数据
+    convertPendingOutboxToDiscard(accountId, null)
+    db.prepare(`
+      UPDATE event_outbox
+      SET analysis_epoch = ?, updated_at = ?
+      WHERE account_id = ? AND acknowledged = 0;
+    `).run(nextEpoch, now, accountId)
+
+    db.prepare(`
+      UPDATE cloud_account_state
+      SET analysis_epoch = ?, updated_at = ?
+      WHERE account_id = ?;
+    `).run(nextEpoch, now, accountId)
+
+    db.prepare(`
+      UPDATE local_sync_state
+      SET analysis_epoch = ?, processed_through = 0
+      WHERE account_id = ?;
+    `).run(nextEpoch, accountId)
+
+    db.prepare('DELETE FROM cloud_collection_sync WHERE account_id = ?;').run(accountId)
+    return readCloudSyncState(accountId)
+  })
+}
+
+function readCollectionForCloudSync(accountId, collectionKind) {
+  ensureAccountV3State(accountId)
+  const localKind = collectionKind === 'stars' ? 'stars' : 'repos'
+  const syncRow = db.prepare('SELECT * FROM sync_state WHERE account_id = ? AND kind = ?;').get(accountId, localKind)
+  const cloudColl = db.prepare('SELECT * FROM cloud_collection_sync WHERE account_id = ? AND collection_kind = ?;').get(accountId, collectionKind)
+  const cloudAcc = db.prepare('SELECT * FROM cloud_account_state WHERE account_id = ?;').get(accountId)
+
+  const syncedRevision = cloudColl ? cloudColl.synced_revision : 0
+  const syncedComplete = cloudColl ? Boolean(cloudColl.synced_complete) : false
+  const syncedHash = cloudColl ? cloudColl.synced_hash : null
+  const analysisEpoch = cloudAcc ? cloudAcc.analysis_epoch : 1
+
+  if (!syncRow || !syncRow.active_generation || !syncRow.active_complete) {
+    if (syncedComplete) {
+      return {
+        shouldUpload: false,
+        reason: 'LOCAL_INCOMPLETE_PROTECT_COMPLETE_CLOUD',
+        collectionKind,
+        complete: false
+      }
+    }
+    return {
+      shouldUpload: false,
+      reason: 'LOCAL_COLLECTION_NOT_COMPLETE',
+      collectionKind,
+      complete: false
+    }
+  }
+
+  const cacheRows = db.prepare(`
+    SELECT repository_json FROM repository_cache
+    WHERE account_id = ? AND kind = ? AND generation_id = ?;
+  `).all(accountId, localKind, syncRow.active_generation)
+
+  const repoIdSet = new Set()
+  for (const r of cacheRows) {
+    try {
+      const repo = JSON.parse(r.repository_json)
+      if (repo && repo.visibility !== 'private' && !repo.private && repo.repoId) {
+        repoIdSet.add(String(repo.repoId))
+      }
+    } catch (_) {}
+  }
+
+  const repoIds = Array.from(repoIdSet).sort()
+  const snapshotHash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify({ analysisEpoch, collectionKind, complete: true, repoIds }), 'utf8')
+    .digest('hex')
+
+  if (syncedComplete && syncedHash === snapshotHash) {
+    return {
+      shouldUpload: false,
+      reason: 'UNCHANGED',
+      collectionKind,
+      complete: true,
+      syncedRevision
+    }
+  }
+
+  const operationId = `coll_${collectionKind}_${accountId}_r${syncedRevision + 1}_${snapshotHash.slice(0, 12)}`
+  return {
+    shouldUpload: true,
+    operationId,
+    expectedRevision: syncedRevision,
+    analysisEpoch,
+    collectionKind,
+    complete: true,
+    observedAt: syncRow.last_completed_at || Date.now(),
+    repoIds,
+    snapshotHash
+  }
+}
+
+function markCollectionCloudSynced(accountId, collectionKind, result = {}) {
+  return withTransaction(() => {
+    const now = Date.now()
+    const nextRevision = Number(result.revision ?? 0)
+    const complete = result.complete !== false ? 1 : 0
+    const snapshotHash = result.snapshotHash || null
+    const operationId = result.operationId || null
+
+    db.prepare(`
+      INSERT INTO cloud_collection_sync (
+        account_id, collection_kind, synced_revision, synced_complete, synced_hash, last_synced_at, last_operation_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_id, collection_kind) DO UPDATE SET
+        synced_revision = excluded.synced_revision,
+        synced_complete = excluded.synced_complete,
+        synced_hash = COALESCE(excluded.synced_hash, cloud_collection_sync.synced_hash),
+        last_synced_at = excluded.last_synced_at,
+        last_operation_id = COALESCE(excluded.last_operation_id, cloud_collection_sync.last_operation_id);
+    `).run(accountId, collectionKind, nextRevision, complete, snapshotHash, now, operationId)
+
+    return readCloudSyncState(accountId)
+  })
 }
 
 function forgetAccount(accountId) {
@@ -889,7 +1789,6 @@ function createSnapshot(accountId, purpose = 'ranking', reason = 'user_request')
       `).run(inputId, accountId, purpose || 'ranking', JSON.stringify(revisions), now)
     }
 
-    // 读取 Star 活跃集合
     const starSync = db.prepare(`SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = 'stars';`).get(accountId)
     let starred = []
     if (starSync?.active_generation) {
@@ -897,7 +1796,6 @@ function createSnapshot(accountId, purpose = 'ranking', reason = 'user_request')
       starred = rows.map(r => JSON.parse(r.repository_json))
     }
 
-    // 读取本人仓库活跃集合
     const repoSync = db.prepare(`SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = 'repos';`).get(accountId)
     let owned = []
     if (repoSync?.active_generation) {
@@ -905,12 +1803,10 @@ function createSnapshot(accountId, purpose = 'ranking', reason = 'user_request')
       owned = rows.map(r => JSON.parse(r.repository_json))
     }
 
-    // 读取偏好
     const prefRow = db.prepare('SELECT history_enabled, manual_tags_json FROM account_preferences WHERE account_id = ?;').get(accountId)
     const historyEnabled = prefRow ? Boolean(prefRow.history_enabled) : true
     const manualTags = prefRow ? JSON.parse(prefRow.manual_tags_json || '[]') : []
 
-    // 读取历史 (最多 5000)
     let history = []
     if (historyEnabled) {
       const histRows = db.prepare(`SELECT * FROM browse_history WHERE account_id = ? ORDER BY last_viewed_at DESC LIMIT 5000;`).all(accountId)
@@ -924,11 +1820,9 @@ function createSnapshot(accountId, purpose = 'ranking', reason = 'user_request')
       }))
     }
 
-    // 读取隐藏项
     const hiddenRows = db.prepare(`SELECT repo_id FROM recommendation_feedback WHERE account_id = ? AND hidden = 1;`).all(accountId)
     const hiddenRepoIds = hiddenRows.map(r => r.repo_id)
 
-    // 读取候选 (来自 discovery_cache)
     const discRows = db.prepare(`SELECT result_json FROM discovery_cache WHERE account_id = ? AND expires_at > ?;`).all(accountId, now)
     const candidateMap = new Map()
     for (const d of discRows) {
@@ -1019,7 +1913,6 @@ function commitRecommendation(accountId, inputId, inputVersions, purpose, profil
       if (!batch || !batch.batchId || !Array.isArray(batch.items)) {
         return { ok: false, error: 'INVALID_BATCH' }
       }
-      // 删除旧批次
       db.prepare(`DELETE FROM recommendation_batches WHERE account_id = ?;`).run(accountId)
 
       const insBatch = db.prepare(`
@@ -1237,6 +2130,36 @@ parentPort.on('message', (msg) => {
         break
       case 'countHistory':
         result = countHistory(payload.accountId)
+        break
+      case 'listLocalActivityEvents':
+        result = listLocalActivityEvents(payload.accountId, payload.limit)
+        break
+      case 'readCloudSyncState':
+        result = readCloudSyncState(payload.accountId)
+        break
+      case 'saveCloudAccountState':
+        result = saveCloudAccountState(payload.accountId, payload.patch)
+        break
+      case 'syncCloudStreamState':
+        result = syncCloudStreamState(payload.accountId, payload.serverState)
+        break
+      case 'readOutboxBatch':
+        result = readOutboxBatch(payload.accountId, payload.maxItems, payload.maxBytes)
+        break
+      case 'applyOutboxAck':
+        result = applyOutboxAck(payload.accountId, payload.ackPayload)
+        break
+      case 'recordOutboxError':
+        result = recordOutboxError(payload.accountId, payload.errorCode, payload.retryAt)
+        break
+      case 'resetCloudAnalysisLocalState':
+        result = resetCloudAnalysisLocalState(payload.accountId, payload.newAnalysisEpoch)
+        break
+      case 'readCollectionForCloudSync':
+        result = readCollectionForCloudSync(payload.accountId, payload.collectionKind)
+        break
+      case 'markCollectionCloudSynced':
+        result = markCollectionCloudSynced(payload.accountId, payload.collectionKind, payload.result)
         break
       case 'forgetAccount':
         forgetAccount(payload.accountId)

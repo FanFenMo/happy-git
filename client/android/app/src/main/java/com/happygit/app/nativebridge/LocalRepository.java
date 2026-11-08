@@ -7,11 +7,15 @@ import android.database.sqlite.SQLiteDatabase;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 import java.util.UUID;
 
 public class LocalRepository {
@@ -22,11 +26,79 @@ public class LocalRepository {
         this.dbHelper = new HappyGitDbHelper(context);
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         this.dbHelper.createV2Tables(db);
+        this.dbHelper.createV3Tables(db);
         db.execSQL("DELETE FROM repository_cache WHERE NOT EXISTS (SELECT 1 FROM sync_state s WHERE s.account_id = repository_cache.account_id AND s.kind = repository_cache.kind AND s.active_generation = repository_cache.generation_id)");
         db.execSQL("UPDATE sync_state SET staging_generation = NULL, staging_next_page = NULL, staging_next_url = NULL, staging_page_seq = 0, staging_count = 0");
         try (Cursor accounts = db.rawQuery("SELECT account_id FROM accounts", null)) {
-            while (accounts.moveToNext()) pruneHistory(db, accounts.getString(0), System.currentTimeMillis());
+            while (accounts.moveToNext()) {
+                String accId = accounts.getString(0);
+                ensureAccountV3State(db, accId, System.currentTimeMillis());
+                pruneHistory(db, accId, System.currentTimeMillis());
+            }
         }
+    }
+
+    public static String sha256Hex(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b & 0xff));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException("SHA256_FAILED", e);
+        }
+    }
+
+    public static String computeOpenPayloadHash(String eventId, long streamEpoch, long deviceSeq, long analysisEpoch, String repoId, long occurredAt, String source) {
+        JSONArray tuple = new JSONArray();
+        tuple.put("1.0.0");
+        tuple.put(eventId);
+        tuple.put(streamEpoch);
+        tuple.put(deviceSeq);
+        tuple.put(analysisEpoch);
+        tuple.put(repoId);
+        tuple.put(occurredAt);
+        tuple.put(source != null ? source : "browse");
+        return sha256Hex(tuple.toString());
+    }
+
+    public static String computeDiscardPayloadHash(String eventId, long streamEpoch, long deviceSeq, long analysisEpoch) {
+        JSONArray tuple = new JSONArray();
+        tuple.put("1.0.0");
+        tuple.put(eventId);
+        tuple.put(streamEpoch);
+        tuple.put(deviceSeq);
+        tuple.put(analysisEpoch);
+        tuple.put("discard");
+        return sha256Hex(tuple.toString());
+    }
+
+    private String getOrCreateInstallationId(SQLiteDatabase db) {
+        try (Cursor c = db.rawQuery("SELECT value_json FROM app_settings WHERE setting_key = 'installation_id'", null)) {
+            if (c.moveToFirst()) {
+                String raw = c.getString(0);
+                if (raw != null && raw.length() >= 8) {
+                    return raw.replace("\"", "").trim();
+                }
+            }
+        }
+        String newId = "inst_" + UUID.randomUUID().toString().replace("-", "");
+        ContentValues cv = new ContentValues();
+        cv.put("setting_key", "installation_id");
+        cv.put("value_json", "\"" + newId + "\"");
+        db.insertWithOnConflict("app_settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+        return newId;
+    }
+
+    private void ensureAccountV3State(SQLiteDatabase db, String accountId, long now) {
+        String installationId = getOrCreateInstallationId(db);
+        db.execSQL("INSERT OR IGNORE INTO cloud_account_state (account_id, installation_id, stream_epoch, analysis_epoch, analysis_enabled, cloud_bound, updated_at) " +
+                "VALUES (?, ?, 1, 1, 1, 0, ?);", new Object[]{accountId, installationId, now});
+        db.execSQL("INSERT OR IGNORE INTO local_sync_state (account_id, stream_epoch, analysis_epoch, next_device_seq, accepted_through, exported_through, processed_through) " +
+                "VALUES (?, 1, 1, 1, 0, 0, 0);", new Object[]{accountId});
     }
 
     public synchronized JSONObject getAccountRevisions(String accountId) {
@@ -85,6 +157,7 @@ public class LocalRepository {
             db.insertWithOnConflict("account_preferences", null, prefCv, SQLiteDatabase.CONFLICT_IGNORE);
 
             db.execSQL("INSERT OR IGNORE INTO account_revisions (account_id) VALUES (?);", new Object[]{accountId});
+            ensureAccountV3State(db, accountId, now);
             bumpRevision(db, accountId, "profile_revision");
 
             db.setTransactionSuccessful();
@@ -93,11 +166,113 @@ public class LocalRepository {
         }
     }
 
+    public synchronized JSONObject readCloudSyncState(String accountId) {
+        if (accountId == null || accountId.isEmpty()) return null;
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        try {
+            try (Cursor actC = db.rawQuery("SELECT 1 FROM accounts WHERE account_id = ?", new String[]{accountId})) {
+                if (!actC.moveToFirst()) return null;
+            }
+            ensureAccountV3State(db, accountId, System.currentTimeMillis());
+
+            JSONObject res = new JSONObject();
+            res.put("accountId", accountId);
+
+            String subjectId = null;
+            String deviceId = null;
+            String installationId = getOrCreateInstallationId(db);
+            boolean cloudBound = false;
+            String cloudAccountId = null;
+            boolean analysisEnabled = true;
+            long sessionExpiresAt = 0;
+
+            try (Cursor c = db.rawQuery("SELECT * FROM cloud_account_state WHERE account_id = ?", new String[]{accountId})) {
+                if (c.moveToFirst()) {
+                    subjectId = c.isNull(c.getColumnIndexOrThrow("subject_id")) ? null : c.getString(c.getColumnIndexOrThrow("subject_id"));
+                    deviceId = c.isNull(c.getColumnIndexOrThrow("device_id")) ? null : c.getString(c.getColumnIndexOrThrow("device_id"));
+                    installationId = c.getString(c.getColumnIndexOrThrow("installation_id"));
+                    cloudBound = c.getInt(c.getColumnIndexOrThrow("cloud_bound")) == 1;
+                    cloudAccountId = c.isNull(c.getColumnIndexOrThrow("cloud_account_id")) ? null : c.getString(c.getColumnIndexOrThrow("cloud_account_id"));
+                    analysisEnabled = c.getInt(c.getColumnIndexOrThrow("analysis_enabled")) == 1;
+                    sessionExpiresAt = c.isNull(c.getColumnIndexOrThrow("session_expires_at")) ? 0 : c.getLong(c.getColumnIndexOrThrow("session_expires_at"));
+                }
+            }
+
+            long streamEpoch = 1;
+            long analysisEpoch = 1;
+            long nextDeviceSeq = 1;
+            long acceptedThrough = 0;
+            long exportedThrough = 0;
+            long processedThrough = 0;
+            long lastSyncAt = 0;
+            long lastServerTime = 0;
+            String lastErrorCode = null;
+            long retryAt = 0;
+
+            try (Cursor s = db.rawQuery("SELECT * FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+                if (s.moveToFirst()) {
+                    streamEpoch = s.getLong(s.getColumnIndexOrThrow("stream_epoch"));
+                    analysisEpoch = s.getLong(s.getColumnIndexOrThrow("analysis_epoch"));
+                    nextDeviceSeq = s.getLong(s.getColumnIndexOrThrow("next_device_seq"));
+                    acceptedThrough = s.getLong(s.getColumnIndexOrThrow("accepted_through"));
+                    exportedThrough = s.getLong(s.getColumnIndexOrThrow("exported_through"));
+                    processedThrough = s.getLong(s.getColumnIndexOrThrow("processed_through"));
+                    lastSyncAt = s.isNull(s.getColumnIndexOrThrow("last_sync_at")) ? 0 : s.getLong(s.getColumnIndexOrThrow("last_sync_at"));
+                    lastServerTime = s.isNull(s.getColumnIndexOrThrow("last_server_time")) ? 0 : s.getLong(s.getColumnIndexOrThrow("last_server_time"));
+                    lastErrorCode = s.isNull(s.getColumnIndexOrThrow("last_error_code")) ? null : s.getString(s.getColumnIndexOrThrow("last_error_code"));
+                    retryAt = s.isNull(s.getColumnIndexOrThrow("retry_at")) ? 0 : s.getLong(s.getColumnIndexOrThrow("retry_at"));
+                }
+            }
+
+            int pendingCount = 0;
+            try (Cursor p = db.rawQuery("SELECT COUNT(*) FROM event_outbox WHERE account_id = ? AND stream_epoch = ? AND acknowledged = 0",
+                    new String[]{accountId, String.valueOf(streamEpoch)})) {
+                if (p.moveToFirst()) pendingCount = p.getInt(0);
+            }
+
+            JSONObject collections = new JSONObject();
+            try (Cursor colC = db.rawQuery("SELECT * FROM cloud_collection_sync WHERE account_id = ?", new String[]{accountId})) {
+                while (colC.moveToNext()) {
+                    JSONObject item = new JSONObject();
+                    item.put("syncedRevision", colC.getLong(colC.getColumnIndexOrThrow("synced_revision")));
+                    item.put("syncedComplete", colC.getInt(colC.getColumnIndexOrThrow("synced_complete")) == 1);
+                    long syncedAt = colC.isNull(colC.getColumnIndexOrThrow("last_synced_at")) ? 0 : colC.getLong(colC.getColumnIndexOrThrow("last_synced_at"));
+                    item.put("lastSyncedAt", syncedAt > 0 ? syncedAt : JSONObject.NULL);
+                    collections.put(colC.getString(colC.getColumnIndexOrThrow("collection_kind")), item);
+                }
+            }
+
+            boolean accountMatched = cloudBound && cloudAccountId != null && cloudAccountId.equals(accountId);
+            res.put("subjectId", subjectId != null ? subjectId : JSONObject.NULL);
+            res.put("deviceId", deviceId != null ? deviceId : JSONObject.NULL);
+            res.put("installationId", installationId);
+            res.put("cloudBound", cloudBound);
+            res.put("cloudAccountId", cloudAccountId != null ? cloudAccountId : JSONObject.NULL);
+            res.put("accountMatched", accountMatched);
+            res.put("analysisEnabled", analysisEnabled);
+            res.put("sessionExpiresAt", sessionExpiresAt > 0 ? sessionExpiresAt : JSONObject.NULL);
+            res.put("streamEpoch", streamEpoch);
+            res.put("analysisEpoch", analysisEpoch);
+            res.put("nextDeviceSeq", nextDeviceSeq);
+            res.put("acceptedThrough", acceptedThrough);
+            res.put("exportedThrough", exportedThrough);
+            res.put("processedThrough", processedThrough);
+            res.put("pendingCount", pendingCount);
+            res.put("lastSyncAt", lastSyncAt > 0 ? lastSyncAt : JSONObject.NULL);
+            res.put("lastServerTime", lastServerTime > 0 ? lastServerTime : JSONObject.NULL);
+            res.put("lastErrorCode", lastErrorCode != null ? lastErrorCode : JSONObject.NULL);
+            res.put("retryAt", retryAt > 0 ? retryAt : JSONObject.NULL);
+            res.put("collections", collections);
+            return res;
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+    }
+
     public synchronized JSONObject readAccountSnapshot(String accountId) {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         JSONObject result = new JSONObject();
         try {
-            // Profile
             Cursor cProfile = db.rawQuery("SELECT profile_json FROM accounts WHERE account_id = ?", new String[]{accountId});
             if (cProfile.moveToFirst()) {
                 result.put("profile", new JSONObject(cProfile.getString(0)));
@@ -106,23 +281,27 @@ public class LocalRepository {
             }
             cProfile.close();
 
-            // Preferences
+            JSONObject cloudState = readCloudSyncState(accountId);
+            boolean analysisEnabled = cloudState == null || cloudState.optBoolean("analysisEnabled", true);
+
             Cursor cPref = db.rawQuery("SELECT history_enabled, manual_tags_json FROM account_preferences WHERE account_id = ?", new String[]{accountId});
             JSONObject prefObj = new JSONObject();
             if (cPref.moveToFirst()) {
                 prefObj.put("historyEnabled", cPref.getInt(0) == 1);
+                prefObj.put("analysisEnabled", analysisEnabled);
                 prefObj.put("manualTags", new JSONArray(cPref.getString(1)));
             } else {
                 prefObj.put("historyEnabled", true);
+                prefObj.put("analysisEnabled", analysisEnabled);
                 prefObj.put("manualTags", new JSONArray());
             }
             cPref.close();
             result.put("preferences", prefObj);
 
-            // Sync states
             result.put("repoSync", getSyncState(db, accountId, "repos"));
             result.put("starSync", getSyncState(db, accountId, "stars"));
             result.put("revisions", getAccountRevisions(accountId));
+            result.put("cloudSync", cloudState != null ? cloudState : JSONObject.NULL);
         } catch (Exception e) {
             throw new IllegalStateException(e.getMessage(), e);
         }
@@ -168,12 +347,22 @@ public class LocalRepository {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.beginTransaction();
         try {
+            long now = System.currentTimeMillis();
             ContentValues cv = new ContentValues();
             cv.put("account_id", accountId);
             cv.put("history_enabled", preferences.optBoolean("historyEnabled", true) ? 1 : 0);
             cv.put("manual_tags_json", preferences.optJSONArray("manualTags") != null ? preferences.optJSONArray("manualTags").toString() : "[]");
-            cv.put("updated_at", System.currentTimeMillis());
+            cv.put("updated_at", now);
             db.insertWithOnConflict("account_preferences", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+
+            if (preferences.has("analysisEnabled")) {
+                ensureAccountV3State(db, accountId, now);
+                ContentValues cloudCv = new ContentValues();
+                cloudCv.put("analysis_enabled", preferences.optBoolean("analysisEnabled", true) ? 1 : 0);
+                cloudCv.put("updated_at", now);
+                db.update("cloud_account_state", cloudCv, "account_id = ?", new String[]{accountId});
+            }
+
             bumpRevision(db, accountId, "preference_revision");
             db.setTransactionSuccessful();
         } finally {
@@ -518,9 +707,19 @@ public class LocalRepository {
         JSONObject res = new JSONObject();
         db.beginTransaction();
         try {
+            try (Cursor prefC = db.rawQuery("SELECT history_enabled FROM account_preferences WHERE account_id = ?", new String[]{accountId})) {
+                if (prefC.moveToFirst() && prefC.getInt(0) == 0) {
+                    res.put("skipped", true);
+                    res.put("reason", "HISTORY_DISABLED");
+                    db.setTransactionSuccessful();
+                    return res;
+                }
+            }
+
             String repoKey = repository.optString("repoId", "");
             if (repoKey.isEmpty()) repoKey = repository.optString("canonicalKey", "");
 
+            boolean shouldCount = true;
             Cursor c = db.rawQuery("SELECT * FROM browse_history WHERE account_id = ? AND repo_id = ?", new String[]{accountId, repoKey});
             if (!c.moveToFirst()) {
                 c.close();
@@ -544,7 +743,7 @@ public class LocalRepository {
                 c.close();
 
                 long nextViewed = Math.max(lastViewed, viewedAt);
-                boolean shouldCount = (viewedAt - lastCounted) >= 30000;
+                shouldCount = (viewedAt - lastCounted) >= 30000L;
                 int nextCount = shouldCount ? (visitCount + 1) : visitCount;
                 long nextCounted = shouldCount ? viewedAt : lastCounted;
 
@@ -560,6 +759,89 @@ public class LocalRepository {
                 db.update("browse_history", upd, "account_id = ? AND repo_id = ?", new String[]{accountId, repoKey});
             }
 
+            String createdEventId = null;
+            Long enqueuedSeq = null;
+
+            if (shouldCount) {
+                ensureAccountV3State(db, accountId, viewedAt);
+                boolean analysisEnabled = true;
+                try (Cursor ca = db.rawQuery("SELECT analysis_enabled FROM cloud_account_state WHERE account_id = ?", new String[]{accountId})) {
+                    if (ca.moveToFirst()) analysisEnabled = ca.getInt(0) == 1;
+                }
+
+                long streamEpoch = 1;
+                long analysisEpoch = 1;
+                long nextSeq = 1;
+                try (Cursor ls = db.rawQuery("SELECT stream_epoch, analysis_epoch, next_device_seq FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+                    if (ls.moveToFirst()) {
+                        streamEpoch = ls.getLong(0);
+                        analysisEpoch = ls.getLong(1);
+                        nextSeq = ls.getLong(2);
+                    }
+                }
+
+                String safeAcc = accountId.replaceAll("[^A-Za-z0-9_.-]", "_");
+                String randSuffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+                createdEventId = "evt_" + safeAcc + "_" + viewedAt + "_" + randSuffix;
+
+                ContentValues actCv = new ContentValues();
+                actCv.put("event_id", createdEventId);
+                actCv.put("account_id", accountId);
+                actCv.put("repo_id", repoKey);
+                actCv.put("full_name", repository.optString("fullName", repoKey));
+                actCv.put("record_kind", "open");
+                actCv.put("source", "browse");
+                actCv.put("entry_source", source != null ? source : "browse");
+                actCv.put("occurred_at", viewedAt);
+                actCv.put("effective_at", viewedAt);
+                actCv.put("time_flag", "normal");
+                actCv.put("analysis_epoch", analysisEpoch);
+                actCv.put("repository_json", repository.toString());
+                db.insertOrThrow("local_activity_events", null, actCv);
+
+                String canonicalRepoId = repository.optString("repoId", repoKey).trim();
+                if (analysisEnabled && !canonicalRepoId.isEmpty()) {
+                    enqueuedSeq = nextSeq;
+                    String payloadHash = computeOpenPayloadHash(
+                            createdEventId, streamEpoch, nextSeq, analysisEpoch, canonicalRepoId, viewedAt, "browse");
+
+                    JSONObject eventPayload = new JSONObject();
+                    eventPayload.put("schemaVersion", "1.0.0");
+                    eventPayload.put("eventId", createdEventId);
+                    eventPayload.put("streamEpoch", streamEpoch);
+                    eventPayload.put("deviceSeq", nextSeq);
+                    eventPayload.put("analysisEpoch", analysisEpoch);
+                    eventPayload.put("recordKind", "open");
+                    eventPayload.put("repoId", canonicalRepoId);
+                    eventPayload.put("source", "browse");
+                    eventPayload.put("entrySource", source != null ? source : "browse");
+                    eventPayload.put("occurredAt", viewedAt);
+                    eventPayload.put("payloadHash", payloadHash);
+
+                    ContentValues outCv = new ContentValues();
+                    outCv.put("account_id", accountId);
+                    outCv.put("stream_epoch", streamEpoch);
+                    outCv.put("device_seq", nextSeq);
+                    outCv.put("event_id", createdEventId);
+                    outCv.put("analysis_epoch", analysisEpoch);
+                    outCv.put("record_kind", "open");
+                    outCv.put("repo_id", canonicalRepoId);
+                    outCv.put("source", "browse");
+                    outCv.put("entry_source", source != null ? source : "browse");
+                    outCv.put("occurred_at", viewedAt);
+                    outCv.put("payload_hash", payloadHash);
+                    outCv.put("payload_json", eventPayload.toString());
+                    outCv.put("acknowledged", 0);
+                    outCv.put("created_at", viewedAt);
+                    outCv.put("updated_at", viewedAt);
+                    db.insertOrThrow("event_outbox", null, outCv);
+
+                    ContentValues seqUpd = new ContentValues();
+                    seqUpd.put("next_device_seq", nextSeq + 1);
+                    db.update("local_sync_state", seqUpd, "account_id = ?", new String[]{accountId});
+                }
+            }
+
             pruneHistory(db, accountId, viewedAt);
             bumpRevision(db, accountId, "history_revision");
 
@@ -573,6 +855,9 @@ public class LocalRepository {
                 res.put("lastCountedAt", finalC.getLong(finalC.getColumnIndexOrThrow("last_counted_at")));
                 res.put("visitCount", finalC.getInt(finalC.getColumnIndexOrThrow("visit_count")));
                 res.put("lastSource", finalC.getString(finalC.getColumnIndexOrThrow("last_source")));
+                res.put("countedVisit", shouldCount);
+                res.put("eventId", createdEventId != null ? createdEventId : JSONObject.NULL);
+                res.put("deviceSeq", enqueuedSeq != null ? enqueuedSeq : JSONObject.NULL);
             }
             finalC.close();
 
@@ -588,6 +873,7 @@ public class LocalRepository {
     private void pruneHistory(SQLiteDatabase db, String accountId, long now) {
         long ninetyDaysAgo = now - (90L * 24 * 60 * 60 * 1000);
         db.delete("browse_history", "account_id = ? AND last_viewed_at < ?", new String[]{accountId, String.valueOf(ninetyDaysAgo)});
+        db.delete("local_activity_events", "account_id = ? AND occurred_at < ?", new String[]{accountId, String.valueOf(ninetyDaysAgo)});
 
         Cursor countC = db.rawQuery("SELECT COUNT(*) FROM browse_history WHERE account_id = ?", new String[]{accountId});
         int count = 0;
@@ -599,6 +885,46 @@ public class LocalRepository {
                     "SELECT repo_id FROM browse_history WHERE account_id = ? " +
                     "ORDER BY last_viewed_at DESC, repo_id DESC LIMIT 5000)", new Object[]{accountId, accountId});
         }
+    }
+
+    private void convertPendingOutboxToDiscard(SQLiteDatabase db, String accountId, String repoId) {
+        long now = System.currentTimeMillis();
+        String sql = repoId != null
+                ? "SELECT event_id, stream_epoch, device_seq, analysis_epoch FROM event_outbox WHERE account_id = ? AND repo_id = ? AND acknowledged = 0 AND record_kind = 'open'"
+                : "SELECT event_id, stream_epoch, device_seq, analysis_epoch FROM event_outbox WHERE account_id = ? AND acknowledged = 0 AND record_kind = 'open'";
+        String[] args = repoId != null ? new String[]{accountId, repoId} : new String[]{accountId};
+
+        List<long[]> seqInfo = new ArrayList<>();
+        List<String> eventIds = new ArrayList<>();
+        try (Cursor c = db.rawQuery(sql, args)) {
+            while (c.moveToNext()) {
+                eventIds.add(c.getString(0));
+                seqInfo.add(new long[]{c.getLong(1), c.getLong(2), c.getLong(3)});
+            }
+        }
+
+        for (int i = 0; i < eventIds.size(); i++) {
+            String eid = eventIds.get(i);
+            long[] info = seqInfo.get(i);
+            String discardHash = computeDiscardPayloadHash(eid, info[0], info[1], info[2]);
+            ContentValues upd = new ContentValues();
+            upd.put("record_kind", "discard");
+            upd.putNull("repo_id");
+            upd.putNull("source");
+            upd.putNull("entry_source");
+            upd.putNull("occurred_at");
+            upd.put("payload_hash", discardHash);
+            upd.putNull("payload_json");
+            upd.put("updated_at", now);
+            db.update("event_outbox", upd, "account_id = ? AND stream_epoch = ? AND device_seq = ?",
+                    new String[]{accountId, String.valueOf(info[0]), String.valueOf(info[1])});
+        }
+
+        ContentValues clearFlight = new ContentValues();
+        clearFlight.putNull("in_flight_request_id");
+        clearFlight.putNull("in_flight_first_seq");
+        clearFlight.putNull("in_flight_last_seq");
+        db.update("local_sync_state", clearFlight, "account_id = ?", new String[]{accountId});
     }
 
     public synchronized JSONObject listHistory(String accountId, JSONObject cursor, int limit, String keyword) {
@@ -679,6 +1005,8 @@ public class LocalRepository {
         db.beginTransaction();
         try {
             db.delete("browse_history", "account_id = ? AND repo_id = ?", new String[]{accountId, repoId});
+            db.delete("local_activity_events", "account_id = ? AND repo_id = ?", new String[]{accountId, repoId});
+            convertPendingOutboxToDiscard(db, accountId, repoId);
             bumpRevision(db, accountId, "history_revision");
             db.delete("interest_profiles", "account_id = ?", new String[]{accountId});
             db.delete("recommendation_batches", "account_id = ?", new String[]{accountId});
@@ -693,6 +1021,8 @@ public class LocalRepository {
         db.beginTransaction();
         try {
             db.delete("browse_history", "account_id = ?", new String[]{accountId});
+            db.delete("local_activity_events", "account_id = ?", new String[]{accountId});
+            convertPendingOutboxToDiscard(db, accountId, null);
             bumpRevision(db, accountId, "history_revision");
             db.delete("interest_profiles", "account_id = ?", new String[]{accountId});
             db.delete("discovery_cache", "account_id = ?", new String[]{accountId});
@@ -701,6 +1031,437 @@ public class LocalRepository {
         } finally {
             db.endTransaction();
         }
+    }
+
+    public synchronized JSONObject saveCloudAccountState(String accountId, JSONObject patch) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long now = System.currentTimeMillis();
+            ensureAccountV3State(db, accountId, now);
+            ContentValues cv = new ContentValues();
+            if (patch.has("subjectId")) {
+                if (patch.isNull("subjectId")) cv.putNull("subject_id");
+                else cv.put("subject_id", patch.optString("subjectId"));
+            }
+            if (patch.has("deviceId")) {
+                if (patch.isNull("deviceId")) cv.putNull("device_id");
+                else cv.put("device_id", patch.optString("deviceId"));
+            }
+            if (patch.has("streamEpoch")) cv.put("stream_epoch", patch.optLong("streamEpoch", 1));
+            if (patch.has("analysisEpoch")) cv.put("analysis_epoch", patch.optLong("analysisEpoch", 1));
+            if (patch.has("analysisEnabled")) cv.put("analysis_enabled", patch.optBoolean("analysisEnabled", true) ? 1 : 0);
+            if (patch.has("cloudBound")) cv.put("cloud_bound", patch.optBoolean("cloudBound", false) ? 1 : 0);
+            if (patch.has("cloudAccountId")) {
+                if (patch.isNull("cloudAccountId")) cv.putNull("cloud_account_id");
+                else cv.put("cloud_account_id", patch.optString("cloudAccountId"));
+            }
+            if (patch.has("sessionExpiresAt")) {
+                if (patch.isNull("sessionExpiresAt")) cv.putNull("session_expires_at");
+                else cv.put("session_expires_at", patch.optLong("sessionExpiresAt"));
+            }
+            cv.put("updated_at", now);
+            db.update("cloud_account_state", cv, "account_id = ?", new String[]{accountId});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        return readCloudSyncState(accountId);
+    }
+
+    public synchronized JSONObject syncCloudStreamState(String accountId, JSONObject serverState) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long now = System.currentTimeMillis();
+            ensureAccountV3State(db, accountId, now);
+
+            long oldStreamEpoch = 1;
+            long oldAnalysisEpoch = 1;
+            long nextDeviceSeq = 1;
+            long curAccepted = 0;
+            long curExported = 0;
+            long curProcessed = 0;
+
+            try (Cursor c = db.rawQuery("SELECT stream_epoch, analysis_epoch, next_device_seq, accepted_through, exported_through, processed_through FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+                if (c.moveToFirst()) {
+                    oldStreamEpoch = c.getLong(0);
+                    oldAnalysisEpoch = c.getLong(1);
+                    nextDeviceSeq = c.getLong(2);
+                    curAccepted = c.getLong(3);
+                    curExported = c.getLong(4);
+                    curProcessed = c.getLong(5);
+                }
+            }
+
+            long newStreamEpoch = serverState.optLong("streamEpoch", oldStreamEpoch);
+            long newAnalysisEpoch = serverState.optLong("analysisEpoch", oldAnalysisEpoch);
+            long acceptedThrough = serverState.optLong("acceptedThrough", curAccepted);
+            long exportedThrough = serverState.optLong("exportedThrough", curExported);
+            long processedThrough = serverState.optLong("processedThrough", curProcessed);
+
+            ContentValues accUpd = new ContentValues();
+            if (serverState.has("deviceId") && !serverState.isNull("deviceId")) {
+                accUpd.put("device_id", serverState.optString("deviceId"));
+            }
+            accUpd.put("stream_epoch", newStreamEpoch);
+            accUpd.put("analysis_epoch", newAnalysisEpoch);
+            JSONObject prefs = serverState.optJSONObject("preferences");
+            if (prefs != null && prefs.has("analysisEnabled")) {
+                accUpd.put("analysis_enabled", prefs.optBoolean("analysisEnabled", true) ? 1 : 0);
+            }
+            accUpd.put("updated_at", now);
+            db.update("cloud_account_state", accUpd, "account_id = ?", new String[]{accountId});
+
+            if (oldStreamEpoch == newStreamEpoch && acceptedThrough > 0) {
+                ContentValues ackCv = new ContentValues();
+                ackCv.put("acknowledged", 1);
+                ackCv.putNull("payload_json");
+                ackCv.put("updated_at", now);
+                db.update("event_outbox", ackCv, "account_id = ? AND stream_epoch = ? AND device_seq <= ?",
+                        new String[]{accountId, String.valueOf(newStreamEpoch), String.valueOf(acceptedThrough)});
+            }
+
+            long finalNextSeq = Math.max(acceptedThrough + 1, nextDeviceSeq);
+            ContentValues syncUpd = new ContentValues();
+            syncUpd.put("stream_epoch", newStreamEpoch);
+            syncUpd.put("analysis_epoch", newAnalysisEpoch);
+            syncUpd.put("next_device_seq", finalNextSeq);
+            syncUpd.put("accepted_through", acceptedThrough);
+            syncUpd.put("exported_through", exportedThrough);
+            syncUpd.put("processed_through", processedThrough);
+            if (serverState.has("serverTime")) syncUpd.put("last_server_time", serverState.optLong("serverTime"));
+            syncUpd.putNull("last_error_code");
+            syncUpd.putNull("retry_at");
+            syncUpd.putNull("in_flight_request_id");
+            syncUpd.putNull("in_flight_first_seq");
+            syncUpd.putNull("in_flight_last_seq");
+            db.update("local_sync_state", syncUpd, "account_id = ?", new String[]{accountId});
+
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        return readCloudSyncState(accountId);
+    }
+
+    public synchronized JSONObject readOutboxBatch(String accountId, int maxItems, int maxBytes) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        JSONObject res = new JSONObject();
+        db.beginTransaction();
+        try {
+            ensureAccountV3State(db, accountId, System.currentTimeMillis());
+            long streamEpoch = 1;
+            long analysisEpoch = 1;
+            long acceptedThrough = 0;
+            String inFlightId = null;
+            long inFlightFirst = -1;
+            long inFlightLast = -1;
+
+            try (Cursor s = db.rawQuery("SELECT stream_epoch, analysis_epoch, accepted_through, in_flight_request_id, in_flight_first_seq, in_flight_last_seq FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+                if (s.moveToFirst()) {
+                    streamEpoch = s.getLong(0);
+                    analysisEpoch = s.getLong(1);
+                    acceptedThrough = s.getLong(2);
+                    inFlightId = s.isNull(3) ? null : s.getString(3);
+                    inFlightFirst = s.isNull(4) ? -1 : s.getLong(4);
+                    inFlightLast = s.isNull(5) ? -1 : s.getLong(5);
+                }
+            }
+
+            long expectedFirstSeq = acceptedThrough + 1;
+            JSONArray events = new JSONArray();
+            long expectedSeq = -1;
+            long firstSeq = -1;
+            long lastSeq = -1;
+            int accumulatedBytes = 128;
+
+            try (Cursor c = db.rawQuery(
+                    "SELECT event_id, device_seq, record_kind, repo_id, occurred_at, source, entry_source, payload_hash " +
+                            "FROM event_outbox WHERE account_id = ? AND stream_epoch = ? AND acknowledged = 0 AND device_seq >= ? " +
+                            "ORDER BY device_seq ASC LIMIT ?",
+                    new String[]{accountId, String.valueOf(streamEpoch), String.valueOf(expectedFirstSeq), String.valueOf(Math.min(500, Math.max(1, maxItems)))})) {
+                while (c.moveToNext()) {
+                    long seq = c.getLong(1);
+                    if (expectedSeq == -1) {
+                        expectedSeq = seq;
+                        firstSeq = seq;
+                    } else if (seq != expectedSeq) {
+                        break;
+                    }
+
+                    String kind = c.getString(2);
+                    JSONObject ev = new JSONObject();
+                    ev.put("eventId", c.getString(0));
+                    ev.put("deviceSeq", seq);
+                    ev.put("recordKind", kind);
+                    if ("open".equals(kind)) {
+                        ev.put("repoId", c.getString(3));
+                        ev.put("occurredAt", c.getLong(4));
+                        ev.put("source", c.isNull(5) ? "browse" : c.getString(5));
+                        ev.put("entrySource", c.isNull(6) ? "browse" : c.getString(6));
+                    }
+                    ev.put("payloadHash", c.getString(7));
+
+                    int itemBytes = ev.toString().getBytes(StandardCharsets.UTF_8).length + 2;
+                    if (events.length() > 0 && accumulatedBytes + itemBytes > maxBytes) {
+                        break;
+                    }
+                    events.put(ev);
+                    accumulatedBytes += itemBytes;
+                    lastSeq = seq;
+                    expectedSeq = seq + 1;
+                }
+            }
+
+            if (events.length() == 0) {
+                res.put("hasBatch", false);
+                res.put("events", events);
+                db.setTransactionSuccessful();
+                return res;
+            }
+
+            String requestId = inFlightId;
+            if (requestId == null || inFlightFirst != firstSeq || inFlightLast != lastSeq) {
+                requestId = "req_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+                ContentValues flightCv = new ContentValues();
+                flightCv.put("in_flight_request_id", requestId);
+                flightCv.put("in_flight_first_seq", firstSeq);
+                flightCv.put("in_flight_last_seq", lastSeq);
+                db.update("local_sync_state", flightCv, "account_id = ?", new String[]{accountId});
+            }
+
+            res.put("hasBatch", true);
+            res.put("requestId", requestId);
+            res.put("streamEpoch", streamEpoch);
+            res.put("analysisEpoch", analysisEpoch);
+            res.put("firstSeq", firstSeq);
+            res.put("lastSeq", lastSeq);
+            res.put("events", events);
+            db.setTransactionSuccessful();
+            return res;
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    public synchronized JSONObject applyOutboxAck(String accountId, JSONObject ackPayload) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long now = System.currentTimeMillis();
+            ensureAccountV3State(db, accountId, now);
+
+            long curStream = 1, curAnalysis = 1, curAccepted = 0, curExported = 0, curProcessed = 0;
+            try (Cursor s = db.rawQuery("SELECT stream_epoch, analysis_epoch, accepted_through, exported_through, processed_through FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+                if (s.moveToFirst()) {
+                    curStream = s.getLong(0);
+                    curAnalysis = s.getLong(1);
+                    curAccepted = s.getLong(2);
+                    curExported = s.getLong(3);
+                    curProcessed = s.getLong(4);
+                }
+            }
+
+            long streamEpoch = ackPayload.optLong("streamEpoch", curStream);
+            long analysisEpoch = ackPayload.optLong("analysisEpoch", curAnalysis);
+            long acceptedThrough = Math.max(curAccepted, ackPayload.optLong("acceptedThrough", 0));
+            long exportedThrough = Math.max(curExported, ackPayload.optLong("exportedThrough", 0));
+            long processedThrough = ackPayload.has("processedThrough")
+                    ? Math.max(curProcessed, ackPayload.optLong("processedThrough", 0))
+                    : curProcessed;
+
+            ContentValues ackCv = new ContentValues();
+            ackCv.put("acknowledged", 1);
+            ackCv.putNull("payload_json");
+            ackCv.put("updated_at", now);
+            db.update("event_outbox", ackCv, "account_id = ? AND stream_epoch = ? AND device_seq <= ?",
+                    new String[]{accountId, String.valueOf(streamEpoch), String.valueOf(acceptedThrough)});
+
+            JSONArray timeAdjs = ackPayload.optJSONArray("timeAdjustments");
+            if (timeAdjs != null) {
+                for (int i = 0; i < timeAdjs.length(); i++) {
+                    JSONObject adj = timeAdjs.optJSONObject(i);
+                    if (adj != null && adj.has("eventId") && adj.has("effectiveAt")) {
+                        ContentValues adjCv = new ContentValues();
+                        adjCv.put("effective_at", adj.optLong("effectiveAt"));
+                        adjCv.put("time_flag", adj.optString("timeFlag", "adjusted"));
+                        db.update("local_activity_events", adjCv, "account_id = ? AND event_id = ?",
+                                new String[]{accountId, adj.optString("eventId")});
+                    }
+                }
+            }
+
+            ContentValues syncUpd = new ContentValues();
+            syncUpd.put("stream_epoch", streamEpoch);
+            syncUpd.put("analysis_epoch", analysisEpoch);
+            syncUpd.put("accepted_through", acceptedThrough);
+            syncUpd.put("exported_through", exportedThrough);
+            syncUpd.put("processed_through", processedThrough);
+            syncUpd.put("last_sync_at", now);
+            if (ackPayload.has("serverTime")) syncUpd.put("last_server_time", ackPayload.optLong("serverTime"));
+            syncUpd.putNull("last_error_code");
+            syncUpd.putNull("retry_at");
+            syncUpd.putNull("in_flight_request_id");
+            syncUpd.putNull("in_flight_first_seq");
+            syncUpd.putNull("in_flight_last_seq");
+            db.update("local_sync_state", syncUpd, "account_id = ?", new String[]{accountId});
+
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        return readCloudSyncState(accountId);
+    }
+
+    public synchronized JSONObject recordOutboxError(String accountId, String errorCode, Long retryAt) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        ensureAccountV3State(db, accountId, System.currentTimeMillis());
+        ContentValues cv = new ContentValues();
+        if (errorCode != null) cv.put("last_error_code", errorCode);
+        else cv.putNull("last_error_code");
+        if (retryAt != null) cv.put("retry_at", retryAt);
+        else cv.putNull("retry_at");
+        db.update("local_sync_state", cv, "account_id = ?", new String[]{accountId});
+        return readCloudSyncState(accountId);
+    }
+
+    public synchronized JSONObject resetCloudAnalysisLocalState(String accountId, long newAnalysisEpoch) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long now = System.currentTimeMillis();
+            ensureAccountV3State(db, accountId, now);
+            convertPendingOutboxToDiscard(db, accountId, null);
+
+            ContentValues outUpd = new ContentValues();
+            outUpd.put("analysis_epoch", newAnalysisEpoch);
+            outUpd.put("updated_at", now);
+            db.update("event_outbox", outUpd, "account_id = ? AND acknowledged = 0", new String[]{accountId});
+
+            ContentValues accUpd = new ContentValues();
+            accUpd.put("analysis_epoch", newAnalysisEpoch);
+            accUpd.put("updated_at", now);
+            db.update("cloud_account_state", accUpd, "account_id = ?", new String[]{accountId});
+
+            ContentValues syncUpd = new ContentValues();
+            syncUpd.put("analysis_epoch", newAnalysisEpoch);
+            syncUpd.put("processed_through", 0);
+            db.update("local_sync_state", syncUpd, "account_id = ?", new String[]{accountId});
+
+            db.delete("cloud_collection_sync", "account_id = ?", new String[]{accountId});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        return readCloudSyncState(accountId);
+    }
+
+    public synchronized JSONObject readCollectionForCloudSync(String accountId, String collectionKind) {
+        SQLiteDatabase db = dbHelper.getReadableDatabase();
+        JSONObject res = new JSONObject();
+        try {
+            String localKind = "stars".equals(collectionKind) ? "stars" : "repos";
+            String activeGen = null;
+            boolean activeComplete = false;
+            long lastCompletedAt = System.currentTimeMillis();
+
+            try (Cursor s = db.rawQuery("SELECT active_generation, active_complete, last_completed_at FROM sync_state WHERE account_id = ? AND kind = ?", new String[]{accountId, localKind})) {
+                if (s.moveToFirst()) {
+                    activeGen = s.getString(0);
+                    activeComplete = s.getInt(1) == 1;
+                    if (!s.isNull(2)) lastCompletedAt = s.getLong(2);
+                }
+            }
+
+            long syncedRevision = 0;
+            boolean syncedComplete = false;
+            String syncedHash = null;
+            try (Cursor cc = db.rawQuery("SELECT synced_revision, synced_complete, synced_hash FROM cloud_collection_sync WHERE account_id = ? AND collection_kind = ?", new String[]{accountId, collectionKind})) {
+                if (cc.moveToFirst()) {
+                    syncedRevision = cc.getLong(0);
+                    syncedComplete = cc.getInt(1) == 1;
+                    syncedHash = cc.isNull(2) ? null : cc.getString(2);
+                }
+            }
+
+            long analysisEpoch = 1;
+            try (Cursor ca = db.rawQuery("SELECT analysis_epoch FROM cloud_account_state WHERE account_id = ?", new String[]{accountId})) {
+                if (ca.moveToFirst()) analysisEpoch = ca.getLong(0);
+            }
+
+            if (activeGen == null || !activeComplete) {
+                res.put("shouldUpload", false);
+                res.put("reason", syncedComplete ? "LOCAL_INCOMPLETE_PROTECT_COMPLETE_CLOUD" : "LOCAL_COLLECTION_NOT_COMPLETE");
+                res.put("collectionKind", collectionKind);
+                res.put("complete", false);
+                return res;
+            }
+
+            TreeSet<String> repoIdSet = new TreeSet<>();
+            try (Cursor rc = db.rawQuery("SELECT repository_json FROM repository_cache WHERE account_id = ? AND kind = ? AND generation_id = ?",
+                    new String[]{accountId, localKind, activeGen})) {
+                while (rc.moveToNext()) {
+                    try {
+                        JSONObject repo = new JSONObject(rc.getString(0));
+                        if (!"private".equals(repo.optString("visibility", "public")) && !repo.optBoolean("private", false)) {
+                            String rid = repo.optString("repoId", "").trim();
+                            if (!rid.isEmpty()) repoIdSet.add(rid);
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            JSONArray repoIds = new JSONArray();
+            for (String rid : repoIdSet) repoIds.put(rid);
+
+            JSONObject hashPayload = new JSONObject();
+            hashPayload.put("analysisEpoch", analysisEpoch);
+            hashPayload.put("collectionKind", collectionKind);
+            hashPayload.put("complete", true);
+            hashPayload.put("repoIds", repoIds);
+            String snapshotHash = sha256Hex(hashPayload.toString());
+
+            if (syncedComplete && snapshotHash.equals(syncedHash)) {
+                res.put("shouldUpload", false);
+                res.put("reason", "UNCHANGED");
+                res.put("collectionKind", collectionKind);
+                res.put("complete", true);
+                res.put("syncedRevision", syncedRevision);
+                return res;
+            }
+
+            String operationId = "coll_" + collectionKind + "_" + accountId + "_r" + (syncedRevision + 1) + "_" + snapshotHash.substring(0, 12);
+            res.put("shouldUpload", true);
+            res.put("operationId", operationId);
+            res.put("expectedRevision", syncedRevision);
+            res.put("analysisEpoch", analysisEpoch);
+            res.put("collectionKind", collectionKind);
+            res.put("complete", true);
+            res.put("observedAt", lastCompletedAt);
+            res.put("repoIds", repoIds);
+            res.put("snapshotHash", snapshotHash);
+            return res;
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+    }
+
+    public synchronized JSONObject markCollectionCloudSynced(String accountId, String collectionKind, long revision, boolean complete, String snapshotHash, String operationId) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        long now = System.currentTimeMillis();
+        ContentValues cv = new ContentValues();
+        cv.put("account_id", accountId);
+        cv.put("collection_kind", collectionKind);
+        cv.put("synced_revision", revision);
+        cv.put("synced_complete", complete ? 1 : 0);
+        if (snapshotHash != null) cv.put("synced_hash", snapshotHash);
+        cv.put("last_synced_at", now);
+        if (operationId != null) cv.put("last_operation_id", operationId);
+        db.insertWithOnConflict("cloud_collection_sync", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+        return readCloudSyncState(accountId);
     }
 
     public synchronized void forgetAccount(String accountId) {
@@ -753,7 +1514,6 @@ public class LocalRepository {
         db.insertWithOnConflict("feed_cache", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
 
-    // v2 领域操作
     public synchronized JSONObject createSnapshot(String accountId, String purpose, String reason) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         JSONObject res = new JSONObject();
@@ -777,7 +1537,6 @@ public class LocalRepository {
                 }
             }
 
-            // 读取 Star 活跃集合
             JSONArray starred = new JSONArray();
             Cursor starSync = db.rawQuery("SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = 'stars'", new String[]{accountId});
             if (starSync.moveToFirst()) {
@@ -790,7 +1549,6 @@ public class LocalRepository {
             }
             starSync.close();
 
-            // 读取本人仓库活跃集合
             JSONArray owned = new JSONArray();
             Cursor repoSync = db.rawQuery("SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = 'repos'", new String[]{accountId});
             if (repoSync.moveToFirst()) {
@@ -803,7 +1561,6 @@ public class LocalRepository {
             }
             repoSync.close();
 
-            // 偏好
             Cursor prefC = db.rawQuery("SELECT history_enabled, manual_tags_json FROM account_preferences WHERE account_id = ?", new String[]{accountId});
             boolean historyEnabled = true;
             JSONArray manualTags = new JSONArray();
@@ -813,7 +1570,6 @@ public class LocalRepository {
             }
             prefC.close();
 
-            // 历史
             JSONArray history = new JSONArray();
             if (historyEnabled) {
                 Cursor histC = db.rawQuery("SELECT * FROM browse_history WHERE account_id = ? ORDER BY last_viewed_at DESC LIMIT 5000", new String[]{accountId});
@@ -830,13 +1586,11 @@ public class LocalRepository {
                 histC.close();
             }
 
-            // 隐藏项
             JSONArray hiddenRepoIds = new JSONArray();
             Cursor hidC = db.rawQuery("SELECT repo_id FROM recommendation_feedback WHERE account_id = ? AND hidden = 1", new String[]{accountId});
             while (hidC.moveToNext()) hiddenRepoIds.put(hidC.getString(0));
             hidC.close();
 
-            // 候选
             JSONArray candidates = new JSONArray();
             Map<String, JSONObject> candidateMap = new HashMap<>();
             Cursor discC = db.rawQuery("SELECT result_json FROM discovery_cache WHERE account_id = ? AND expires_at > ?", new String[]{accountId, String.valueOf(now)});

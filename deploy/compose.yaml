@@ -3,13 +3,40 @@ services:
     build:
       context: ../server
     restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
     environment:
+      SPRING_PROFILES_ACTIVE: cloud
+      HG_MYSQL_URL: jdbc:mysql://mysql:3306/happygit?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC
+      HG_MYSQL_USER: happygit
+      HG_MYSQL_PASSWORD: ${HG_MYSQL_PASSWORD:?请配置业务数据库密码}
+      HG_CLOUD_ADMIN_TOKEN: ${HG_CLOUD_ADMIN_TOKEN:?请配置独立数据平台服务凭据}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?请配置项目的 GitHub Client ID}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?请配置项目的 GitHub Client Secret}
       GITHUB_CALLBACK_URL: https://${HAPPYGIT_DOMAIN:?请配置项目的域名}/api/auth/github/callback
       GITHUB_APP_TYPE: ${GITHUB_APP_TYPE:-oauth-app}
+      GITHUB_CLOUD_CLIENT_ID: ${GITHUB_CLOUD_CLIENT_ID:-${GITHUB_CLIENT_ID}}
+      GITHUB_CLOUD_CLIENT_SECRET: ${GITHUB_CLOUD_CLIENT_SECRET:-${GITHUB_CLIENT_SECRET}}
+      GITHUB_CLOUD_CALLBACK_URL: https://${HAPPYGIT_DOMAIN}/api/v2/auth/github/callback
     expose:
       - "8081"
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: happygit
+      MYSQL_USER: happygit
+      MYSQL_PASSWORD: ${HG_MYSQL_PASSWORD:?请配置业务数据库密码}
+      MYSQL_ROOT_PASSWORD: ${HG_MYSQL_ROOT_PASSWORD:?请配置数据库管理密码}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   proxy:
     image: caddy:2
@@ -28,5 +55,6 @@ services:
       - caddy_config:/config
 
 volumes:
+  mysql_data:
   caddy_data:
   caddy_config:

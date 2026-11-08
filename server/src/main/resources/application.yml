@@ -4,6 +4,8 @@ server:
     context-path: /
 
 spring:
+  autoconfigure:
+    exclude: org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration,org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
   application:
     name: happygit-server
   jackson:

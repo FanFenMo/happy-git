@@ -48,6 +48,8 @@ function initOrMigrateDatabase() {
   } else if (userVersion === 1) {
     migrateV1ToV2()
     db.exec('PRAGMA user_version = 2;')
+  } else {
+    initTablesV2()
   }
 }
 
@@ -241,10 +243,22 @@ function initTablesV2() {
       FOREIGN KEY (batch_id) REFERENCES recommendation_batches(batch_id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS recommendation_snapshots (
+      input_id TEXT PRIMARY KEY NOT NULL,
+      account_id TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      input_versions_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      consumed INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_website_operations_account_state
       ON website_operations(account_id, state);
     CREATE INDEX IF NOT EXISTS idx_recommendation_batches_account_time
       ON recommendation_batches(account_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_recommendation_snapshots_account
+      ON recommendation_snapshots(account_id, created_at DESC);
   `)
 }
 
@@ -860,10 +874,20 @@ function saveFeed(key, items, fetchedAt = Date.now()) {
 }
 
 // v2 领域操作: createSnapshot, commitRecommendation, listRecommendation, feedback, discovery, operations
-function createSnapshot(accountId, purpose, reason) {
+function createSnapshot(accountId, purpose = 'ranking', reason = 'user_request') {
   return withTransaction(() => {
     const revisions = getAccountRevisions(accountId)
-    const inputId = 'snap_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
+    const now = Date.now()
+    const inputId = 'snap_' + now + '_' + Math.random().toString(36).slice(2, 8)
+
+    const actExists = db.prepare('SELECT 1 FROM accounts WHERE account_id = ?;').get(accountId)
+    if (actExists) {
+      db.prepare(`
+        INSERT OR REPLACE INTO recommendation_snapshots (
+          input_id, account_id, purpose, input_versions_json, created_at, consumed
+        ) VALUES (?, ?, ?, ?, ?, 0);
+      `).run(inputId, accountId, purpose || 'ranking', JSON.stringify(revisions), now)
+    }
 
     // 读取 Star 活跃集合
     const starSync = db.prepare(`SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = 'stars';`).get(accountId)
@@ -905,7 +929,6 @@ function createSnapshot(accountId, purpose, reason) {
     const hiddenRepoIds = hiddenRows.map(r => r.repo_id)
 
     // 读取候选 (来自 discovery_cache)
-    const now = Date.now()
     const discRows = db.prepare(`SELECT result_json FROM discovery_cache WHERE account_id = ? AND expires_at > ?;`).all(accountId, now)
     const candidateMap = new Map()
     for (const d of discRows) {
@@ -942,16 +965,46 @@ function createSnapshot(accountId, purpose, reason) {
 
 function commitRecommendation(accountId, inputId, inputVersions, purpose, profile, batch) {
   return withTransaction(() => {
+    if (!accountId || !inputId || !purpose) {
+      return { ok: false, error: 'INPUT_CHANGED' }
+    }
+
     const currentRevisions = getAccountRevisions(accountId)
-    // 检查版本是否变更
-    for (const [k, v] of Object.entries(inputVersions || {})) {
-      if (currentRevisions[k] !== undefined && currentRevisions[k] !== v) {
+    const snapRow = db.prepare('SELECT * FROM recommendation_snapshots WHERE input_id = ?;').get(inputId)
+    if (snapRow) {
+      if (snapRow.account_id !== accountId || snapRow.purpose !== purpose || snapRow.consumed === 1) {
+        return { ok: false, error: 'INPUT_CHANGED' }
+      }
+    } else {
+      const hasAnySnap = db.prepare('SELECT 1 FROM recommendation_snapshots WHERE account_id = ? LIMIT 1;').get(accountId)
+      if (hasAnySnap) {
+        return { ok: false, error: 'INPUT_CHANGED' }
+      }
+    }
+
+    const savedVersions = snapRow ? JSON.parse(snapRow.input_versions_json || '{}') : null
+    const clientVersions = (inputVersions && typeof inputVersions === 'object') ? inputVersions : null
+    if (!savedVersions && (!clientVersions || Object.keys(clientVersions).length === 0)) {
+      return { ok: false, error: 'INPUT_CHANGED' }
+    }
+
+    const baselineVersions = savedVersions || clientVersions
+    for (const [k, currentVal] of Object.entries(currentRevisions)) {
+      if (baselineVersions[k] !== undefined && baselineVersions[k] !== currentVal) {
+        return { ok: false, error: 'INPUT_CHANGED' }
+      }
+      if (clientVersions && clientVersions[k] !== undefined && clientVersions[k] !== currentVal) {
         return { ok: false, error: 'INPUT_CHANGED' }
       }
     }
 
     const now = Date.now()
-    if (purpose === 'profile' && profile) {
+    const effectiveVersionsJson = JSON.stringify(baselineVersions)
+
+    if (purpose === 'profile') {
+      if (!profile || typeof profile !== 'object') {
+        return { ok: false, error: 'INVALID_PROFILE' }
+      }
       const stmt = db.prepare(`
         INSERT INTO interest_profiles (account_id, model_version, input_versions_json, profile_json, generated_at)
         VALUES (?, 'content-v1', ?, ?, ?)
@@ -961,8 +1014,11 @@ function commitRecommendation(accountId, inputId, inputVersions, purpose, profil
           profile_json = excluded.profile_json,
           generated_at = excluded.generated_at;
       `)
-      stmt.run(accountId, JSON.stringify(inputVersions), JSON.stringify(profile), now)
-    } else if (purpose === 'ranking' && batch) {
+      stmt.run(accountId, effectiveVersionsJson, JSON.stringify(profile), now)
+    } else if (purpose === 'ranking') {
+      if (!batch || !batch.batchId || !Array.isArray(batch.items)) {
+        return { ok: false, error: 'INVALID_BATCH' }
+      }
       // 删除旧批次
       db.prepare(`DELETE FROM recommendation_batches WHERE account_id = ?;`).run(accountId)
 
@@ -970,25 +1026,34 @@ function commitRecommendation(accountId, inputId, inputVersions, purpose, profil
         INSERT INTO recommendation_batches (batch_id, account_id, model_version, input_versions_json, created_at, expires_at)
         VALUES (?, ?, 'content-v1', ?, ?, ?);
       `)
-      insBatch.run(batch.batchId, accountId, JSON.stringify(inputVersions), batch.createdAt || now, batch.expiresAt || (now + 86400000))
+      insBatch.run(batch.batchId, accountId, effectiveVersionsJson, batch.createdAt || now, batch.expiresAt || (now + 86400000))
 
       const insItem = db.prepare(`
         INSERT OR REPLACE INTO recommendation_items (batch_id, position, repo_id, score, reasons_json, repository_json)
         VALUES (?, ?, ?, ?, ?, ?);
       `)
       for (const item of (batch.items || [])) {
+        if (!item || !item.repository) continue
+        const repoKey = item.repoId || item.repository.repoId || item.repository.canonicalKey
+        if (!repoKey) continue
         insItem.run(
           batch.batchId,
           item.position,
-          item.repoId,
+          String(repoKey),
           item.score,
           JSON.stringify(item.reasons || []),
           JSON.stringify(item.repository)
         )
       }
+    } else {
+      return { ok: false, error: 'INVALID_PURPOSE' }
     }
 
-    return { ok: true }
+    if (snapRow) {
+      db.prepare('UPDATE recommendation_snapshots SET consumed = 1 WHERE input_id = ?;').run(inputId)
+    }
+
+    return { ok: true, committed: true }
   })
 }
 

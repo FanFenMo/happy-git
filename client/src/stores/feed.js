@@ -58,7 +58,7 @@ export const useFeedStore = defineStore('feed', {
       }
     },
 
-    async refreshRecommendations() {
+    async refreshRecommendations(retryCount = 0) {
       const userStore = useUserStore()
       if (!userStore.canWriteGitHub && !userStore.hasAccount) {
         // 未登录则降级到热门
@@ -73,12 +73,22 @@ export const useFeedStore = defineStore('feed', {
         // 1. 创建快照
         const snapshot = await createSnapshot('profile', 'user_refresh')
 
-        // 2. Worker 计算画像并提交
-        const { profile } = await computeAndCommitProfile(snapshot)
+        // 2. Worker 计算画像并提交（若输入在计算期间变更则重排一次）
+        const profileCommit = await computeAndCommitProfile(snapshot)
+        if (!profileCommit.committed) {
+          if (profileCommit.error === 'INPUT_CHANGED' && retryCount < 1) {
+            return await this.refreshRecommendations(retryCount + 1)
+          }
+          throw new Error(profileCommit.error || '画像提交未通过快照校验')
+        }
+        const { profile } = profileCommit
         this.recProfile = profile
 
-        // 3. 基于画像规划网页候选查询
-        const queryPlan = planDiscoveryQueries(profile, [], Date.now())
+        // 3. 基于画像规划网页候选查询（兼容数组与 { queryPlan } 两种契约）
+        const planResult = planDiscoveryQueries(profile, [], Date.now())
+        const queryPlan = Array.isArray(planResult)
+          ? planResult
+          : (Array.isArray(planResult?.queryPlan) ? planResult.queryPlan : [])
         if (queryPlan.length > 0) {
           try {
             await refreshPersonalizedCandidates(queryPlan)
@@ -87,9 +97,16 @@ export const useFeedStore = defineStore('feed', {
           }
         }
 
-        // 4. 读取最新快照并执行排序重排
+        // 4. 读取最新快照并执行排序重排（校验快照输入版本）
         const rankSnapshot = await createSnapshot('ranking', 'ranking_compute')
-        const { batch } = await computeAndCommitRanking(rankSnapshot, profile)
+        const rankCommit = await computeAndCommitRanking(rankSnapshot, profile)
+        if (!rankCommit.committed) {
+          if (rankCommit.error === 'INPUT_CHANGED' && retryCount < 1) {
+            return await this.refreshRecommendations(retryCount + 1)
+          }
+          throw new Error(rankCommit.error || '推荐批次提交未通过快照校验')
+        }
+        const { batch } = rankCommit
         this.recBatchId = batch.batchId
 
         // 5. 读取批次第 1 页

@@ -13,6 +13,12 @@ const PRESERVED_TECH_TERMS = [
   'mongodb', 'graphql', 'rest api', 'hadoop', 'mapreduce', 'spark', 'kafka'
 ]
 
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'out', 'are',
+  'was', 'were', 'have', 'has', 'had', 'not', 'but', 'you', 'your', 'can',
+  'will', 'all', 'its', 'our', 'via', 'per', 'over', 'under', 'more', 'most'
+])
+
 export function tokenizeText(text) {
   if (!text || typeof text !== 'string') return []
 
@@ -28,10 +34,10 @@ export function tokenizeText(text) {
     }
   }
 
-  // 2. 匹配英文字词、数字及连字符词
+  // 2. 匹配英文字词、数字及连字符词，过滤停用词
   const words = processed.match(/[a-z0-9_\u4e00-\u9fa5]{2,30}/g) || []
   for (const w of words) {
-    if (w.length >= 2) {
+    if (w.length >= 2 && !STOPWORDS.has(w)) {
       tokens.push(w)
     }
   }
@@ -39,11 +45,12 @@ export function tokenizeText(text) {
   return tokens
 }
 
-export function buildVocabulary(repositories, maxTerms = 5000) {
+export function buildVocabulary(repositories = [], maxTerms = 5000) {
   const docFreq = new Map()
-  const N = repositories.length
+  const validRepos = Array.isArray(repositories) ? repositories.filter(Boolean) : []
+  const N = validRepos.length
 
-  for (const repo of repositories) {
+  for (const repo of validRepos) {
     const text = [
       repo.name,
       repo.description,
@@ -57,10 +64,10 @@ export function buildVocabulary(repositories, maxTerms = 5000) {
     }
   }
 
-  // 按词频降序排序，选取前 maxTerms 个
+  // 按词频降序排序（同频按词项字典序稳定排序），选取前 maxTerms 个
   const sorted = Array.from(docFreq.entries())
     .filter(([_, df]) => df >= 1)
-    .sort((a, b) => b[1] - a[1])
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, maxTerms)
 
   const idfMap = {}
@@ -77,6 +84,23 @@ export function buildVocabulary(repositories, maxTerms = 5000) {
 }
 
 export function extractRepositoryFeatures(repository, vocabulary) {
+  if (!repository || typeof repository !== 'object') {
+    return {
+      repoId: null,
+      canonicalKey: null,
+      owner: null,
+      name: null,
+      fullName: null,
+      primaryLanguage: null,
+      topics: [],
+      vector: {},
+      vocabularyVersion: vocabulary?.version || 'vocab-v1',
+      starCount: null,
+      forkCount: null,
+      updatedAt: null
+    }
+  }
+
   const idfMap = vocabulary?.idfMap || {}
 
   // 1. 词项权重统计: desc/topic 记 2，name 记 2，README 记 1
@@ -116,13 +140,27 @@ export function extractRepositoryFeatures(repository, vocabulary) {
     }
   }
 
+  const fullName = repository.fullName || (repository.owner && repository.name ? `${repository.owner}/${repository.name}` : null)
+  const owner = repository.owner || (fullName && fullName.includes('/') ? fullName.split('/')[0] : null)
+  const name = repository.name || (fullName && fullName.includes('/') ? fullName.split('/')[1] : null)
+  const canonicalKey = repository.canonicalKey || (fullName ? fullName.toLowerCase() : null)
+
   return {
-    canonicalKey: repository.canonicalKey,
+    ...repository,
+    repoId: repository.repoId !== undefined && repository.repoId !== null ? String(repository.repoId) : null,
+    canonicalKey,
+    owner,
+    name,
+    fullName,
+    htmlUrl: repository.htmlUrl || (fullName ? `https://github.com/${fullName}` : null),
+    description: repository.description ?? null,
+    readmeText: repository.readmeText ?? null,
     primaryLanguage: repository.primaryLanguage || null,
-    topics: repository.topics || [],
+    topics: Array.isArray(repository.topics) ? [...repository.topics] : [],
     vector,
-    starCount: repository.starCount,
-    forkCount: repository.forkCount,
-    updatedAt: repository.updatedAt
+    vocabularyVersion: vocabulary?.version || 'vocab-v1',
+    starCount: repository.starCount ?? null,
+    forkCount: repository.forkCount ?? null,
+    updatedAt: repository.updatedAt ?? null
   }
 }

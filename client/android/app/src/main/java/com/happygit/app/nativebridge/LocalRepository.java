@@ -21,6 +21,7 @@ public class LocalRepository {
     public LocalRepository(Context context) {
         this.dbHelper = new HappyGitDbHelper(context);
         SQLiteDatabase db = dbHelper.getWritableDatabase();
+        this.dbHelper.createV2Tables(db);
         db.execSQL("DELETE FROM repository_cache WHERE NOT EXISTS (SELECT 1 FROM sync_state s WHERE s.account_id = repository_cache.account_id AND s.kind = repository_cache.kind AND s.active_generation = repository_cache.generation_id)");
         db.execSQL("UPDATE sync_state SET staging_generation = NULL, staging_next_page = NULL, staging_next_url = NULL, staging_page_seq = 0, staging_count = 0");
         try (Cursor accounts = db.rawQuery("SELECT account_id FROM accounts", null)) {
@@ -263,8 +264,9 @@ public class LocalRepository {
         JSONObject res = new JSONObject();
         db.beginTransaction();
         try {
-            try (Cursor state = db.rawQuery("SELECT staging_generation FROM sync_state WHERE account_id = ? AND kind = ?", new String[]{accountId, kind})) {
+            try (Cursor state = db.rawQuery("SELECT staging_generation, staging_next_page, staging_next_url FROM sync_state WHERE account_id = ? AND kind = ?", new String[]{accountId, kind})) {
                 if (!state.moveToFirst() || !generationId.equals(state.getString(0))) throw new IllegalStateException("SYNC_GENERATION_MISMATCH");
+                if (!state.isNull(1) || !state.isNull(2)) throw new IllegalStateException("SYNC_UNFINISHED");
             }
             db.delete("repository_cache", "account_id = ? AND kind = ? AND generation_id != ?", new String[]{accountId, kind, generationId});
 
@@ -753,11 +755,27 @@ public class LocalRepository {
 
     // v2 领域操作
     public synchronized JSONObject createSnapshot(String accountId, String purpose, String reason) {
-        SQLiteDatabase db = dbHelper.getReadableDatabase();
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
         JSONObject res = new JSONObject();
+        db.beginTransaction();
         try {
+            long now = System.currentTimeMillis();
             JSONObject revisions = getAccountRevisions(accountId);
-            String inputId = "snap_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 6);
+            String inputId = "snap_" + now + "_" + UUID.randomUUID().toString().substring(0, 6);
+            String safePurpose = (purpose != null && !purpose.isEmpty()) ? purpose : "ranking";
+
+            try (Cursor actC = db.rawQuery("SELECT 1 FROM accounts WHERE account_id = ?", new String[]{accountId})) {
+                if (actC.moveToFirst()) {
+                    ContentValues snapCv = new ContentValues();
+                    snapCv.put("input_id", inputId);
+                    snapCv.put("account_id", accountId);
+                    snapCv.put("purpose", safePurpose);
+                    snapCv.put("input_versions_json", revisions.toString());
+                    snapCv.put("created_at", now);
+                    snapCv.put("consumed", 0);
+                    db.insertWithOnConflict("recommendation_snapshots", null, snapCv, SQLiteDatabase.CONFLICT_REPLACE);
+                }
+            }
 
             // 读取 Star 活跃集合
             JSONArray starred = new JSONArray();
@@ -819,7 +837,6 @@ public class LocalRepository {
             hidC.close();
 
             // 候选
-            long now = System.currentTimeMillis();
             JSONArray candidates = new JSONArray();
             Map<String, JSONObject> candidateMap = new HashMap<>();
             Cursor discC = db.rawQuery("SELECT result_json FROM discovery_cache WHERE account_id = ? AND expires_at > ?", new String[]{accountId, String.valueOf(now)});
@@ -841,7 +858,7 @@ public class LocalRepository {
             res.put("inputId", inputId);
             res.put("inputVersions", revisions);
             res.put("accountId", accountId);
-            res.put("purpose", purpose);
+            res.put("purpose", safePurpose);
             res.put("reason", reason);
             res.put("starred", starred);
             res.put("owned", owned);
@@ -850,8 +867,12 @@ public class LocalRepository {
             res.put("hiddenRepoIds", hiddenRepoIds);
             res.put("historyEnabled", historyEnabled);
             res.put("candidates", candidates);
+
+            db.setTransactionSuccessful();
         } catch (Exception e) {
             throw new IllegalStateException(e.getMessage(), e);
+        } finally {
+            db.endTransaction();
         }
         return res;
     }
@@ -861,11 +882,64 @@ public class LocalRepository {
         JSONObject res = new JSONObject();
         db.beginTransaction();
         try {
+            if (accountId == null || accountId.isEmpty() || inputId == null || inputId.isEmpty() || purpose == null || purpose.isEmpty()) {
+                res.put("ok", false);
+                res.put("error", "INPUT_CHANGED");
+                db.setTransactionSuccessful();
+                return res;
+            }
+
             JSONObject currentRevisions = getAccountRevisions(accountId);
-            Iterator<String> keys = inputVersions.keys();
-            while (keys.hasNext()) {
-                String k = keys.next();
-                if (currentRevisions.has(k) && currentRevisions.getInt(k) != inputVersions.getInt(k)) {
+            JSONObject savedVersions = null;
+            boolean snapFound = false;
+
+            try (Cursor snapC = db.rawQuery("SELECT account_id, purpose, input_versions_json, consumed FROM recommendation_snapshots WHERE input_id = ?", new String[]{inputId})) {
+                if (snapC.moveToFirst()) {
+                    snapFound = true;
+                    String snapAcc = snapC.getString(0);
+                    String snapPurpose = snapC.getString(1);
+                    String snapVerJson = snapC.getString(2);
+                    int consumed = snapC.getInt(3);
+                    if (!accountId.equals(snapAcc) || !purpose.equals(snapPurpose) || consumed == 1) {
+                        res.put("ok", false);
+                        res.put("error", "INPUT_CHANGED");
+                        db.setTransactionSuccessful();
+                        return res;
+                    }
+                    savedVersions = new JSONObject(snapVerJson);
+                }
+            }
+
+            if (!snapFound) {
+                try (Cursor anyC = db.rawQuery("SELECT 1 FROM recommendation_snapshots WHERE account_id = ? LIMIT 1", new String[]{accountId})) {
+                    if (anyC.moveToFirst()) {
+                        res.put("ok", false);
+                        res.put("error", "INPUT_CHANGED");
+                        db.setTransactionSuccessful();
+                        return res;
+                    }
+                }
+            }
+
+            JSONObject baselineVersions = savedVersions != null ? savedVersions : inputVersions;
+            if (baselineVersions == null || baselineVersions.length() == 0) {
+                res.put("ok", false);
+                res.put("error", "INPUT_CHANGED");
+                db.setTransactionSuccessful();
+                return res;
+            }
+
+            Iterator<String> curKeys = currentRevisions.keys();
+            while (curKeys.hasNext()) {
+                String k = curKeys.next();
+                int curVal = currentRevisions.getInt(k);
+                if (baselineVersions.has(k) && baselineVersions.getInt(k) != curVal) {
+                    res.put("ok", false);
+                    res.put("error", "INPUT_CHANGED");
+                    db.setTransactionSuccessful();
+                    return res;
+                }
+                if (inputVersions != null && inputVersions.has(k) && inputVersions.getInt(k) != curVal) {
                     res.put("ok", false);
                     res.put("error", "INPUT_CHANGED");
                     db.setTransactionSuccessful();
@@ -878,7 +952,7 @@ public class LocalRepository {
                 ContentValues cv = new ContentValues();
                 cv.put("account_id", accountId);
                 cv.put("model_version", "content-v1");
-                cv.put("input_versions_json", inputVersions.toString());
+                cv.put("input_versions_json", baselineVersions.toString());
                 cv.put("profile_json", profile.toString());
                 cv.put("generated_at", now);
                 db.insertWithOnConflict("interest_profiles", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
@@ -890,7 +964,7 @@ public class LocalRepository {
                 bCv.put("batch_id", batchId);
                 bCv.put("account_id", accountId);
                 bCv.put("model_version", "content-v1");
-                bCv.put("input_versions_json", inputVersions.toString());
+                bCv.put("input_versions_json", baselineVersions.toString());
                 bCv.put("created_at", batch.optLong("createdAt", now));
                 bCv.put("expires_at", batch.optLong("expiresAt", now + 86400000L));
                 db.insertOrThrow("recommendation_batches", null, bCv);
@@ -899,20 +973,37 @@ public class LocalRepository {
                 if (items != null) {
                     for (int i = 0; i < items.length(); i++) {
                         JSONObject it = items.getJSONObject(i);
+                        JSONObject repoObj = it.optJSONObject("repository");
+                        if (repoObj == null) continue;
+                        String repoKey = it.optString("repoId", repoObj.optString("repoId", repoObj.optString("canonicalKey", "")));
+                        if (repoKey.isEmpty()) continue;
+
                         ContentValues itCv = new ContentValues();
                         itCv.put("batch_id", batchId);
                         itCv.put("position", it.getInt("position"));
-                        itCv.put("repo_id", it.getString("repoId"));
+                        itCv.put("repo_id", repoKey);
                         itCv.put("score", it.getDouble("score"));
                         itCv.put("reasons_json", it.optJSONArray("reasons") != null ? it.optJSONArray("reasons").toString() : "[]");
-                        itCv.put("repository_json", it.getJSONObject("repository").toString());
+                        itCv.put("repository_json", repoObj.toString());
                         db.insertWithOnConflict("recommendation_items", null, itCv, SQLiteDatabase.CONFLICT_REPLACE);
                     }
                 }
+            } else {
+                res.put("ok", false);
+                res.put("error", "INVALID_COMMIT_PAYLOAD");
+                db.setTransactionSuccessful();
+                return res;
+            }
+
+            if (snapFound) {
+                ContentValues consumedCv = new ContentValues();
+                consumedCv.put("consumed", 1);
+                db.update("recommendation_snapshots", consumedCv, "input_id = ?", new String[]{inputId});
             }
 
             db.setTransactionSuccessful();
             res.put("ok", true);
+            res.put("committed", true);
         } catch (Exception e) {
             throw new IllegalStateException(e.getMessage(), e);
         } finally {

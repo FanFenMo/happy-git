@@ -3,6 +3,14 @@
   "appName": "HappyGit",
   "webDir": "dist",
   "bundledWebRuntime": false,
+  "android": {
+    "zoomEnabled": true
+  },
+  "plugins": {
+    "SystemBars": {
+      "initialViewportFitValueHint": "cover"
+    }
+  },
   "server": {
     "androidScheme": "https"
   }

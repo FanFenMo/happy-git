@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="happygit_window_background">#15171c</color>
+    <color name="happygit_surface">#202329</color>
+    <color name="happygit_text">#f5f5f7</color>
+    <color name="happygit_text_secondary">#b5b9c2</color>
+    <color name="happygit_accent">#8abdff</color>
+</resources>

@@ -1,149 +1,123 @@
 <template>
-  <div v-if="isOpen" class="application-overlay settings-overlay fixed inset-0 z-50 no-select" role="dialog" aria-modal="true" aria-label="应用设置">
-    <div class="w-full max-w-md modal-surface p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
-      <!-- Header -->
-      <div class="flex items-center justify-between pb-4 border-b border-[var(--color-border)] mb-4">
-        <h3 class="text-base font-bold text-[var(--color-text)] flex items-center gap-2">
-          <span>⚙️</span> 系统设置
+  <AppDialog :is-open="isOpen" label="应用设置" :sheet="true" class="settings-dialog" @close="$emit('close')">
+    <header class="settings-header">
+      <div>
+        <h2 class="dialog-title flex items-center gap-2" tabindex="-1" autofocus>
+          <Settings2 :size="22" aria-hidden="true" />
+          设置
+        </h2>
+        <p class="settings-row-description mt-1">管理账号与当前设备上的数据</p>
+      </div>
+      <button type="button" aria-label="关闭应用设置" class="icon-button shrink-0" @click="$emit('close')">
+        <X :size="20" aria-hidden="true" />
+      </button>
+    </header>
+
+    <div class="settings-body">
+      <section class="settings-group" aria-labelledby="settings-account-heading">
+        <h3 id="settings-account-heading" class="settings-group-title flex items-center gap-2">
+          <UserRound :size="18" aria-hidden="true" />
+          账号
         </h3>
-        <button
-          aria-label="关闭应用设置"
-          @click="$emit('close')"
-          class="p-1 rounded-full text-[var(--color-text-subtle)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-raised)] transition cursor-pointer"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
+        <div class="settings-row">
+          <div class="settings-row-copy min-w-0">
+            <p class="settings-row-label break-words selectable">
+              {{ userStore.hasAccount ? (userStore.profile?.displayName || userStore.profile?.login) : '游客模式' }}
+            </p>
+            <p class="settings-row-description break-words">
+              {{ userStore.hasAccount ? `@${userStore.profile?.login || 'GitHub'}` : '连接 GitHub，查看你的项目与 Star' }}
+            </p>
+          </div>
+          <button
+            v-if="userStore.hasAccount"
+            type="button"
+            :disabled="isSyncing"
+            :aria-busy="isSyncing"
+            class="btn-secondary px-4 gap-2 shrink-0"
+            @click="handleManualSync"
+          >
+            <RefreshCw :size="16" :class="{ 'animate-spin': isSyncing }" aria-hidden="true" />
+            {{ isSyncing ? '同步中…' : '手动同步' }}
+          </button>
+          <button v-else type="button" class="btn-secondary px-4 shrink-0" @click="openLogin">
+            连接 GitHub
+          </button>
+        </div>
+      </section>
 
-      <!-- Settings Content -->
-      <div class="space-y-4">
-        <!-- 账号信息与同步 -->
-        <div class="p-4 rounded-2xl card-raised border border-[var(--color-border)] space-y-3">
-          <div class="text-xs font-semibold text-[var(--color-text-muted)]">账号状态</div>
-          <div class="flex items-center justify-between">
-            <div class="min-w-0">
-              <div class="text-sm font-bold text-[var(--color-text)] truncate selectable">
-                {{ userStore.hasAccount ? (userStore.profile?.displayName || userStore.profile?.login) : '游客模式' }}
-              </div>
-              <div class="text-[11px] text-[var(--color-text-subtle)] truncate font-mono">
-                {{ userStore.hasAccount ? `@${userStore.profile?.login || 'GitHub'}` : '未连接个人账号' }}
-              </div>
-            </div>
+      <section class="settings-group" aria-labelledby="settings-privacy-heading">
+        <h3 id="settings-privacy-heading" class="settings-group-title flex items-center gap-2">
+          <ShieldCheck :size="18" aria-hidden="true" />
+          隐私与本机数据
+        </h3>
+        <div class="settings-row settings-history-row">
+          <div class="settings-row-copy">
+            <p id="history-enabled-label" class="settings-row-label">记录浏览历史</p>
+            <p id="history-enabled-description" class="settings-row-description">保存在当前设备，可随时关闭或清空。</p>
+          </div>
+          <label class="switch-control shrink-0">
+            <input
+              id="settings-history-enabled"
+              type="checkbox"
+              role="switch"
+              aria-labelledby="history-enabled-label"
+              aria-describedby="history-enabled-description"
+              :checked="userStore.preferences.historyEnabled"
+              class="switch-input sr-only"
+              @change="toggleHistory"
+            />
+            <span class="switch-track" aria-hidden="true"></span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <p class="settings-row-label">清空浏览历史</p>
+            <p class="settings-row-description">
+              {{ userStore.hasAccount ? '仅清除当前账号在此设备上的访问记录。' : '仅清除游客模式在此设备上的访问记录。' }}
+            </p>
+          </div>
+          <button type="button" class="btn-secondary px-4 shrink-0" @click="handleClearHistory">清空历史</button>
+        </div>
+        <div v-if="userStore.hasAccount" class="settings-row">
+          <div class="settings-row-copy">
+            <p class="settings-row-label">删除本账号的本机数据</p>
+            <p class="settings-row-description">删除此设备上的账号资料、偏好与浏览记录，并退出登录。</p>
+          </div>
+          <button type="button" class="btn-danger px-4 shrink-0" @click="handleForgetAccount">删除并退出</button>
+        </div>
+      </section>
 
-            <div class="flex items-center gap-2">
-              <button
-                v-if="userStore.hasAccount"
-                @click="handleManualSync"
-                :disabled="isSyncing"
-                class="px-3 py-1.5 rounded-xl btn-secondary text-xs cursor-pointer !min-h-0"
-              >
-                {{ isSyncing ? '同步中...' : '手动同步' }}
-              </button>
-              <button
-                v-else
-                @click="openLogin"
-                class="px-3 py-1.5 rounded-xl btn-primary text-xs cursor-pointer !min-h-0"
-              >
-                立即登录
-              </button>
-            </div>
+      <section class="settings-group" aria-labelledby="settings-about-heading">
+        <h3 id="settings-about-heading" class="settings-group-title flex items-center gap-2">
+          <Info :size="18" aria-hidden="true" />
+          关于 HappyGit
+        </h3>
+        <div class="settings-row">
+          <p class="settings-row-label">应用版本</p>
+          <p class="settings-row-value">1.0.0</p>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <p class="settings-row-label">当前设备存储</p>
+            <p class="settings-row-description">账号偏好与浏览历史保存在此设备。退出账号会保留数据，删除本机数据则会将其清除。</p>
           </div>
         </div>
+      </section>
 
-        <!-- 隐私与数据存储 -->
-        <div class="p-4 rounded-2xl card-raised border border-[var(--color-border)] space-y-4">
-          <div class="text-xs font-semibold text-[var(--color-text-muted)]">隐私与本地存储</div>
-
-          <!-- 历史记录开关 -->
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <div class="text-xs font-semibold text-[var(--color-text)]">记录本机浏览历史</div>
-              <div class="text-[11px] text-[var(--color-text-subtle)]">仅保存在当前设备 SQLite，可随时关闭或清空</div>
-            </div>
-            <label class="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                :checked="userStore.preferences.historyEnabled"
-                @change="toggleHistory"
-                class="sr-only peer"
-              />
-              <div class="w-9 h-5 bg-[var(--color-border)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--color-primary)]"></div>
-            </label>
-          </div>
-
-          <div class="border-t border-[var(--color-border)] pt-3 flex items-center justify-between">
-            <div>
-              <div class="text-xs text-[var(--color-text)]">清空本机浏览历史</div>
-              <div class="text-[11px] text-[var(--color-text-subtle)]">清除当前账号在本机的全部访问快照</div>
-            </div>
-            <button
-              @click="handleClearHistory"
-              class="px-3 py-1.5 rounded-xl btn-secondary text-xs text-[var(--color-danger)] hover:border-[var(--color-danger)] cursor-pointer !min-h-0"
-            >
-              清空
-            </button>
-          </div>
-
-          <!-- 删除账号本地数据 -->
-          <div v-if="userStore.hasAccount" class="border-t border-[var(--color-border)] pt-3 flex items-center justify-between">
-            <div>
-              <div class="text-xs text-[var(--color-danger)]">删除本账号本地数据</div>
-              <div class="text-[11px] text-[var(--color-text-subtle)]">删除本机数据库中该账号的所有缓存与历史</div>
-            </div>
-            <button
-              @click="handleForgetAccount"
-              class="px-3 py-1.5 rounded-xl btn-danger text-xs cursor-pointer !min-h-0"
-            >
-              删除并退出
-            </button>
-          </div>
-        </div>
-
-        <!-- 关于应用 -->
-        <div class="p-4 rounded-2xl card-raised border border-[var(--color-border)] space-y-2">
-          <div class="text-xs font-semibold text-[var(--color-text-muted)] mb-1">关于应用</div>
-          <div class="flex items-center justify-between text-xs">
-            <span class="text-[var(--color-text-subtle)]">应用版本</span>
-            <span class="text-[var(--color-text)] font-mono">v1.0.0 (双端正式版)</span>
-          </div>
-          <div class="flex items-center justify-between text-xs">
-            <span class="text-[var(--color-text-subtle)]">平台支持</span>
-            <span class="text-[var(--color-text)]">Windows (Electron) / Android (Capacitor)</span>
-          </div>
-          <div class="flex items-center justify-between text-xs">
-            <span class="text-[var(--color-text-subtle)]">存储引擎</span>
-            <span class="text-[var(--color-text)]">本地 SQLite (安全隔离)</span>
-          </div>
-        </div>
-      </div>
-
-      <p v-if="feedback" role="status" class="mt-3 text-xs text-[var(--color-danger)]">{{ feedback }}</p>
-      <!-- Footer Buttons -->
-      <div class="flex items-center justify-between mt-5 pt-4 border-t border-[var(--color-border)]">
-        <button
-          v-if="userStore.hasAccount"
-          @click="handleLogout"
-          class="btn-danger px-3 py-2 text-xs cursor-pointer !min-h-0"
-        >
-          退出当前账号
-        </button>
-        <div v-else></div>
-
-        <button
-          @click="$emit('close')"
-          class="btn-secondary px-5 py-2 text-xs cursor-pointer !min-h-0"
-        >
-          完成
-        </button>
-      </div>
+      <p v-if="feedback" role="status" class="text-[0.875rem] leading-relaxed text-[var(--color-danger)]">{{ feedback }}</p>
     </div>
-  </div>
+
+    <footer class="settings-footer">
+      <button v-if="userStore.hasAccount" type="button" class="btn-danger px-4" @click="handleLogout">退出当前账号</button>
+      <button type="button" class="btn-primary px-6 ml-auto" @click="$emit('close')">完成</button>
+    </footer>
+  </AppDialog>
 </template>
 
 <script setup>
 import { ref } from 'vue'
+import { Info, RefreshCw, Settings2, ShieldCheck, UserRound, X } from 'lucide-vue-next'
+import AppDialog from './AppDialog.vue'
 import { useUserStore } from '../stores/user'
 import { useHistoryStore } from '../stores/history'
 

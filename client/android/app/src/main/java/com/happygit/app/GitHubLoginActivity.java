@@ -1,9 +1,13 @@
 package com.happygit.app;
 
-import android.app.Activity;
+import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.TextUtils;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
@@ -11,8 +15,16 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import androidx.activity.OnBackPressedCallback;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import com.happygit.app.nativebridge.SessionManager;
 import org.json.JSONObject;
 
@@ -21,12 +33,13 @@ import org.json.JSONObject;
  * 独立原生登录 Activity，包含原生地址提示与普通 WebView
  * (依据 project.md 第五节)
  */
-public class GitHubLoginActivity extends Activity {
+public class GitHubLoginActivity extends AppCompatActivity {
 
     public static final String EXTRA_ACCOUNT_ID = "accountId";
     public static final String EXTRA_LOGIN = "login";
 
     private WebView webView;
+    private LinearLayout rootLayout;
     private boolean isFinished = false;
     private String loginTaskId = null;
 
@@ -36,49 +49,74 @@ public class GitHubLoginActivity extends Activity {
 
         loginTaskId = getIntent().getStringExtra("loginTaskId");
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.parseColor("#10151D"));
+        boolean dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(Color.TRANSPARENT);
+        WindowInsetsControllerCompat systemBars = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        systemBars.setAppearanceLightStatusBars(!dark);
+        systemBars.setAppearanceLightNavigationBars(!dark);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            getWindow().setNavigationBarContrastEnforced(false);
+        }
 
-        // 原生顶部导航栏
+        rootLayout = new LinearLayout(this);
+        rootLayout.setOrientation(LinearLayout.VERTICAL);
+        rootLayout.setBackgroundColor(getColor(R.color.happygit_window_background));
+        ViewCompat.setOnApplyWindowInsetsListener(rootLayout, (view, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            Insets keyboard = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
+            view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, keyboard.bottom));
+            return windowInsets;
+        });
+
         LinearLayout toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.setPadding(24, 16, 24, 16);
-        toolbar.setBackgroundColor(Color.parseColor("#19222D"));
+        toolbar.setPadding(dp(8), dp(4), dp(8), dp(4));
+        toolbar.setMinimumHeight(dp(64));
+        toolbar.setBackgroundColor(getColor(R.color.happygit_surface));
 
-        TextView closeBtn = new TextView(this);
-        closeBtn.setText("✕");
-        closeBtn.setTextSize(18);
-        closeBtn.setTextColor(Color.parseColor("#F1F5FA"));
-        closeBtn.setPadding(16, 8, 24, 8);
-        closeBtn.setOnClickListener(v -> finish());
-        toolbar.addView(closeBtn);
+        ImageButton closeButton = createToolbarButton(R.drawable.ic_close, "关闭 GitHub 登录");
+        closeButton.setOnClickListener(view -> finish());
+        toolbar.addView(closeButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
 
+        LinearLayout heading = new LinearLayout(this);
+        heading.setOrientation(LinearLayout.VERTICAL);
+        heading.setPadding(dp(8), 0, dp(8), 0);
         TextView titleView = new TextView(this);
-        titleView.setText("GitHub 登录 (github.com)");
-        titleView.setTextSize(16);
-        titleView.setTextColor(Color.parseColor("#F1F5FA"));
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
-        toolbar.addView(titleView, titleParams);
+        titleView.setText("GitHub 登录");
+        titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        titleView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        titleView.setTextColor(getColor(R.color.happygit_text));
+        titleView.setMaxLines(1);
+        titleView.setEllipsize(TextUtils.TruncateAt.END);
+        heading.addView(titleView);
 
-        TextView refreshBtn = new TextView(this);
-        refreshBtn.setText("⟳");
-        refreshBtn.setTextSize(20);
-        refreshBtn.setTextColor(Color.parseColor("#F1F5FA"));
-        refreshBtn.setPadding(24, 8, 16, 8);
-        refreshBtn.setOnClickListener(v -> {
-            if (webView != null) webView.reload();
-        });
-        toolbar.addView(refreshBtn);
+        TextView originView = new TextView(this);
+        originView.setText("github.com");
+        originView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        originView.setTextColor(getColor(R.color.happygit_text_secondary));
+        originView.setMaxLines(1);
+        heading.addView(originView);
+        toolbar.addView(heading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
 
-        root.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        ImageButton refreshButton = createToolbarButton(R.drawable.ic_refresh, "重新加载 GitHub 登录页面");
+        refreshButton.setOnClickListener(view -> webView.reload());
+        toolbar.addView(refreshButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        rootLayout.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         // WebView 配置
         webView = new WebView(this);
+        webView.setBackgroundColor(getColor(R.color.happygit_window_background));
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        settings.setBuiltInZoomControls(true);
+        settings.setDisplayZoomControls(false);
+        settings.setUseWideViewPort(true);
+        settings.setLoadWithOverviewMode(true);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
 
@@ -101,10 +139,19 @@ public class GitHubLoginActivity extends Activity {
             }
         });
 
-        root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        setContentView(root);
+        rootLayout.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f));
+        setContentView(rootLayout);
+        ViewCompat.requestApplyInsets(rootLayout);
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (webView.canGoBack()) webView.goBack();
+                else finish();
+            }
+        });
 
-        webView.loadURL("https://github.com/login");
+        if (savedInstanceState == null) webView.loadUrl("https://github.com/login");
+        else webView.restoreState(savedInstanceState);
     }
 
     private void checkIdentity() {
@@ -131,7 +178,7 @@ public class GitHubLoginActivity extends Activity {
                 "})();";
 
         webView.evaluateJavascript(probeScript, value -> {
-            if (isFinished || value == null || value.equals("null")) return;
+            if (isFinishing() || isDestroyed() || isFinished || value == null || value.equals("null")) return;
             try {
                 String cleanJson = value;
                 if (cleanJson.startsWith("\"") && cleanJson.endsWith("\"")) {
@@ -155,23 +202,38 @@ public class GitHubLoginActivity extends Activity {
         });
     }
 
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private ImageButton createToolbarButton(int iconResource, String label) {
+        ImageButton button = new ImageButton(this);
+        button.setImageResource(iconResource);
+        button.setImageTintList(ColorStateList.valueOf(getColor(R.color.happygit_accent)));
+        button.setContentDescription(label);
+        button.setPadding(dp(12), dp(12), dp(12), dp(12));
+        TypedValue background = new TypedValue();
+        getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, background, true);
+        button.setBackgroundResource(background.resourceId);
+        return button;
+    }
+
     @Override
-    public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+    protected void onSaveInstanceState(Bundle outState) {
+        webView.saveState(outState);
+        super.onSaveInstanceState(outState);
     }
 
     @Override
     protected void onDestroy() {
+        ViewCompat.setOnApplyWindowInsetsListener(rootLayout, null);
         if (webView != null) {
             webView.stopLoading();
+            rootLayout.removeView(webView);
             webView.destroy();
             webView = null;
         }
-        if (!isFinished) {
+        if (!isFinished && !isChangingConfigurations()) {
             SessionManager sm = SessionManager.getInstance();
             if (sm != null && loginTaskId != null) {
                 sm.onLoginClosed(loginTaskId);

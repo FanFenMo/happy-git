@@ -3,7 +3,7 @@
  * Electron 主进程：窗口管理、生命周期与受控 NativeBridge 初始化 (依据 project.md 第二节、第五节与第十一节)
  */
 
-const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron')
+const { app, BrowserWindow, Menu, shell, ipcMain, nativeTheme } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 
@@ -41,21 +41,33 @@ function isSafeGitHubUrl(targetUrl) {
 }
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 460,
-    height: 880,
-    minWidth: 380,
+  nativeTheme.themeSource = 'system'
+  const window = new BrowserWindow({
+    width: 1200,
+    height: 820,
+    minWidth: 800,
     minHeight: 600,
-    maxWidth: 960,
     title: 'HappyGit - 开源项目个性化推荐与展示系统',
     autoHideMenuBar: true,
-    backgroundColor: '#10151D',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#15171c' : '#f5f5f7',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: true
     }
+  })
+
+  mainWindow = window
+  const updateBackground = () => {
+    if (!window.isDestroyed()) {
+      window.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#15171c' : '#f5f5f7')
+    }
+  }
+  nativeTheme.on('updated', updateBackground)
+  window.on('closed', () => {
+    nativeTheme.removeListener('updated', updateBackground)
+    if (mainWindow === window) mainWindow = null
   })
 
   Menu.setApplicationMenu(null)

@@ -1,225 +1,199 @@
 <template>
-  <div class="flex-1 flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] relative">
-    <!-- Top Header bar -->
-    <header class="feed-toolbar flex items-center justify-between bg-[var(--color-surface)] shrink-0 no-select">
-      <!-- 双页签切换 -->
-      <div role="tablist" aria-label="项目浏览方式" class="flex items-center gap-1.5 p-1 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)]">
+  <div class="flex-1 min-w-0 flex flex-col bg-[var(--color-bg)] text-[var(--color-text)] relative">
+    <header class="feed-toolbar flex flex-wrap items-center justify-between gap-3 bg-[var(--color-surface)] shrink-0 no-select">
+      <div role="group" aria-label="项目浏览方式" class="feed-switcher flex items-center gap-1 p-1 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)]">
         <button
-          role="tab"
-          :aria-selected="feedStore.isRecommendedTab"
+          type="button"
+          :aria-pressed="feedStore.isRecommendedTab"
+          aria-controls="project-feed"
           @click="switchTab('recommended')"
           :class="[
-            'px-3 py-1 text-xs rounded-lg font-medium transition cursor-pointer',
+            'px-3 py-2 text-sm rounded-lg font-medium transition cursor-pointer',
             feedStore.isRecommendedTab
               ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] shadow'
               : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
           ]"
-        >
-          为你推荐
-        </button>
+        >为你推荐</button>
         <button
-          role="tab"
-          :aria-selected="feedStore.isTrendingTab"
+          type="button"
+          :aria-pressed="feedStore.isTrendingTab"
+          aria-controls="project-feed"
           @click="switchTab('trending')"
           :class="[
-            'px-3 py-1 text-xs rounded-lg font-medium transition cursor-pointer',
+            'px-3 py-2 text-sm rounded-lg font-medium transition cursor-pointer',
             feedStore.isTrendingTab
               ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] shadow'
               : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
           ]"
-        >
-          热门项目
-        </button>
+        >热门项目</button>
       </div>
 
-      <!-- 刷新按钮 -->
-      <div class="flex items-center gap-2">
-        <button
-          @click="handleRefresh"
-          :disabled="isLoading"
-          class="p-2 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)] hover:border-[var(--color-text-muted)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition flex items-center gap-1 text-xs cursor-pointer"
-          title="刷新列表"
-        >
-          <svg
-            :class="['w-4 h-4', isLoading ? 'animate-spin text-[var(--color-primary)]' : '']"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
-          <span class="hidden sm:inline">刷新</span>
-        </button>
-      </div>
+      <button
+        type="button"
+        @click="handleRefresh"
+        :disabled="isLoading"
+        :aria-busy="isLoading"
+        aria-label="刷新项目列表"
+        class="icon-button rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition flex items-center justify-center gap-2 text-sm cursor-pointer"
+        title="刷新列表"
+      >
+        <RefreshCw :class="['w-[18px] h-[18px]', isLoading ? 'animate-spin text-[var(--color-primary)]' : '']" aria-hidden="true" />
+        <span class="hidden sm:inline">刷新</span>
+      </button>
     </header>
 
-    <!-- Sub Header Status -->
-    <div class="feed-summary py-3 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex items-center justify-between text-xs text-[var(--color-text-muted)] shrink-0 no-select">
-      <div class="flex items-center gap-2">
-        <span class="w-2 h-2 rounded-full" :class="feedStore.isRecommendedTab ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-success)]'"></span>
+    <div class="feed-summary py-3 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex flex-wrap items-center justify-between gap-2 text-[13px] text-[var(--color-text-muted)] shrink-0 no-select">
+      <div class="flex items-center gap-2 min-w-0">
+        <span aria-hidden="true" class="w-2 h-2 rounded-full shrink-0" :class="feedStore.isRecommendedTab ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-success)]'"></span>
         <span>{{ feedStore.isRecommendedTab ? '本地画像与技术标签排序' : '近 3 个月 GitHub 趋势' }}</span>
       </div>
-      <div class="text-[11px] text-[var(--color-text-subtle)] font-mono">
-        {{ currentList.length }} 个公开项目
-      </div>
+      <span class="text-[var(--color-text-subtle)] tabular-nums">{{ currentList.length }} 个公开项目</span>
     </div>
 
-    <!-- Main Content List -->
-    <div class="feed-grid safe-area-bottom">
-      <!-- Loading Skeleton -->
+    <section id="project-feed" :aria-label="feedStore.isRecommendedTab ? '为你推荐的项目' : '热门项目'" :aria-busy="isLoading" class="feed-grid safe-area-bottom">
       <div v-if="isLoading && currentList.length === 0" class="feed-state space-y-3" role="status" aria-label="正在加载项目">
-        <div v-for="i in 4" :key="i" class="p-4 rounded-2xl card-surface animate-pulse space-y-3">
+        <div v-for="i in 4" :key="i" aria-hidden="true" class="p-4 rounded-2xl card-surface animate-pulse space-y-3">
           <div class="h-4 bg-[var(--color-surface-raised)] rounded w-1/3"></div>
-          <div class="h-16 bg-[var(--color-surface-raised)]/60 rounded-xl"></div>
+          <div class="h-16 bg-[var(--color-surface-raised)] rounded-xl"></div>
           <div class="h-4 bg-[var(--color-surface-raised)] rounded w-1/2"></div>
         </div>
       </div>
 
-      <!-- Rectangular Project Cards -->
-      <div
+      <article
         v-for="item in currentList"
         :key="itemKey(item)"
-        class="project-card border border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-text-subtle)] transition-colors duration-150 group flex flex-col justify-between"
+        class="project-card border border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-text-subtle)] transition-colors duration-150 group flex flex-col"
       >
-        <!-- 推荐理由胶囊 (若有) -->
-        <div v-if="item.reasons && item.reasons.length > 0" class="mb-2 flex flex-wrap items-center gap-1.5 no-select">
+        <div v-if="item.reasons && item.reasons.length > 0" class="mb-3 flex flex-wrap items-center gap-2 no-select" aria-label="推荐理由">
           <span
             v-for="(r, idx) in item.reasons"
             :key="idx"
-            class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-[var(--color-success)] border border-emerald-500/20 flex items-center gap-1"
+            class="px-2.5 py-1 rounded-full text-[13px] font-medium bg-emerald-500/10 text-[var(--color-success)] border border-emerald-500/20 inline-flex items-center gap-1.5 max-w-full [overflow-wrap:anywhere]"
           >
-            <span>💡</span> {{ r }}
+            <Lightbulb class="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+            {{ r }}
           </span>
         </div>
 
-        <!-- Card Top Bar: Repo Name & Stars -->
-        <div class="flex items-start justify-between gap-3 mb-2.5">
-          <div class="min-w-0">
-            <h3
-              @click="handleOpenRepo(repoOf(item))"
-              class="text-sm font-bold text-[var(--color-text)] group-hover:text-[var(--color-primary)] cursor-pointer transition flex items-center gap-1.5 truncate selectable"
-            >
-              <svg class="w-4 h-4 text-[var(--color-text-subtle)] shrink-0 no-select" fill="currentColor" viewBox="0 0 24 24">
-                <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"></path>
-              </svg>
-              <span class="truncate">{{ repoOf(item).fullName || repoOf(item).name }}</span>
+        <div class="project-card-header flex flex-wrap items-start justify-between gap-3 mb-2.5">
+          <div class="min-w-0 flex-1">
+            <h3 class="min-w-0 text-base font-semibold text-[var(--color-text)]">
+              <button
+                type="button"
+                @click="handleOpenRepo(repoOf(item))"
+                :aria-label="`在 GitHub 打开 ${repoOf(item).fullName || repoOf(item).name}`"
+                class="project-title flex items-start gap-2 text-left w-full min-w-0 group-hover:text-[var(--color-primary)] transition cursor-pointer"
+              >
+                <FolderGit2 class="w-[18px] h-[18px] mt-0.5 text-[var(--color-text-subtle)] shrink-0" aria-hidden="true" />
+                <span class="min-w-0 break-words [overflow-wrap:anywhere] selectable">{{ repoOf(item).fullName || repoOf(item).name }}</span>
+              </button>
             </h3>
-            <span class="text-[10px] text-[var(--color-text-subtle)] font-mono mt-0.5 block no-select">
-              {{ repoOf(item).updatedAt ? `更新于: ${formatRepoDate(repoOf(item).updatedAt)}` : '' }}
+            <span v-if="repoOf(item).updatedAt" class="text-[13px] text-[var(--color-text-subtle)] mt-1 block no-select">
+              更新于 {{ formatRepoDate(repoOf(item).updatedAt) }}
             </span>
           </div>
-
-          <div class="flex items-center gap-2 shrink-0 no-select">
-            <span class="px-2 py-0.5 rounded-lg bg-amber-500/10 text-[var(--color-star)] border border-amber-500/20 text-xs font-mono font-bold flex items-center gap-1">
-              ⭐ {{ formatNumber(repoOf(item).starCount) }}
-            </span>
-          </div>
+          <span class="px-2.5 py-1 rounded-lg bg-amber-500/10 text-[var(--color-star)] border border-amber-500/20 text-[13px] tabular-nums font-medium inline-flex items-center gap-1.5 shrink-0 no-select" :aria-label="`${repoOf(item).starCount ?? 0} 个 Star`">
+            <Star class="w-3.5 h-3.5" aria-hidden="true" />
+            {{ formatNumber(repoOf(item).starCount) }}
+          </span>
         </div>
 
-        <!-- Rectangular Text Summary Box -->
-        <div class="project-description my-2.5 text-[var(--color-text-muted)] font-sans selectable">
-          <p class="line-clamp-3">
-            {{ repoOf(item).description || '该开源仓库暂未提供简介，点击下方链接可在 GitHub 查阅详细源码与 README。' }}
+        <div class="project-description my-2.5 text-[15px] leading-relaxed text-[var(--color-text-muted)] selectable">
+          <p class="line-clamp-3 break-words [overflow-wrap:anywhere]">
+            {{ repoOf(item).description || '该仓库暂未提供简介，可在 GitHub 查看源码与 README。' }}
           </p>
         </div>
 
-        <!-- Topics & Language Row -->
-        <div class="flex flex-wrap items-center gap-1.5 mb-3 no-select">
+        <div class="flex flex-wrap items-center gap-2 mb-4 no-select">
           <span
             v-if="repoOf(item).primaryLanguage && repoOf(item).primaryLanguage !== '未标注'"
-            class="px-2 py-0.5 rounded-md text-[10px] font-medium bg-[var(--color-surface-raised)] text-[var(--color-text-muted)] flex items-center gap-1 border border-[var(--color-border)]"
+            class="px-2.5 py-1 rounded-md text-[13px] font-medium bg-[var(--color-surface-raised)] text-[var(--color-text-muted)] inline-flex items-center gap-1.5 border border-[var(--color-border)] max-w-full break-words"
           >
-            <span class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: getLangColor(repoOf(item).primaryLanguage) }"></span>
+            <span aria-hidden="true" class="w-1.5 h-1.5 rounded-full shrink-0" :style="{ backgroundColor: getLangColor(repoOf(item).primaryLanguage) }"></span>
             {{ repoOf(item).primaryLanguage }}
           </span>
-
           <span
             v-for="topic in (repoOf(item).topics || []).slice(0, 3)"
             :key="topic"
-            class="px-2 py-0.5 rounded-md text-[10px] bg-[var(--color-surface-raised)] text-[var(--color-text-subtle)] border border-[var(--color-border)]"
-          >
-            #{{ topic }}
-          </span>
+            class="px-2.5 py-1 rounded-md text-[13px] bg-[var(--color-surface-raised)] text-[var(--color-text-subtle)] border border-[var(--color-border)] max-w-full [overflow-wrap:anywhere]"
+          >#{{ topic }}</span>
         </div>
 
-        <!-- Card Action Footer -->
-        <div class="flex items-center justify-between pt-2 border-t border-[var(--color-border)] text-xs no-select">
-          <span class="text-[11px] text-[var(--color-text-subtle)]">
-            {{ repoOf(item).forkCount ? `🍴 ${formatNumber(repoOf(item).forkCount)} forks` : '' }}
+        <footer class="project-actions flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-[var(--color-border)] text-[13px] no-select">
+          <span v-if="repoOf(item).forkCount" class="text-[var(--color-text-subtle)] inline-flex items-center gap-1.5 tabular-nums">
+            <GitFork class="w-4 h-4" aria-hidden="true" />
+            {{ formatNumber(repoOf(item).forkCount) }} forks
           </span>
-
-          <div class="flex items-center gap-2">
-            <!-- 不感兴趣反馈 (仅推荐页展示) -->
+          <div class="flex flex-wrap items-center gap-2 ml-auto">
             <button
               v-if="feedStore.isRecommendedTab"
+              type="button"
               @click="handleHide(repoOf(item))"
-              class="px-2 py-1 rounded-lg text-[10px] text-[var(--color-text-subtle)] hover:text-[var(--color-danger)] transition cursor-pointer"
+              :aria-label="`隐藏 ${repoOf(item).fullName || repoOf(item).name}，不再推荐`"
+              class="px-3 py-2 rounded-xl text-sm text-[var(--color-text-subtle)] hover:text-[var(--color-danger)] transition cursor-pointer"
               title="隐藏该项目，不作为兴趣推荐"
-            >
-              隐藏
-            </button>
-
-            <!-- Star 按钮 -->
+            >隐藏</button>
             <button
+              type="button"
               @click="toggleStar(repoOf(item))"
               :disabled="userStore.starPendingByRepo[repoOf(item).repoId || repoOf(item).canonicalKey]"
-              class="px-3 py-1.5 rounded-xl border text-[11px] font-medium transition flex items-center gap-1.5 cursor-pointer"
+              :aria-busy="!!userStore.starPendingByRepo[repoOf(item).repoId || repoOf(item).canonicalKey]"
+              :aria-pressed="isRepoStarred(repoOf(item))"
+              :aria-label="`${isRepoStarred(repoOf(item)) ? '取消 Star' : 'Star'} ${repoOf(item).fullName || repoOf(item).name}`"
+              class="px-3 py-2 rounded-xl border text-sm font-medium transition inline-flex items-center justify-center gap-2 cursor-pointer"
               :class="[
                 isRepoStarred(repoOf(item))
                   ? 'bg-amber-500/15 border-amber-500/40 text-[var(--color-star)]'
                   : 'bg-[var(--color-surface-raised)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
               ]"
             >
-              <span v-if="userStore.starPendingByRepo[repoOf(item).repoId || repoOf(item).canonicalKey]" class="w-3 h-3 border-2 border-[var(--color-star)] border-t-transparent rounded-full animate-spin"></span>
-              <span v-else>{{ isRepoStarred(repoOf(item)) ? '★ 已 Star' : '☆ Star' }}</span>
+              <LoaderCircle v-if="userStore.starPendingByRepo[repoOf(item).repoId || repoOf(item).canonicalKey]" class="w-4 h-4 animate-spin" aria-hidden="true" />
+              <Star v-else class="w-4 h-4" :fill="isRepoStarred(repoOf(item)) ? 'currentColor' : 'none'" aria-hidden="true" />
+              <span>{{ isRepoStarred(repoOf(item)) ? '已 Star' : 'Star' }}</span>
             </button>
-
-            <!-- 查看源码 -->
             <button
+              type="button"
               @click="handleOpenRepo(repoOf(item))"
-              class="btn-primary px-3 py-1.5 !min-h-0 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+              :aria-label="`查看 ${repoOf(item).fullName || repoOf(item).name} 的源码`"
+              class="btn-primary px-3 py-2 text-sm font-medium inline-flex items-center justify-center gap-2 cursor-pointer"
             >
               <span>查看源码</span>
-              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
+              <ExternalLink class="w-4 h-4" aria-hidden="true" />
             </button>
           </div>
-        </div>
-      </div>
+        </footer>
+      </article>
 
-      <!-- 加载更多推荐 (滚动分页) -->
       <div v-if="feedStore.isRecommendedTab && feedStore.recHasMore" class="feed-state text-center py-4">
         <button
+          type="button"
           @click="feedStore.loadMoreRecommendations"
           :disabled="feedStore.recLoading"
-          class="btn-secondary text-xs px-4 py-2 cursor-pointer"
-        >
-          {{ feedStore.recLoading ? '正在加载...' : '加载更多推荐' }}
-        </button>
+          :aria-busy="feedStore.recLoading"
+          class="btn-secondary text-sm px-4 py-2 cursor-pointer"
+        >{{ feedStore.recLoading ? '正在加载…' : '加载更多推荐' }}</button>
       </div>
 
-      <!-- 空状态提示 -->
       <div v-if="!isLoading && currentList.length === 0" class="feed-state card-surface text-center py-16 px-6 no-select" role="status">
         <h2 class="text-base font-semibold mb-2">{{ feedStore.recError && feedStore.isRecommendedTab ? '推荐暂时无法生成' : '暂时没有可展示的项目' }}</h2>
         <p class="text-sm text-[var(--color-text-muted)] leading-relaxed">{{ feedStore.recError && feedStore.isRecommendedTab ? feedStore.recError : userStore.hasAccount ? '稍后刷新，或切换浏览方式继续探索。' : '游客可以浏览公开项目；连接 GitHub 后可使用个人兴趣推荐。' }}</p>
-        <button v-if="!userStore.hasAccount" class="btn-primary px-4 text-sm mt-5" @click="$emit('request-login')">连接 GitHub</button>
-        <button v-else class="btn-secondary px-4 text-sm mt-5" @click="handleRefresh">重新加载</button>
+        <button v-if="!userStore.hasAccount" type="button" class="btn-primary px-4 text-sm mt-5" @click="$emit('request-login')">连接 GitHub</button>
+        <button v-else type="button" class="btn-secondary px-4 text-sm mt-5" @click="handleRefresh">重新加载</button>
       </div>
-    </div>
+    </section>
 
-    <!-- Toast 提示消息 -->
     <div
       v-if="toastMessage"
-      class="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-xs text-[var(--color-text)] shadow-2xl backdrop-blur animate-fade-in no-select"
-    >
-      {{ toastMessage }}
-    </div>
+      role="status"
+      aria-live="polite"
+      class="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 max-w-[calc(100%_-_2rem)] px-4 py-3 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-sm text-[var(--color-text)] shadow-2xl backdrop-blur animate-fade-in no-select"
+    >{{ toastMessage }}</div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { ExternalLink, FolderGit2, GitFork, Lightbulb, LoaderCircle, RefreshCw, Star } from 'lucide-vue-next'
 import { useUserStore } from '../stores/user'
 import { useFeedStore } from '../stores/feed'
 import { openRepository } from '../services/projects'
@@ -323,9 +297,9 @@ async function toggleStar(repo) {
   try {
     const res = await userStore.setStar(repo, desired)
     if (res.confirmed) {
-      showToast(desired ? '⭐ Star 成功' : '已取消 Star')
+      showToast(desired ? 'Star 成功' : '已取消 Star')
     } else if (res.state === 'uncertain') {
-      showToast('⚠️ 操作已发出，正在复核远端状态...')
+      showToast('操作已发出，正在复核远端状态…')
     }
   } catch (err) {
     showToast(err.message || 'Star 操作失败')

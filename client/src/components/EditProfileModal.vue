@@ -1,93 +1,66 @@
 <template>
-  <div v-if="isOpen" class="application-overlay fixed inset-0 z-50 no-select" role="dialog" aria-modal="true" aria-label="技术兴趣设置">
-    <div class="w-full max-w-md modal-surface p-6 shadow-2xl relative">
-      <!-- Header -->
-      <div class="flex items-center justify-between pb-4 border-b border-[var(--color-border)] mb-4">
-        <h3 class="text-base font-bold text-[var(--color-text)] flex items-center gap-2">
-          <span>🏷️</span> 技术兴趣设置
-        </h3>
-        <button
-          aria-label="关闭技术兴趣设置"
-          @click="$emit('close')"
-          class="p-1 rounded-full text-[var(--color-text-subtle)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-raised)] transition cursor-pointer"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
+  <AppDialog :is-open="isOpen" label="技术兴趣设置" class="interest-dialog" @close="$emit('close')">
+    <div class="p-6 sm:p-7">
+      <header class="flex items-center justify-between gap-4 pb-5 border-b border-[var(--color-border)] mb-5">
+        <h2 class="dialog-title flex items-center gap-2">
+          <Tags :size="22" aria-hidden="true" />
+          技术兴趣
+        </h2>
+        <button type="button" aria-label="关闭技术兴趣设置" class="icon-button shrink-0" @click="$emit('close')">
+          <X :size="20" aria-hidden="true" />
         </button>
-      </div>
+      </header>
 
-      <!-- GitHub Profile Read-only Notice -->
-      <div class="p-3 rounded-xl card-raised border border-[var(--color-border)] mb-4 text-xs text-[var(--color-text-muted)] flex items-center justify-between gap-3">
+      <div class="p-4 rounded-2xl card-raised mb-5 flex flex-wrap items-center justify-between gap-3">
         <div class="min-w-0">
-          <div class="font-bold text-[var(--color-text)] truncate">
+          <p class="text-[0.875rem] font-semibold text-[var(--color-text)] break-words">
             {{ userStore.profile?.displayName || userStore.profile?.login || 'GitHub 用户' }}
-          </div>
-          <div class="text-[11px] text-[var(--color-text-subtle)] truncate">
-            GitHub 资料（昵称、简介等）为只读展示
-          </div>
-        </div>
-        <button
-          @click="openGitHubSettings"
-          class="px-2.5 py-1 rounded-lg card-surface border border-[var(--color-border)] hover:border-[var(--color-primary)] text-[var(--color-primary)] text-[11px] font-medium transition cursor-pointer shrink-0"
-        >
-          在 GitHub 编辑 ↗
-        </button>
-      </div>
-
-      <!-- Manual Tags Editor -->
-      <div class="space-y-3">
-        <div>
-          <label class="block text-xs font-semibold text-[var(--color-text)] mb-1.5">
-            手选技术兴趣标签
-          </label>
-          <textarea
-            v-model="tagsInput"
-            rows="3"
-            class="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl px-3.5 py-2.5 text-xs text-[var(--color-text)] focus:outline-none focus:border-[var(--color-primary)] transition resize-none selectable"
-            placeholder="例如: Vue.js, Spring Boot, SQLite, Android, Docker (中英文逗号切分)"
-          ></textarea>
-          <p class="text-[11px] text-[var(--color-text-subtle)] mt-1.5 leading-normal">
-            手选标签优先展示（最多 8 项，每项不超过 24 字符）；空余位置将由系统根据公开仓库与 Star 自动补齐。
           </p>
+          <p class="text-[0.8125rem] text-[var(--color-text-muted)] mt-1 leading-relaxed">昵称与简介由 GitHub 管理。</p>
         </div>
+        <button type="button" class="btn-secondary px-4 gap-2" @click="openGitHubSettings">
+          在 GitHub 编辑
+          <ExternalLink :size="16" aria-hidden="true" />
+        </button>
+      </div>
 
-        <!-- Tag Preview -->
-        <div v-if="previewTags.length > 0" class="pt-1">
-          <span class="text-[11px] text-[var(--color-text-subtle)] block mb-1.5">预览标签 ({{ previewTags.length }}/8):</span>
-          <div class="flex flex-wrap gap-1.5">
-            <span
-              v-for="t in previewTags"
-              :key="t"
-              class="px-2 py-0.5 rounded-md text-[11px] card-raised border border-[var(--color-border)] text-[var(--color-text)]"
-            >
-              # {{ t }}
-            </span>
-          </div>
+      <div>
+        <label for="manual-interest-tags" class="block text-[0.875rem] font-semibold text-[var(--color-text)] mb-2">手选技术兴趣标签</label>
+        <textarea
+          id="manual-interest-tags"
+          v-model="tagsInput"
+          aria-describedby="manual-interest-help"
+          autofocus
+          rows="3"
+          class="w-full min-h-[8rem] bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl px-4 py-3 text-[1rem] leading-relaxed text-[var(--color-text)] focus:border-[var(--color-primary)] transition resize-y selectable"
+          placeholder="例如：Vue.js, Spring Boot, Android"
+        ></textarea>
+        <p id="manual-interest-help" class="text-[0.8125rem] text-[var(--color-text-muted)] mt-2 leading-relaxed">
+          用中英文逗号分隔，最多 8 项，每项不超过 24 字符。手选标签优先展示，空余位置会根据公开仓库与 Star 自动补齐。
+        </p>
+      </div>
+
+      <div v-if="previewTags.length > 0" class="mt-5">
+        <p class="text-[0.8125rem] text-[var(--color-text-muted)] mb-2">标签预览 · {{ previewTags.length }}/8</p>
+        <div class="flex flex-wrap gap-2">
+          <span v-for="t in previewTags" :key="t" class="px-3 py-1 rounded-lg text-[0.8125rem] leading-relaxed card-raised text-[var(--color-text)] break-words">
+            {{ t }}
+          </span>
         </div>
       </div>
 
-      <!-- Actions -->
-      <div class="flex items-center justify-end gap-3 mt-5 pt-4 border-t border-[var(--color-border)]">
-        <button
-          @click="$emit('close')"
-          class="btn-secondary px-4 py-2 text-xs cursor-pointer !min-h-0"
-        >
-          取消
-        </button>
-        <button
-          @click="handleSave"
-          class="btn-primary px-5 py-2 text-xs cursor-pointer !min-h-0"
-        >
-          保存兴趣
-        </button>
-      </div>
+      <footer class="flex flex-wrap items-center justify-end gap-3 mt-6 pt-5 border-t border-[var(--color-border)]">
+        <button type="button" class="btn-secondary px-5" @click="$emit('close')">取消</button>
+        <button type="button" class="btn-primary px-5" @click="handleSave">保存兴趣</button>
+      </footer>
     </div>
-  </div>
+  </AppDialog>
 </template>
 
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { ExternalLink, Tags, X } from 'lucide-vue-next'
+import AppDialog from './AppDialog.vue'
 import { useUserStore } from '../stores/user'
 import { nativeBridge } from '../platform'
 

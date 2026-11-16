@@ -1,5 +1,7 @@
 # Ubuntu 2—4 主机数据平台部署
 
+本轮新增的 MySQL 接收服务、cloud profile、云端 OAuth 回调、归档桥接和计时任务见[服务端接入交接](../../docs/implementation/服务端数据接入交接.md)。业务 API 使用独立 JDK17，现有 Hadoop 进程继续使用 JDK11；`cloud.env.example` 与 `happygit-api.service` 提供维护者安装模板，真实凭据不提交仓库。采集计划配置样例为 `collection-plan.example.json`。
+
 本目录是实际配置生成器的输入和运维步骤。示例 IP 不是用户实际主机。本轮先在本机 Ubuntu 验证；没有把本机多个进程称为多个物理主机。部署适配目标为 Ubuntu 20.04/22.04/24.04 的原生 systemd，运行 JDK 11、Hadoop 3.4.2；实际本机运行验证为 Ubuntu 22.04.5 x86_64，20.04/24.04 和其他架构尚未逐一运行。真实主机部署时记录版本、架构及兼容结果。
 
 ## 角色与故障范围

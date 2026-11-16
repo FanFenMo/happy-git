@@ -1,6 +1,6 @@
 {$HAPPYGIT_DOMAIN} {
     request_body {
-        max_size 16KB
+        max_size 1048576
     }
     reverse_proxy api:8081
 }

@@ -31,7 +31,7 @@ public final class TaskStore implements AutoCloseable {
         } else acl = ZooDefs.Ids.OPEN_ACL_UNSAFE; // local development only; production sets HG_ZK_AUTH
         String current = "";
         for (String segment : root.substring(1).split("/")) { current += "/" + segment; ensure(current); }
-        for (String name : Arrays.asList("tasks", "commits", "workers", "publications")) ensure(root + "/" + name);
+        for (String name : Arrays.asList("tasks", "commits", "workers", "publications", "plans", "observations")) ensure(root + "/" + name);
     }
     private void ensure(String path) throws Exception {
         try { zk.create(path, new byte[0], acl, CreateMode.PERSISTENT); }
@@ -76,6 +76,8 @@ public final class TaskStore implements AutoCloseable {
         String path = root + "/tasks/" + Json.requireId(id);
         Stat stat = new Stat();
         ObjectNode task = Json.parse(new String(zk.getData(path, false, stat), StandardCharsets.UTF_8));
+        String planId=task.path("input").path("planId").asText("");
+        if(!planId.isEmpty()&&!plan(planId).path("state").asText().equals("active"))return null;
         if (Arrays.asList("succeeded", "failed", "cancelled").contains(task.path("state").asText()))
             return null;
         if (task.path("retryAt").asLong() > System.currentTimeMillis() || zk.exists(path + "/lease", false) != null) return null;
@@ -141,5 +143,46 @@ public final class TaskStore implements AutoCloseable {
         results.sort(Comparator.comparing(a -> a.path("id").asText()));
         return results;
     }
+    public ObjectNode plan(String id) throws Exception { return read(root+"/plans/"+Json.requireId(id)); }
+    public List<ObjectNode> plans() throws Exception {
+        List<ObjectNode> rows=new ArrayList<>();for(String id:zk.getChildren(root+"/plans",false))rows.add(plan(id));return rows;
+    }
+    public void createPlan(String id,ObjectNode body) throws Exception {
+        try{zk.create(root+"/plans/"+Json.requireId(id),Json.bytes(body),acl,CreateMode.PERSISTENT);}
+        catch(KeeperException.NodeExistsException exists){if(!plan(id).path("configuration").equals(body.path("configuration")))throw new IllegalArgumentException("Plan identity reused with different configuration");}
+    }
+    public ObjectNode controlPlan(String id,String action,int extraBudget) throws Exception {
+        if(!Arrays.asList("pause","resume").contains(action)||extraBudget<0||extraBudget>100000)throw new IllegalArgumentException("Invalid plan action/budget");
+        String path=root+"/plans/"+Json.requireId(id);
+        while(true){Stat stat=new Stat();ObjectNode plan=read(path,stat);
+            plan.put("state",action.equals("pause")?"paused":"active").put("requestBudget",plan.path("requestBudget").asInt()+extraBudget);
+            try{zk.setData(path,Json.bytes(plan),stat.getVersion());return plan;}catch(KeeperException.BadVersionException raced){/* retry the plan mutation */}
+        }
+    }
+    public void reserveRequest(String id) throws Exception {
+        String path=root+"/plans/"+Json.requireId(id);
+        while(true){Stat stat=new Stat();ObjectNode plan=read(path,stat);
+            if(!plan.path("state").asText().equals("active"))throw new CollectionPlan.Paused();
+            if(plan.path("requestsUsed").asInt()>=plan.path("requestBudget").asInt()){
+                plan.put("state","budget_exhausted");
+                try{zk.setData(path,Json.bytes(plan),stat.getVersion());throw new CollectionPlan.Paused();}catch(KeeperException.BadVersionException raced){continue;}
+            }
+            plan.put("requestsUsed",plan.path("requestsUsed").asInt()+1);
+            try{zk.setData(path,Json.bytes(plan),stat.getVersion());return;}catch(KeeperException.BadVersionException raced){/* reserve against the new counter */}
+        }
+    }
+    public ObjectNode observation(String key) throws Exception {
+        try{return read(root+"/observations/"+Json.requireId(key));}catch(KeeperException.NoNodeException absent){return null;}
+    }
+    public void observe(String key,ObjectNode value) throws Exception {
+        String path=root+"/observations/"+Json.requireId(key);
+        while(true){Stat stat=new Stat();
+            try{read(path,stat);zk.setData(path,Json.bytes(value),stat.getVersion());return;}
+            catch(KeeperException.NoNodeException absent){try{zk.create(path,Json.bytes(value),acl,CreateMode.PERSISTENT);return;}catch(KeeperException.NodeExistsException raced){/* retry */}}
+            catch(KeeperException.BadVersionException raced){/* retry */}
+        }
+    }
+    private ObjectNode read(String path) throws Exception {return read(path,null);}
+    private ObjectNode read(String path,Stat stat) throws Exception {return Json.parse(new String(zk.getData(path,false,stat),StandardCharsets.UTF_8));}
     @Override public void close() throws InterruptedException { zk.close(); }
 }

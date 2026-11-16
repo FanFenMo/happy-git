@@ -1,0 +1,17 @@
+spring:
+  autoconfigure:
+    exclude: []
+  datasource:
+    url: ${HG_MYSQL_URL:jdbc:mysql://127.0.0.1:3306/happygit?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC}
+    username: ${HG_MYSQL_USER:happygit}
+    password: ${HG_MYSQL_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+  flyway:
+    enabled: true
+happygit:
+  cloud:
+    client-id: ${GITHUB_CLOUD_CLIENT_ID:${GITHUB_CLIENT_ID:}}
+    client-secret: ${GITHUB_CLOUD_CLIENT_SECRET:${GITHUB_CLIENT_SECRET:}}
+    admin-token: ${HG_CLOUD_ADMIN_TOKEN}
+    callback-url: ${GITHUB_CLOUD_CALLBACK_URL}

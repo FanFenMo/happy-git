@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.*;
 import java.io.*;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.*;
 import java.nio.charset.StandardCharsets;
 import java.time.*;
@@ -16,14 +17,26 @@ public final class GitHubCollector {
     }
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).followRedirects(HttpClient.Redirect.NEVER).build();
     private final String token;
-    public GitHubCollector(String token) { this.token = token; }
+    private final TaskStore store; private final GitHubCache cache; private final String planId,taskId;
+    private ObjectNode lastResponse=Json.object();
+    public GitHubCollector(String token) { this(token,null,null,"",""); }
+    GitHubCollector(String token,TaskStore store,GitHubCache cache,String planId,String taskId) { this.token=token;this.store=store;this.cache=cache;this.planId=planId;this.taskId=taskId; }
+    ObjectNode observation(){return lastResponse.deepCopy();}
     private JsonNode get(String path, boolean optional) throws Exception {
+        String rateKey=path.startsWith("/search/")?"github-rate-search":"github-rate-core";
+        if(store!=null){ObjectNode gate=store.observation(rateKey);if(gate!=null&&gate.path("retryAt").asLong()>System.currentTimeMillis())throw new FetchException("Waiting for GitHub rate window",gate.path("retryAt").asLong(),false);}
         URI uri = URI.create("https://api.github.com" + path);
         if (!"api.github.com".equals(uri.getHost()) || path.contains("..")) throw new IllegalArgumentException("Invalid GitHub route");
         HttpRequest.Builder request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(45))
                 .header("Accept", "application/vnd.github+json").header("User-Agent", "HappyGit-data-platform")
                 .header("X-GitHub-Api-Version", "2022-11-28");
         if (token != null && !token.isBlank()) request.header("Authorization", "Bearer " + token);
+        ObjectNode cached=cache==null?null:cache.read(path);
+        if(cached!=null){
+            if(!cached.path("etag").asText().isEmpty())request.header("If-None-Match",cached.path("etag").asText());
+            else if(!cached.path("lastModified").asText().isEmpty())request.header("If-Modified-Since",cached.path("lastModified").asText());
+        }
+        if(store!=null&&!planId.isEmpty())store.reserveRequest(planId);
         HttpResponse<InputStream> response = client.send(request.GET().build(), HttpResponse.BodyHandlers.ofInputStream());
         byte[] content;
         try (InputStream input = response.body()) {
@@ -31,6 +44,11 @@ public final class GitHubCollector {
             if (content.length > 4 * 1024 * 1024) throw new FetchException("GitHub response exceeds limit", 0, true);
         }
         int status = response.statusCode();
+        lastResponse=Json.object().put("route",path).put("status",status).put("checkedAt",System.currentTimeMillis())
+                .put("rateRemaining",response.headers().firstValue("x-ratelimit-remaining").orElse("unknown"))
+                .put("rateReset",response.headers().firstValue("x-ratelimit-reset").orElse("unknown"))
+                .put("etag",response.headers().firstValue("etag").orElse(""));
+        if(status==304&&cached!=null)return cached.path("payload");
         if (status == 404 && optional) return null;
         if (status != 200) {
             long now = System.currentTimeMillis(), retryAt = now + 60_000;
@@ -41,9 +59,16 @@ public final class GitHubCollector {
                 if (response.headers().firstValue("x-ratelimit-remaining").orElse("1").equals("0") && reset.matches("[0-9]+"))
                     retryAt = Math.max(retryAt, Long.parseLong(reset) * 1000);
             }
+            if(store!=null&&(status==403||status==429))store.observe(rateKey,lastResponse.deepCopy().put("retryAt",retryAt));
             throw new FetchException("GitHub HTTP " + status, retryAt, status == 401 || status == 404 || status == 422);
         }
-        return Json.MAPPER.readTree(content);
+        JsonNode payload=Json.MAPPER.readTree(content);
+        boolean privatePayload=payload.path("private").asBoolean();
+        if(payload.isArray())for(JsonNode row:payload)privatePayload|=row.path("private").asBoolean();
+        if(cache!=null&&!privatePayload){
+            ObjectNode entry=lastResponse.deepCopy().put("lastModified",response.headers().firstValue("last-modified").orElse(""));entry.set("payload",payload);cache.write(path,entry);
+        }
+        return payload;
     }
     public List<ObjectNode> repository(String fullName) throws Exception {
         if (!fullName.matches("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")) throw new IllegalArgumentException("Expected owner/name");
@@ -57,6 +82,7 @@ public final class GitHubCollector {
                 .put("htmlUrl", raw.path("html_url").asText()).put("visibility", raw.path("private").asBoolean() ? "private" : "public")
                 .put("isArchived", raw.path("archived").asBoolean()).put("isFork",raw.path("fork").asBoolean())
                 .put("sourceKind", "github_public").put("observedAt", System.currentTimeMillis());
+        result.set("metadataRequest",observation());
         copy(raw, "description", result, "description"); copy(raw, "language", result, "primaryLanguage");
         copy(raw, "stargazers_count", result, "starCount"); copy(raw, "forks_count", result, "forkCount");
         result.set("topics", raw.path("topics").isArray() ? raw.get("topics") : Json.MAPPER.createArrayNode());
@@ -68,7 +94,9 @@ public final class GitHubCollector {
                 String text = new String(Base64.getMimeDecoder().decode(readme.path("content").asText()), StandardCharsets.UTF_8);
                 if (text.codePointCount(0,text.length()) > 8000) text = text.substring(0,text.offsetByCodePoints(0,8000));
                 result.put("readmeText",text);
+                result.put("readmeSha",readme.path("sha").asText());
             }
+            result.put("readmeStatus",readme==null?"missing":"observed");result.set("readmeRequest",observation());
         }
         return Collections.singletonList(result);
     }
@@ -81,18 +109,39 @@ public final class GitHubCollector {
         if (!login.matches("[A-Za-z0-9-]{1,39}") || !(kind.equals("stars") || kind.equals("owned"))) throw new IllegalArgumentException("Invalid public collection");
         Json.requireId(subjectId);
         ArrayNode members = Json.MAPPER.createArrayNode();
+        ArrayNode discovered=Json.MAPPER.createArrayNode();int start=1;
+        ObjectNode checkpoint=store==null||taskId.isEmpty()?null:store.observation("collection-"+taskId);
+        if(checkpoint!=null){members=(ArrayNode)checkpoint.path("repoIds").deepCopy();discovered=(ArrayNode)checkpoint.path("discoveredRepositories").deepCopy();start=checkpoint.path("nextPage").asInt();}
         boolean complete = false;
-        for (int page = 1; page <= 20; page++) {
-            JsonNode rows = get("/users/" + login + (kind.equals("stars") ? "/starred" : "/repos") + "?per_page=100&page=" + page, false);
+        boolean unknown=false;int lastPage=start-1;
+        for (int page = start; page <= 20; page++) {
+            JsonNode rows = get("/users/" + login + (kind.equals("stars") ? "/starred" : "/repos") + "?per_page=100&page=" + page, true);
+            if(rows==null){unknown=true;break;}
             if (!rows.isArray()) throw new IOException("Expected repository array");
-            for (JsonNode row : rows) if (!row.path("private").asBoolean()) members.add(row.path("id").asText());
+            for (JsonNode row : rows) if (!row.path("private").asBoolean()) {members.add(row.path("id").asText());discovered.add(row.path("full_name").asText());}
+            lastPage=page;
             if (rows.size() < 100) { complete = true; break; }
+            if(store!=null&&!taskId.isEmpty()){
+                ObjectNode saved=Json.object().put("nextPage",page+1);saved.set("repoIds",members);saved.set("discoveredRepositories",discovered);store.observe("collection-"+taskId,saved);
+            }
         }
         ObjectNode snapshot = Json.object().put("kind","collection").put("subjectId",subjectId)
                 .put("collectionKind",kind).put("complete",complete).put("sourceKind","github_public")
-                .put("observedAt",System.currentTimeMillis());
+                .put("observedAt",System.currentTimeMillis()).put("pagesRead",lastPage).put("pageLimit",20).put("unknown",unknown)
+                .put("sampleScope","public_user_"+kind);
         snapshot.set("repoIds",members);
+        snapshot.set("discoveredRepositories",discovered);
         return Collections.singletonList(snapshot);
+    }
+    public List<ObjectNode> discover(String query,int page) throws Exception {
+        if(query.isBlank()||query.length()>512||page<1||page>10)throw new IllegalArgumentException("Invalid discovery query/page");
+        JsonNode result=get("/search/repositories?q="+URLEncoder.encode(query,StandardCharsets.UTF_8)+"&sort=updated&order=desc&per_page=100&page="+page,false);
+        JsonNode rows=result.path("items");if(!rows.isArray())throw new IOException("Expected search items");
+        ObjectNode source=Json.object().put("kind","discovery").put("query",query).put("page",page).put("returned",rows.size())
+                .put("totalCount",result.path("total_count").asLong()).put("incompleteResults",result.path("incomplete_results").asBoolean())
+                .put("observedAt",System.currentTimeMillis()).put("sampleScope","search_sorted_updated_bounded");
+        ArrayNode names=source.putArray("discoveredRepositories");for(JsonNode row:rows)if(!row.path("private").asBoolean())names.add(row.path("full_name").asText());
+        source.set("request",observation());return Collections.singletonList(source);
     }
     private static void copy(JsonNode from, String source, ObjectNode target, String field) { target.set(field,from.path(source).isMissingNode() ? NullNode.instance : from.get(source)); }
     private static JsonNode date(JsonNode value) { return value.isTextual() ? LongNode.valueOf(Instant.parse(value.asText()).toEpochMilli()) : NullNode.instance; }

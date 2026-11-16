@@ -41,10 +41,38 @@ public final class ConsoleServer {
             if(!path.startsWith("/api/platform/")){send(exchange,404,Json.object().put("error","Not found"));return;}
             String authorization=exchange.getRequestHeaders().getFirst("Authorization");
             if(!token.isEmpty()&&!MessageDigest.isEqual(("Bearer "+token).getBytes(StandardCharsets.UTF_8),String.valueOf(authorization).getBytes(StandardCharsets.UTF_8))){send(exchange,401,Json.object().put("error","需要管理员凭据"));return;}
+            if(!exchange.getRequestMethod().equals("GET")){
+                String origin=exchange.getRequestHeaders().getFirst("Origin");
+                if(origin!=null&&!origin.equals("http://"+exchange.getRequestHeaders().getFirst("Host"))&&!origin.equals("https://"+exchange.getRequestHeaders().getFirst("Host")))throw new IllegalArgumentException("Origin mismatch");
+            }
             if(exchange.getRequestMethod().equals("GET")&&path.equals("/api/platform/status")){
                 List<ObjectNode> tasks=store.list();ObjectNode result=Json.object().put("observedAt",System.currentTimeMillis()).put("storageRoot",root)
                         .put("coordination","ZooKeeper").put("workerSessionExpired",store.expired()).put("deploymentMode",System.getenv().getOrDefault("HG_CLUSTER_MODE","local-development"));
-                result.set("workers",Json.MAPPER.valueToTree(store.workers()));result.set("tasks",Json.MAPPER.valueToTree(tasks));send(exchange,200,result);
+                result.set("workers",Json.MAPPER.valueToTree(store.workers()));result.set("tasks",Json.MAPPER.valueToTree(tasks));
+                ObjectNode rates=result.putObject("rateLimits");for(String scope:Arrays.asList("core","search")){ObjectNode observation=store.observation("github-rate-"+scope);if(observation!=null)rates.set(scope,observation);}
+                ArrayNode plans=result.putArray("plans");
+                for(ObjectNode plan:store.plans()){
+                    ObjectNode summary=plan.deepCopy(),counts=summary.putObject("taskCounts"),languages=summary.putObject("languageObservations"),topics=summary.putObject("topicObservations");
+                    for(ObjectNode task:tasks)if(task.path("input").path("planId").asText().equals(plan.path("planId").asText())){
+                        String state=task.path("state").asText();counts.put(state,counts.path(state).asInt()+1);
+                        if(state.equals("succeeded")&&task.path("type").asText().equals("repository")&&task.path("result").path("visibility").asText().equals("public")){
+                            String language=task.path("result").path("language").asText("unknown");languages.put(language,languages.path(language).asInt()+1);
+                            for(com.fasterxml.jackson.databind.JsonNode topic:task.path("result").path("topics"))topics.put(topic.asText(),topics.path(topic.asText()).asInt()+1);
+                        }
+                    }
+                    plans.add(summary);
+                }
+                send(exchange,200,result);
+            }else if(exchange.getRequestMethod().equals("POST")&&path.equals("/api/platform/plans")){
+                send(exchange,202,CollectionPlan.create(store,body(exchange)));
+            }else if(exchange.getRequestMethod().equals("POST")&&path.matches("/api/platform/plans/[A-Za-z0-9_.-]+/(pause|resume)")){
+                String[] segments=path.split("/");ObjectNode input=body(exchange);
+                send(exchange,200,store.controlPlan(segments[4],segments[5],input.path("extraBudget").asInt(0)));
+            }else if(exchange.getRequestMethod().equals("GET")&&path.equals("/api/platform/catalog/export")){
+                String namespace="public",query=exchange.getRequestURI().getRawQuery();if(query!=null&&query.startsWith("namespace="))namespace=Json.requireId(URLDecoder.decode(query.substring(10),StandardCharsets.UTF_8));
+                ObjectNode snapshot=new CatalogSnapshot(store,conf).freeze(namespace);StringBuilder bytes=new StringBuilder();for(com.fasterxml.jackson.databind.JsonNode row:snapshot.path("records"))bytes.append(row).append('\n');
+                snapshot.put("catalogSnapshotId",Json.sha256(bytes.toString().getBytes(StandardCharsets.UTF_8))).put("sha256",Json.sha256(bytes.toString().getBytes(StandardCharsets.UTF_8))).put("bytes",bytes.toString().getBytes(StandardCharsets.UTF_8).length);
+                send(exchange,200,snapshot);
             }else if(exchange.getRequestMethod().equals("GET")&&path.equals("/api/platform/repositories")){
                 String namespace="public";String query=exchange.getRequestURI().getRawQuery();
                 if(query!=null&&query.startsWith("namespace="))namespace=Json.requireId(URLDecoder.decode(query.substring(10),StandardCharsets.UTF_8));
@@ -79,5 +107,8 @@ public final class ConsoleServer {
     private void send(HttpExchange exchange,int code,ObjectNode value)throws IOException{
         byte[] bytes=Json.bytes(value);exchange.getResponseHeaders().set("Content-Type","application/json; charset=utf-8");exchange.getResponseHeaders().set("Cache-Control","no-store");
         exchange.getResponseHeaders().set("X-Content-Type-Options","nosniff");exchange.sendResponseHeaders(code,bytes.length);exchange.getResponseBody().write(bytes);
+    }
+    private ObjectNode body(HttpExchange exchange)throws IOException{
+        byte[] bytes=exchange.getRequestBody().readNBytes(65537);if(bytes.length>65536)throw new IllegalArgumentException("Request too large");return Json.parse(new String(bytes,StandardCharsets.UTF_8));
     }
 }

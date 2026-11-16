@@ -1,0 +1,12 @@
+[Unit]
+Description=Queue a bounded HappyGit cloud archive
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=happygit
+Group=happygit
+EnvironmentFile=/opt/happygit/conf/platform.env
+WorkingDirectory=/opt/happygit
+ExecStart=/opt/happygit/bin/data-platform archive-cloud --namespace cloud-real
+NoNewPrivileges=true

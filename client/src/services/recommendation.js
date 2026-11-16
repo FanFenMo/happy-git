@@ -93,18 +93,35 @@ export async function computeAndCommitProfile(snapshot) {
   return { profile: workerResult.profile, committed, error }
 }
 
-export async function computeAndCommitRanking(snapshot, profile) {
+export async function computeAndCommitRanking(snapshot, profile, options = {}) {
   const invoke = nativeBridge.capture()
+  const cloudPortrait = options.cloudPortrait !== undefined ? options.cloudPortrait : (snapshot.cloudPortrait || null)
+  const featureSpace = options.featureSpace !== undefined ? options.featureSpace : (snapshot.featureSpace || null)
+  const unprocessedEvents = Array.isArray(options.unprocessedEvents)
+    ? options.unprocessedEvents
+    : (Array.isArray(snapshot.unprocessedEvents) ? snapshot.unprocessedEvents : [])
+  const processedThrough = Number(
+    options.processedThrough ??
+    snapshot.processedThrough ??
+    cloudPortrait?.processedThrough ??
+    0
+  )
+
   const workerResult = await runWorkerJob(COMPUTE_PURPOSE.RANKING, snapshot.inputId, snapshot.inputVersions, {
     accountId: snapshot.accountId,
     profile,
+    cloudPortrait,
+    featureSpace,
+    unprocessedEvents,
+    processedThrough,
     starred: snapshot.starred,
     candidates: snapshot.candidates,
     history: snapshot.history,
     manualTags: snapshot.manualTags,
     hiddenRepoIds: snapshot.hiddenRepoIds,
     historyEnabled: snapshot.historyEnabled,
-    owned: snapshot.owned
+    owned: snapshot.owned,
+    batchId: options.batchId
   })
 
   const commitRes = await invoke(OPERATIONS.RECOMMENDATION_COMMIT, {

@@ -29,7 +29,11 @@ import {
   logoutCloudSession,
   readCloudSyncState,
   flushCloudOutbox,
-  resetCloudAnalysis
+  resetCloudAnalysis,
+  readCloudPortrait,
+  refreshCloudPortrait,
+  readCloudCohorts,
+  refreshCloudCohorts
 } from '../services/cloud'
 import { useHistoryStore } from './history'
 import { nativeBridge } from '../platform'
@@ -90,6 +94,11 @@ export const useUserStore = defineStore('user', {
     activeLoginTaskId: null,
     preferences: emptyPreferences(),
     cloudSync: emptyCloudSync(),
+    cloudPortrait: null,
+    cloudPortraitLoading: false,
+    cloudPortraitError: null,
+    cloudCohorts: null,
+    cloudCohortsLoading: false,
     cloudAuthStage: 'idle',
     cloudChallengeId: null,
     repos: [],
@@ -128,6 +137,9 @@ export const useUserStore = defineStore('user', {
       this.stars = []
       this.preferences = emptyPreferences()
       this.cloudSync = emptyCloudSync()
+      this.cloudPortrait = null
+      this.cloudPortraitLoading = false
+      this.cloudPortraitError = null
       this.cloudAuthStage = 'idle'
       this.cloudChallengeId = null
       this.repoSync = emptySync()
@@ -177,16 +189,24 @@ export const useUserStore = defineStore('user', {
         if (snap.cloudSync) {
           this.cloudSync = { ...emptyCloudSync(), ...snap.cloudSync }
         }
+        if (snap.cloudPortrait) {
+          this.cloudPortrait = snap.cloudPortrait
+        }
         this.repoSync = { ...emptySync(), ...snap.repoSync }
         this.starSync = { ...emptySync(), ...snap.starSync }
 
         await Promise.all([
           this.loadCollection('repos'),
           this.loadCollection('stars'),
-          useHistoryStore().initializeForCurrentAccount()
+          useHistoryStore().initializeForCurrentAccount(),
+          this.loadCachedCohorts()
         ])
 
         if (epoch !== this.sessionEpoch) return
+
+        if (this.cloudSync.cloudBound && this.cloudSync.accountMatched && this.preferences.analysisEnabled) {
+          this.refreshCloudPortraitData().catch(() => {})
+        }
 
         if (this.session.status === 'authenticated' && (!this.repoSync.complete || !this.starSync.complete)) {
           this.refreshAccountData().catch(err => {
@@ -418,6 +438,7 @@ export const useUserStore = defineStore('user', {
       if (res?.cloudSync) {
         this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
       }
+      this.cloudPortrait = await readCloudPortrait().catch(() => null)
     },
 
     async saveManualTags(tags) {
@@ -438,6 +459,60 @@ export const useUserStore = defineStore('user', {
         this.preferences.analysisEnabled = Boolean(state.analysisEnabled)
       }
       return this.cloudSync
+    },
+
+    async refreshCloudPortraitData() {
+      if (!this.hasAccount || this.cloudPortraitLoading) return this.cloudPortrait
+      const epoch = this.sessionEpoch
+      this.cloudPortraitLoading = true
+      this.cloudPortraitError = null
+      try {
+        const res = await refreshCloudPortrait()
+        if (epoch !== this.sessionEpoch) return null
+        if (res?.cloudPortrait) {
+          this.cloudPortrait = res.cloudPortrait
+        } else {
+          this.cloudPortrait = await readCloudPortrait().catch(() => this.cloudPortrait)
+        }
+        if (res && !res.refreshed && res.error?.message) {
+          this.cloudPortraitError = res.error.message
+        }
+        await this.refreshCloudSyncState().catch(() => {})
+        return this.cloudPortrait
+      } catch (err) {
+        if (epoch === this.sessionEpoch) {
+          this.cloudPortraitError = err.message
+        }
+        return this.cloudPortrait
+      } finally {
+        if (epoch === this.sessionEpoch) this.cloudPortraitLoading = false
+      }
+    },
+
+    async loadCachedCohorts() {
+      try {
+        const cached = await readCloudCohorts()
+        if (cached) this.cloudCohorts = cached
+      } catch (_) {}
+      return this.cloudCohorts
+    },
+
+    async refreshCloudCohortsData() {
+      if (this.cloudCohortsLoading) return this.cloudCohorts
+      this.cloudCohortsLoading = true
+      try {
+        const res = await refreshCloudCohorts()
+        if (res?.cohorts) {
+          this.cloudCohorts = res.cohorts
+        } else {
+          await this.loadCachedCohorts()
+        }
+        return this.cloudCohorts
+      } catch (_) {
+        return this.cloudCohorts
+      } finally {
+        this.cloudCohortsLoading = false
+      }
     },
 
     async startCloudBind() {
@@ -499,6 +574,7 @@ export const useUserStore = defineStore('user', {
       if (res?.cloudSync) {
         this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
       }
+      this.cloudPortrait = await readCloudPortrait().catch(() => null)
       return res
     }
   }

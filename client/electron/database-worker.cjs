@@ -399,6 +399,40 @@ function initTablesV3() {
       error_code TEXT,
       FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS cloud_portraits (
+      account_id TEXT PRIMARY KEY NOT NULL,
+      subject_id TEXT,
+      analysis_epoch INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'pending',
+      model_version TEXT,
+      feature_space_version TEXT,
+      catalog_snapshot_id TEXT,
+      generation_id TEXT,
+      reference_time INTEGER,
+      generated_at INTEGER,
+      processed_through INTEGER NOT NULL DEFAULT 0,
+      input_digest TEXT,
+      input_versions_json TEXT,
+      coverage_json TEXT,
+      portrait_json TEXT,
+      search_plan_json TEXT,
+      feature_space_json TEXT,
+      is_fixture INTEGER NOT NULL DEFAULT 0,
+      fetched_at INTEGER NOT NULL,
+      FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS cloud_cohorts_cache (
+      cache_key TEXT PRIMARY KEY NOT NULL,
+      model_version TEXT,
+      generation_id TEXT,
+      source_kind TEXT,
+      reference_time INTEGER,
+      generated_at INTEGER,
+      cohorts_json TEXT NOT NULL,
+      fetched_at INTEGER NOT NULL
+    );
   `)
 }
 
@@ -649,7 +683,8 @@ function readAccountSnapshot(accountId) {
     repoSync: findSync('repos'),
     starSync: findSync('stars'),
     revisions: getAccountRevisions(accountId),
-    cloudSync: cloudState
+    cloudSync: cloudState,
+    cloudPortrait: act ? readCloudPortrait(accountId) : null
   }
 }
 
@@ -675,6 +710,14 @@ function savePreferences(accountId, preferences) {
         SET analysis_enabled = ?, updated_at = ?
         WHERE account_id = ?;
       `).run(preferences.analysisEnabled ? 1 : 0, now, accountId)
+      if (!preferences.analysisEnabled) {
+        db.prepare(`
+          UPDATE cloud_portraits
+          SET status = 'analysis_disabled', fetched_at = ?
+          WHERE account_id = ?;
+        `).run(now, accountId)
+      }
+      bumpRevision(accountId, 'profile_revision')
     }
 
     bumpRevision(accountId, 'preference_revision')
@@ -1443,6 +1486,15 @@ function syncCloudStreamState(accountId, serverState = {}) {
       accountId
     )
 
+    if (oldAnalysisEpoch !== newAnalysisEpoch) {
+      db.prepare('DELETE FROM cloud_portraits WHERE account_id = ? AND analysis_epoch != ?;').run(accountId, newAnalysisEpoch)
+      bumpRevision(accountId, 'profile_revision')
+    } else if (processedThrough !== (syncRow.processed_through || 0)) {
+      db.prepare('UPDATE cloud_portraits SET processed_through = MAX(processed_through, ?) WHERE account_id = ? AND analysis_epoch = ?;')
+        .run(processedThrough, accountId, newAnalysisEpoch)
+      bumpRevision(accountId, 'profile_revision')
+    }
+
     return readCloudSyncState(accountId)
   })
 }
@@ -1589,6 +1641,12 @@ function applyOutboxAck(accountId, ackPayload = {}) {
       accountId
     )
 
+    if (processedThrough !== (syncRow.processed_through || 0)) {
+      db.prepare('UPDATE cloud_portraits SET processed_through = MAX(processed_through, ?) WHERE account_id = ? AND analysis_epoch = ?;')
+        .run(processedThrough, accountId, analysisEpoch)
+      bumpRevision(accountId, 'profile_revision')
+    }
+
     return readCloudSyncState(accountId)
   })
 }
@@ -1631,8 +1689,492 @@ function resetCloudAnalysisLocalState(accountId, newAnalysisEpoch) {
     `).run(nextEpoch, accountId)
 
     db.prepare('DELETE FROM cloud_collection_sync WHERE account_id = ?;').run(accountId)
+    db.prepare('DELETE FROM cloud_portraits WHERE account_id = ?;').run(accountId)
+    db.prepare(`DELETE FROM discovery_cache WHERE account_id = ? AND query_key LIKE 'cloud:%';`).run(accountId)
+    bumpRevision(accountId, 'profile_revision')
     return readCloudSyncState(accountId)
   })
+}
+
+function readUnprocessedEvents(accountId) {
+  if (!accountId) return []
+  const act = db.prepare('SELECT 1 FROM accounts WHERE account_id = ?;').get(accountId)
+  if (!act) return []
+  ensureAccountV3State(accountId)
+
+  const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+  const analysisEpoch = syncRow ? syncRow.analysis_epoch : 1
+  const processedThrough = syncRow ? (syncRow.processed_through || 0) : 0
+
+  const rows = db.prepare(`
+    SELECT
+      lae.event_id,
+      lae.account_id,
+      lae.repo_id,
+      lae.full_name,
+      lae.record_kind,
+      lae.source,
+      lae.entry_source,
+      lae.occurred_at,
+      lae.effective_at,
+      lae.time_flag,
+      lae.analysis_epoch,
+      eo.device_seq,
+      eo.acknowledged,
+      bh.repository_json
+    FROM local_activity_events lae
+    LEFT JOIN event_outbox eo
+      ON lae.account_id = eo.account_id AND lae.event_id = eo.event_id
+    LEFT JOIN browse_history bh
+      ON lae.account_id = bh.account_id AND lae.repo_id = bh.repo_id
+    WHERE lae.account_id = ?
+      AND lae.record_kind = 'open'
+      AND lae.analysis_epoch = ?
+      AND (eo.device_seq IS NULL OR eo.device_seq > ?)
+    ORDER BY lae.occurred_at DESC, lae.event_id DESC
+    LIMIT 1000;
+  `).all(accountId, analysisEpoch, processedThrough)
+
+  return rows.map((r) => {
+    let repository = null
+    if (r.repository_json) {
+      try {
+        repository = JSON.parse(r.repository_json)
+      } catch (_) {}
+    }
+    return {
+      eventId: r.event_id,
+      accountId: r.account_id,
+      repoId: r.repo_id,
+      fullName: r.full_name,
+      recordKind: r.record_kind,
+      source: r.source,
+      entrySource: r.entry_source,
+      occurredAt: r.occurred_at,
+      effectiveAt: r.effective_at || r.occurred_at,
+      timeFlag: r.time_flag,
+      analysisEpoch: r.analysis_epoch,
+      deviceSeq: r.device_seq ?? null,
+      acknowledged: Boolean(r.acknowledged),
+      repository
+    }
+  })
+}
+
+function readCloudPortrait(accountId) {
+  if (!accountId) return null
+  const act = db.prepare('SELECT 1 FROM accounts WHERE account_id = ?;').get(accountId)
+  if (!act) return null
+  ensureAccountV3State(accountId)
+
+  const cloudAcc = db.prepare('SELECT * FROM cloud_account_state WHERE account_id = ?;').get(accountId)
+  const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+  const row = db.prepare('SELECT * FROM cloud_portraits WHERE account_id = ?;').get(accountId)
+
+  const analysisEnabled = cloudAcc ? Boolean(cloudAcc.analysis_enabled) : true
+  const analysisEpoch = syncRow ? syncRow.analysis_epoch : 1
+  const acceptedThrough = syncRow ? (syncRow.accepted_through || 0) : 0
+  const exportedThrough = syncRow ? (syncRow.exported_through || 0) : 0
+  const processedThrough = syncRow ? (syncRow.processed_through || 0) : 0
+  const unprocessedEvents = readUnprocessedEvents(accountId)
+
+  if (!analysisEnabled) {
+    return {
+      accountId,
+      subjectId: cloudAcc?.subject_id || null,
+      status: 'analysis_disabled',
+      analysisEnabled: false,
+      analysisEpoch,
+      acceptedThrough,
+      exportedThrough,
+      processedThrough,
+      unprocessedCount: 0,
+      modelVersion: null,
+      featureSpaceVersion: null,
+      catalogSnapshotId: null,
+      generationId: null,
+      referenceTime: null,
+      generatedAt: null,
+      fetchedAt: row?.fetched_at || null,
+      isFixture: false,
+      coverage: null,
+      portrait: null,
+      searchPlan: null,
+      featureSpace: null
+    }
+  }
+
+  if (!row || row.analysis_epoch !== analysisEpoch) {
+    const inferredStatus = !cloudAcc?.cloud_bound
+      ? 'unbound'
+      : (acceptedThrough > 0 || unprocessedEvents.length > 0 ? 'pending' : 'empty')
+    return {
+      accountId,
+      subjectId: cloudAcc?.subject_id || null,
+      status: inferredStatus,
+      analysisEnabled: true,
+      analysisEpoch,
+      acceptedThrough,
+      exportedThrough,
+      processedThrough,
+      unprocessedCount: unprocessedEvents.length,
+      modelVersion: null,
+      featureSpaceVersion: null,
+      catalogSnapshotId: null,
+      generationId: null,
+      referenceTime: null,
+      generatedAt: null,
+      fetchedAt: null,
+      isFixture: false,
+      coverage: null,
+      portrait: null,
+      searchPlan: null,
+      featureSpace: null
+    }
+  }
+
+  const safeParse = (txt, fallback = null) => {
+    if (!txt) return fallback
+    try {
+      return JSON.parse(txt)
+    } catch (_) {
+      return fallback
+    }
+  }
+
+  const portrait = safeParse(row.portrait_json, null)
+  const searchPlan = safeParse(row.search_plan_json, null)
+  const featureSpace = safeParse(row.feature_space_json, null)
+  const coverage = safeParse(row.coverage_json, null)
+  const inputVersions = safeParse(row.input_versions_json, {})
+  const effectiveProcessed = Math.max(processedThrough, row.processed_through || 0)
+
+  return {
+    accountId,
+    subjectId: row.subject_id || cloudAcc?.subject_id || null,
+    status: row.status || (portrait ? 'ready' : 'pending'),
+    analysisEnabled: true,
+    analysisEpoch: row.analysis_epoch,
+    acceptedThrough,
+    exportedThrough,
+    processedThrough: effectiveProcessed,
+    unprocessedCount: unprocessedEvents.length,
+    modelVersion: row.model_version || null,
+    featureSpaceVersion: row.feature_space_version || null,
+    catalogSnapshotId: row.catalog_snapshot_id || null,
+    generationId: row.generation_id || null,
+    referenceTime: row.reference_time || null,
+    generatedAt: row.generated_at || null,
+    inputDigest: row.input_digest || null,
+    inputVersions,
+    coverage,
+    portrait,
+    searchPlan,
+    featureSpace,
+    isFixture: Boolean(row.is_fixture),
+    fetchedAt: row.fetched_at
+  }
+}
+
+function saveCloudPortrait(accountId, payload = {}) {
+  return withTransaction(() => {
+    ensureAccountV3State(accountId)
+    const cloudAcc = db.prepare('SELECT * FROM cloud_account_state WHERE account_id = ?;').get(accountId)
+    const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+    const existing = db.prepare('SELECT * FROM cloud_portraits WHERE account_id = ?;').get(accountId)
+    const now = Date.now()
+
+    if (!cloudAcc.analysis_enabled && payload.status !== 'analysis_disabled') {
+      return readCloudPortrait(accountId)
+    }
+
+    const currentEpoch = syncRow.analysis_epoch
+    const payloadEpoch = payload.analysisEpoch !== undefined && payload.analysisEpoch !== null
+      ? Number(payload.analysisEpoch)
+      : currentEpoch
+    if (payloadEpoch !== currentEpoch) {
+      return readCloudPortrait(accountId)
+    }
+
+    const incomingProcessed = payload.processedThrough !== undefined && payload.processedThrough !== null
+      ? Number(payload.processedThrough)
+      : (existing?.analysis_epoch === currentEpoch ? (existing.processed_through || 0) : (syncRow.processed_through || 0))
+
+    // 防止旧任务迟完成覆盖较新的 processedThrough 或 generation
+    if (existing && existing.analysis_epoch === currentEpoch) {
+      if (incomingProcessed < (existing.processed_through || 0)) {
+        return readCloudPortrait(accountId)
+      }
+      if (
+        payload.generatedAt &&
+        existing.generated_at &&
+        Number(payload.generatedAt) < Number(existing.generated_at) &&
+        incomingProcessed <= (existing.processed_through || 0)
+      ) {
+        return readCloudPortrait(accountId)
+      }
+    }
+
+    const nextProcessed = Math.max(syncRow.processed_through || 0, incomingProcessed)
+    if (nextProcessed !== (syncRow.processed_through || 0)) {
+      db.prepare('UPDATE local_sync_state SET processed_through = ? WHERE account_id = ?;').run(nextProcessed, accountId)
+    }
+
+    const rawPortrait = payload.portrait || payload.profile || (payload.topInterests || payload.languages || payload.topics || payload.directions ? payload : null)
+    const hasEvidence = Boolean(
+      rawPortrait && (
+        (Array.isArray(rawPortrait.topInterests) && rawPortrait.topInterests.length > 0) ||
+        (Array.isArray(rawPortrait.directions) && rawPortrait.directions.length > 0) ||
+        (rawPortrait.languages && Object.keys(rawPortrait.languages).length > 0) ||
+        (rawPortrait.topics && Object.keys(rawPortrait.topics).length > 0)
+      )
+    )
+    const nextStatus = payload.status || (rawPortrait ? (hasEvidence ? 'ready' : 'empty') : 'pending')
+    const nextModelVersion = payload.modelVersion ?? existing?.model_version ?? null
+    const nextFeatureSpaceVersion = payload.featureSpaceVersion ?? existing?.feature_space_version ?? null
+    const nextCatalogSnapshotId = payload.catalogSnapshotId ?? existing?.catalog_snapshot_id ?? null
+    const nextGenerationId = payload.generationId ?? existing?.generation_id ?? null
+    const nextReferenceTime = payload.referenceTime ?? existing?.reference_time ?? null
+    const nextGeneratedAt = payload.generatedAt ?? existing?.generated_at ?? null
+    const nextInputDigest = payload.inputDigest ?? existing?.input_digest ?? null
+    const nextInputVersionsJson = payload.inputVersions
+      ? JSON.stringify(payload.inputVersions)
+      : (existing?.input_versions_json || '{}')
+    const nextCoverageJson = payload.coverage
+      ? JSON.stringify(payload.coverage)
+      : (existing?.coverage_json || null)
+    const nextPortraitJson = rawPortrait
+      ? JSON.stringify(rawPortrait)
+      : (nextStatus === 'empty' || nextStatus === 'pending' ? null : (existing?.portrait_json || null))
+    const nextSearchPlanJson = payload.searchPlan
+      ? JSON.stringify(payload.searchPlan)
+      : (existing?.search_plan_json || null)
+    const nextFeatureSpaceJson = payload.featureSpace
+      ? JSON.stringify(payload.featureSpace)
+      : (existing?.feature_space_version === nextFeatureSpaceVersion ? (existing?.feature_space_json || null) : null)
+    const isFixture = payload.isFixture ? 1 : 0
+
+    db.prepare(`
+      INSERT INTO cloud_portraits (
+        account_id, subject_id, analysis_epoch, status, model_version, feature_space_version,
+        catalog_snapshot_id, generation_id, reference_time, generated_at, processed_through,
+        input_digest, input_versions_json, coverage_json, portrait_json, search_plan_json,
+        feature_space_json, is_fixture, fetched_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_id) DO UPDATE SET
+        subject_id = excluded.subject_id,
+        analysis_epoch = excluded.analysis_epoch,
+        status = excluded.status,
+        model_version = excluded.model_version,
+        feature_space_version = excluded.feature_space_version,
+        catalog_snapshot_id = excluded.catalog_snapshot_id,
+        generation_id = excluded.generation_id,
+        reference_time = excluded.reference_time,
+        generated_at = excluded.generated_at,
+        processed_through = excluded.processed_through,
+        input_digest = excluded.input_digest,
+        input_versions_json = excluded.input_versions_json,
+        coverage_json = excluded.coverage_json,
+        portrait_json = excluded.portrait_json,
+        search_plan_json = excluded.search_plan_json,
+        feature_space_json = excluded.feature_space_json,
+        is_fixture = excluded.is_fixture,
+        fetched_at = excluded.fetched_at;
+    `).run(
+      accountId,
+      payload.subjectId || cloudAcc.subject_id || null,
+      currentEpoch,
+      nextStatus,
+      nextModelVersion,
+      nextFeatureSpaceVersion,
+      nextCatalogSnapshotId,
+      nextGenerationId,
+      nextReferenceTime,
+      nextGeneratedAt,
+      nextProcessed,
+      nextInputDigest,
+      nextInputVersionsJson,
+      nextCoverageJson,
+      nextPortraitJson,
+      nextSearchPlanJson,
+      nextFeatureSpaceJson,
+      isFixture,
+      now
+    )
+
+    const seedCandidates = payload.searchPlan?.seedCandidates || payload.seedCandidates || payload.supplementCandidates
+    if (Array.isArray(seedCandidates) && seedCandidates.length > 0) {
+      saveDiscoveryCache(
+        accountId,
+        'cloud:seed_candidates',
+        JSON.stringify({ source: 'cloud_search_plan', generationId: nextGenerationId }),
+        JSON.stringify(seedCandidates),
+        now,
+        now + 7 * 24 * 60 * 60 * 1000
+      )
+    }
+
+    if (
+      !existing ||
+      existing.generation_id !== nextGenerationId ||
+      existing.model_version !== nextModelVersion ||
+      existing.feature_space_version !== nextFeatureSpaceVersion ||
+      existing.processed_through !== nextProcessed ||
+      existing.status !== nextStatus
+    ) {
+      bumpRevision(accountId, 'profile_revision')
+    }
+
+    return readCloudPortrait(accountId)
+  })
+}
+
+function saveCloudSearchPlan(accountId, searchPlanPayload = {}) {
+  return withTransaction(() => {
+    ensureAccountV3State(accountId)
+    const existing = db.prepare('SELECT * FROM cloud_portraits WHERE account_id = ?;').get(accountId)
+    const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
+    const now = Date.now()
+    const currentEpoch = syncRow.analysis_epoch
+
+    if (searchPlanPayload.analysisEpoch != null && Number(searchPlanPayload.analysisEpoch) !== currentEpoch) {
+      return readCloudPortrait(accountId)
+    }
+
+    if (existing && existing.analysis_epoch === currentEpoch) {
+      // search-plan 必须与当前画像 generation 对齐（若两端均声明了 generationId）
+      if (
+        existing.generation_id &&
+        searchPlanPayload.generationId &&
+        existing.generation_id !== searchPlanPayload.generationId
+      ) {
+        return readCloudPortrait(accountId)
+      }
+      db.prepare(`
+        UPDATE cloud_portraits
+        SET search_plan_json = ?,
+            feature_space_json = COALESCE(?, feature_space_json),
+            fetched_at = ?
+        WHERE account_id = ?;
+      `).run(
+        JSON.stringify(searchPlanPayload),
+        searchPlanPayload.featureSpace ? JSON.stringify(searchPlanPayload.featureSpace) : null,
+        now,
+        accountId
+      )
+    } else {
+      saveCloudPortrait(accountId, {
+        analysisEpoch: currentEpoch,
+        status: 'pending',
+        modelVersion: searchPlanPayload.modelVersion || null,
+        featureSpaceVersion: searchPlanPayload.featureSpaceVersion || null,
+        catalogSnapshotId: searchPlanPayload.catalogSnapshotId || null,
+        generationId: searchPlanPayload.generationId || null,
+        processedThrough: searchPlanPayload.processedThrough ?? syncRow.processed_through ?? 0,
+        searchPlan: searchPlanPayload,
+        featureSpace: searchPlanPayload.featureSpace || null
+      })
+    }
+
+    const seedCandidates = searchPlanPayload.seedCandidates || searchPlanPayload.supplementCandidates || searchPlanPayload.items
+    if (Array.isArray(seedCandidates) && seedCandidates.length > 0) {
+      saveDiscoveryCache(
+        accountId,
+        'cloud:seed_candidates',
+        JSON.stringify({ source: 'cloud_search_plan', generationId: searchPlanPayload.generationId || null }),
+        JSON.stringify(seedCandidates),
+        now,
+        now + 7 * 24 * 60 * 60 * 1000
+      )
+    }
+
+    return readCloudPortrait(accountId)
+  })
+}
+
+function markCloudPortraitStale(accountId) {
+  return withTransaction(() => {
+    ensureAccountV3State(accountId)
+    const existing = db.prepare('SELECT * FROM cloud_portraits WHERE account_id = ?;').get(accountId)
+    if (existing && existing.status === 'ready') {
+      db.prepare(`UPDATE cloud_portraits SET status = 'stale' WHERE account_id = ?;`).run(accountId)
+    }
+    return readCloudPortrait(accountId)
+  })
+}
+
+function saveCloudCohorts(cacheKey = 'default', payload = {}) {
+  return withTransaction(() => {
+    const now = Date.now()
+    const key = String(cacheKey || 'default')
+    const cohortsList = Array.isArray(payload.cohorts) ? payload.cohorts : (Array.isArray(payload.items) ? payload.items : [])
+    const normalized = {
+      modelVersion: payload.modelVersion || null,
+      generationId: payload.generationId || null,
+      catalogSnapshotId: payload.catalogSnapshotId || null,
+      sourceKind: payload.sourceKind || 'real_production',
+      referenceTime: payload.referenceTime || null,
+      generatedAt: payload.generatedAt || now,
+      isFixture: Boolean(payload.isFixture),
+      totalSubjects: payload.totalSubjects ?? cohortsList.reduce((acc, c) => acc + Number(c?.memberCount || 0), 0),
+      cohorts: cohortsList
+    }
+    db.prepare(`
+      INSERT INTO cloud_cohorts_cache (
+        cache_key, model_version, generation_id, source_kind, reference_time, generated_at, cohorts_json, fetched_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(cache_key) DO UPDATE SET
+        model_version = excluded.model_version,
+        generation_id = excluded.generation_id,
+        source_kind = excluded.source_kind,
+        reference_time = excluded.reference_time,
+        generated_at = excluded.generated_at,
+        cohorts_json = excluded.cohorts_json,
+        fetched_at = excluded.fetched_at;
+    `).run(
+      key,
+      normalized.modelVersion,
+      normalized.generationId,
+      normalized.sourceKind,
+      normalized.referenceTime,
+      normalized.generatedAt,
+      JSON.stringify(normalized),
+      now
+    )
+    return readCloudCohorts(key)
+  })
+}
+
+function readCloudCohorts(cacheKey = 'default') {
+  const key = String(cacheKey || 'default')
+  const row = db.prepare('SELECT * FROM cloud_cohorts_cache WHERE cache_key = ?;').get(key)
+  if (!row) return null
+  try {
+    const parsed = JSON.parse(row.cohorts_json)
+    return {
+      ...parsed,
+      fetchedAt: row.fetched_at
+    }
+  } catch (_) {
+    return null
+  }
+}
+
+function getExtendedSnapshotVersions(accountId) {
+  const base = getAccountRevisions(accountId)
+  const act = db.prepare('SELECT 1 FROM accounts WHERE account_id = ?;').get(accountId)
+  if (!act) return base
+  ensureAccountV3State(accountId)
+  const syncRow = db.prepare('SELECT analysis_epoch, processed_through FROM local_sync_state WHERE account_id = ?;').get(accountId)
+  const portRow = db.prepare('SELECT generation_id, model_version, feature_space_version FROM cloud_portraits WHERE account_id = ?;').get(accountId)
+  return {
+    ...base,
+    analysisEpoch: syncRow ? syncRow.analysis_epoch : 1,
+    processedThrough: syncRow ? (syncRow.processed_through || 0) : 0,
+    portraitGenerationId: portRow?.generation_id || null,
+    portraitModelVersion: portRow?.model_version || null,
+    featureSpaceVersion: portRow?.feature_space_version || null
+  }
 }
 
 function readCollectionForCloudSync(accountId, collectionKind) {
@@ -1784,10 +2326,10 @@ function saveFeed(key, items, fetchedAt = Date.now()) {
   stmt.run(key, json, fetchedAt)
 }
 
-// v2 领域操作: createSnapshot, commitRecommendation, listRecommendation, feedback, discovery, operations
+// v2/v3 领域操作: createSnapshot, commitRecommendation, listRecommendation, feedback, discovery, operations
 function createSnapshot(accountId, purpose = 'ranking', reason = 'user_request') {
   return withTransaction(() => {
-    const revisions = getAccountRevisions(accountId)
+    const revisions = getExtendedSnapshotVersions(accountId)
     const now = Date.now()
     const inputId = 'snap_' + now + '_' + Math.random().toString(36).slice(2, 8)
 
@@ -1851,6 +2393,24 @@ function createSnapshot(accountId, purpose = 'ranking', reason = 'user_request')
     }
     const candidates = Array.from(candidateMap.values())
 
+    const cloudPortraitState = actExists ? readCloudPortrait(accountId) : null
+    const unprocessedEvents = (actExists && historyEnabled) ? readUnprocessedEvents(accountId) : []
+    const cloudPortrait = (cloudPortraitState && (cloudPortraitState.status === 'ready' || cloudPortraitState.status === 'stale') && cloudPortraitState.portrait)
+      ? {
+          ...cloudPortraitState.portrait,
+          subjectId: cloudPortraitState.subjectId,
+          modelVersion: cloudPortraitState.modelVersion,
+          featureSpaceVersion: cloudPortraitState.featureSpaceVersion,
+          catalogSnapshotId: cloudPortraitState.catalogSnapshotId,
+          generationId: cloudPortraitState.generationId,
+          referenceTime: cloudPortraitState.referenceTime,
+          generatedAt: cloudPortraitState.generatedAt,
+          processedThrough: cloudPortraitState.processedThrough,
+          status: cloudPortraitState.status,
+          isFixture: cloudPortraitState.isFixture
+        }
+      : null
+
     return {
       inputId,
       inputVersions: revisions,
@@ -1863,7 +2423,12 @@ function createSnapshot(accountId, purpose = 'ranking', reason = 'user_request')
       manualTags,
       hiddenRepoIds,
       historyEnabled,
-      candidates
+      candidates,
+      cloudPortrait,
+      cloudPortraitState,
+      featureSpace: cloudPortraitState?.featureSpace || null,
+      unprocessedEvents,
+      processedThrough: cloudPortraitState?.processedThrough || 0
     }
   })
 }
@@ -1874,7 +2439,7 @@ function commitRecommendation(accountId, inputId, inputVersions, purpose, profil
       return { ok: false, error: 'INPUT_CHANGED' }
     }
 
-    const currentRevisions = getAccountRevisions(accountId)
+    const currentRevisions = getExtendedSnapshotVersions(accountId)
     const snapRow = db.prepare('SELECT * FROM recommendation_snapshots WHERE input_id = ?;').get(inputId)
     if (snapRow) {
       if (snapRow.account_id !== accountId || snapRow.purpose !== purpose || snapRow.consumed === 1) {
@@ -1912,14 +2477,14 @@ function commitRecommendation(accountId, inputId, inputVersions, purpose, profil
       }
       const stmt = db.prepare(`
         INSERT INTO interest_profiles (account_id, model_version, input_versions_json, profile_json, generated_at)
-        VALUES (?, 'content-v1', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(account_id) DO UPDATE SET
           model_version = excluded.model_version,
           input_versions_json = excluded.input_versions_json,
           profile_json = excluded.profile_json,
           generated_at = excluded.generated_at;
       `)
-      stmt.run(accountId, effectiveVersionsJson, JSON.stringify(profile), now)
+      stmt.run(accountId, profile.modelVersion || 'content-v1', effectiveVersionsJson, JSON.stringify(profile), now)
     } else if (purpose === 'ranking') {
       if (!batch || !batch.batchId || !Array.isArray(batch.items)) {
         return { ok: false, error: 'INVALID_BATCH' }
@@ -1928,9 +2493,16 @@ function commitRecommendation(accountId, inputId, inputVersions, purpose, profil
 
       const insBatch = db.prepare(`
         INSERT INTO recommendation_batches (batch_id, account_id, model_version, input_versions_json, created_at, expires_at)
-        VALUES (?, ?, 'content-v1', ?, ?, ?);
+        VALUES (?, ?, ?, ?, ?, ?);
       `)
-      insBatch.run(batch.batchId, accountId, effectiveVersionsJson, batch.createdAt || now, batch.expiresAt || (now + 86400000))
+      insBatch.run(
+        batch.batchId,
+        accountId,
+        batch.modelVersion || 'content-v1',
+        effectiveVersionsJson,
+        batch.createdAt || now,
+        batch.expiresAt || (now + 86400000)
+      )
 
       const insItem = db.prepare(`
         INSERT OR REPLACE INTO recommendation_items (batch_id, position, repo_id, score, reasons_json, repository_json)
@@ -2171,6 +2743,27 @@ parentPort.on('message', (msg) => {
         break
       case 'markCollectionCloudSynced':
         result = markCollectionCloudSynced(payload.accountId, payload.collectionKind, payload.result)
+        break
+      case 'readUnprocessedEvents':
+        result = readUnprocessedEvents(payload.accountId)
+        break
+      case 'readCloudPortrait':
+        result = readCloudPortrait(payload.accountId)
+        break
+      case 'saveCloudPortrait':
+        result = saveCloudPortrait(payload.accountId, payload.portrait || payload)
+        break
+      case 'saveCloudSearchPlan':
+        result = saveCloudSearchPlan(payload.accountId, payload.searchPlan || payload)
+        break
+      case 'markCloudPortraitStale':
+        result = markCloudPortraitStale(payload.accountId)
+        break
+      case 'readCloudCohorts':
+        result = readCloudCohorts(payload.cacheKey || 'default')
+        break
+      case 'saveCloudCohorts':
+        result = saveCloudCohorts(payload.cacheKey || 'default', payload.cohorts || payload)
         break
       case 'forgetAccount':
         forgetAccount(payload.accountId)

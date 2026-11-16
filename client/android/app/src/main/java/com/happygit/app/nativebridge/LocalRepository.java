@@ -302,6 +302,8 @@ public class LocalRepository {
             result.put("starSync", getSyncState(db, accountId, "stars"));
             result.put("revisions", getAccountRevisions(accountId));
             result.put("cloudSync", cloudState != null ? cloudState : JSONObject.NULL);
+            JSONObject portraitState = readCloudPortrait(accountId);
+            result.put("cloudPortrait", portraitState != null ? portraitState : JSONObject.NULL);
         } catch (Exception e) {
             throw new IllegalStateException(e.getMessage(), e);
         }
@@ -356,11 +358,19 @@ public class LocalRepository {
             db.insertWithOnConflict("account_preferences", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
 
             if (preferences.has("analysisEnabled")) {
+                boolean enabledVal = preferences.optBoolean("analysisEnabled", true);
                 ensureAccountV3State(db, accountId, now);
                 ContentValues cloudCv = new ContentValues();
-                cloudCv.put("analysis_enabled", preferences.optBoolean("analysisEnabled", true) ? 1 : 0);
+                cloudCv.put("analysis_enabled", enabledVal ? 1 : 0);
                 cloudCv.put("updated_at", now);
                 db.update("cloud_account_state", cloudCv, "account_id = ?", new String[]{accountId});
+                if (!enabledVal) {
+                    ContentValues portCv = new ContentValues();
+                    portCv.put("status", "analysis_disabled");
+                    portCv.put("fetched_at", now);
+                    db.update("cloud_portraits", portCv, "account_id = ?", new String[]{accountId});
+                }
+                bumpRevision(db, accountId, "profile_revision");
             }
 
             bumpRevision(db, accountId, "preference_revision");
@@ -1194,6 +1204,15 @@ public class LocalRepository {
             syncUpd.putNull("in_flight_last_seq");
             db.update("local_sync_state", syncUpd, "account_id = ?", new String[]{accountId});
 
+            if (oldAnalysisEpoch != newAnalysisEpoch) {
+                db.delete("cloud_portraits", "account_id = ? AND analysis_epoch != ?", new String[]{accountId, String.valueOf(newAnalysisEpoch)});
+                bumpRevision(db, accountId, "profile_revision");
+            } else if (processedThrough != curProcessed) {
+                db.execSQL("UPDATE cloud_portraits SET processed_through = MAX(processed_through, ?) WHERE account_id = ? AND analysis_epoch = ?",
+                        new Object[]{processedThrough, accountId, newAnalysisEpoch});
+                bumpRevision(db, accountId, "profile_revision");
+            }
+
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
@@ -1373,6 +1392,12 @@ public class LocalRepository {
             syncUpd.putNull("in_flight_last_seq");
             db.update("local_sync_state", syncUpd, "account_id = ?", new String[]{accountId});
 
+            if (processedThrough != curProcessed) {
+                db.execSQL("UPDATE cloud_portraits SET processed_through = MAX(processed_through, ?) WHERE account_id = ? AND analysis_epoch = ?",
+                        new Object[]{processedThrough, accountId, analysisEpoch});
+                bumpRevision(db, accountId, "profile_revision");
+            }
+
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
@@ -1416,11 +1441,466 @@ public class LocalRepository {
             db.update("local_sync_state", syncUpd, "account_id = ?", new String[]{accountId});
 
             db.delete("cloud_collection_sync", "account_id = ?", new String[]{accountId});
+            db.delete("cloud_portraits", "account_id = ?", new String[]{accountId});
+            db.delete("discovery_cache", "account_id = ? AND query_key LIKE 'cloud:%'", new String[]{accountId});
+            bumpRevision(db, accountId, "profile_revision");
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
         }
         return readCloudSyncState(accountId);
+    }
+
+    public synchronized JSONArray readUnprocessedEvents(String accountId) {
+        JSONArray list = new JSONArray();
+        if (accountId == null || accountId.isEmpty()) return list;
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        try {
+            try (Cursor actC = db.rawQuery("SELECT 1 FROM accounts WHERE account_id = ?", new String[]{accountId})) {
+                if (!actC.moveToFirst()) return list;
+            }
+            ensureAccountV3State(db, accountId, System.currentTimeMillis());
+            long analysisEpoch = 1;
+            long processedThrough = 0;
+            try (Cursor s = db.rawQuery("SELECT analysis_epoch, processed_through FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+                if (s.moveToFirst()) {
+                    analysisEpoch = s.getLong(0);
+                    processedThrough = s.getLong(1);
+                }
+            }
+            String sql = "SELECT lae.event_id, lae.account_id, lae.repo_id, lae.full_name, lae.record_kind, " +
+                    "lae.source, lae.entry_source, lae.occurred_at, lae.effective_at, lae.time_flag, lae.analysis_epoch, " +
+                    "eo.device_seq, eo.acknowledged, bh.repository_json " +
+                    "FROM local_activity_events lae " +
+                    "LEFT JOIN event_outbox eo ON lae.account_id = eo.account_id AND lae.event_id = eo.event_id " +
+                    "LEFT JOIN browse_history bh ON lae.account_id = bh.account_id AND lae.repo_id = bh.repo_id " +
+                    "WHERE lae.account_id = ? AND lae.record_kind = 'open' AND lae.analysis_epoch = ? " +
+                    "AND (eo.device_seq IS NULL OR eo.device_seq > ?) " +
+                    "ORDER BY lae.occurred_at DESC, lae.event_id DESC LIMIT 1000";
+            try (Cursor c = db.rawQuery(sql, new String[]{accountId, String.valueOf(analysisEpoch), String.valueOf(processedThrough)})) {
+                while (c.moveToNext()) {
+                    JSONObject ev = new JSONObject();
+                    ev.put("eventId", c.getString(0));
+                    ev.put("accountId", c.getString(1));
+                    ev.put("repoId", c.getString(2));
+                    ev.put("fullName", c.getString(3));
+                    ev.put("recordKind", c.getString(4));
+                    ev.put("source", c.getString(5));
+                    ev.put("entrySource", c.getString(6));
+                    ev.put("occurredAt", c.getLong(7));
+                    ev.put("effectiveAt", c.getLong(8));
+                    ev.put("timeFlag", c.getString(9));
+                    ev.put("analysisEpoch", c.getLong(10));
+                    if (!c.isNull(11)) ev.put("deviceSeq", c.getLong(11));
+                    else ev.put("deviceSeq", JSONObject.NULL);
+                    ev.put("acknowledged", !c.isNull(12) && c.getInt(12) == 1);
+                    if (!c.isNull(13)) {
+                        try { ev.put("repository", new JSONObject(c.getString(13))); }
+                        catch (Exception ignored) { ev.put("repository", JSONObject.NULL); }
+                    } else {
+                        ev.put("repository", JSONObject.NULL);
+                    }
+                    list.put(ev);
+                }
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+        return list;
+    }
+
+    public synchronized JSONObject readCloudPortrait(String accountId) {
+        if (accountId == null || accountId.isEmpty()) return null;
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        try {
+            try (Cursor actC = db.rawQuery("SELECT 1 FROM accounts WHERE account_id = ?", new String[]{accountId})) {
+                if (!actC.moveToFirst()) return null;
+            }
+            ensureAccountV3State(db, accountId, System.currentTimeMillis());
+
+            String subjectId = null;
+            boolean analysisEnabled = true;
+            boolean cloudBound = false;
+            try (Cursor ca = db.rawQuery("SELECT subject_id, analysis_enabled, cloud_bound FROM cloud_account_state WHERE account_id = ?", new String[]{accountId})) {
+                if (ca.moveToFirst()) {
+                    subjectId = ca.isNull(0) ? null : ca.getString(0);
+                    analysisEnabled = ca.getInt(1) == 1;
+                    cloudBound = ca.getInt(2) == 1;
+                }
+            }
+
+            long analysisEpoch = 1, acceptedThrough = 0, exportedThrough = 0, processedThrough = 0;
+            try (Cursor ls = db.rawQuery("SELECT analysis_epoch, accepted_through, exported_through, processed_through FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+                if (ls.moveToFirst()) {
+                    analysisEpoch = ls.getLong(0);
+                    acceptedThrough = ls.getLong(1);
+                    exportedThrough = ls.getLong(2);
+                    processedThrough = ls.getLong(3);
+                }
+            }
+
+            JSONArray unprocessed = readUnprocessedEvents(accountId);
+            JSONObject out = new JSONObject();
+            out.put("accountId", accountId);
+            out.put("subjectId", subjectId != null ? subjectId : JSONObject.NULL);
+            out.put("analysisEpoch", analysisEpoch);
+            out.put("acceptedThrough", acceptedThrough);
+            out.put("exportedThrough", exportedThrough);
+            out.put("processedThrough", processedThrough);
+
+            if (!analysisEnabled) {
+                out.put("status", "analysis_disabled");
+                out.put("analysisEnabled", false);
+                out.put("unprocessedCount", 0);
+                out.put("portrait", JSONObject.NULL);
+                out.put("searchPlan", JSONObject.NULL);
+                out.put("featureSpace", JSONObject.NULL);
+                out.put("isFixture", false);
+                return out;
+            }
+
+            try (Cursor cp = db.rawQuery("SELECT * FROM cloud_portraits WHERE account_id = ?", new String[]{accountId})) {
+                if (!cp.moveToFirst() || cp.getLong(cp.getColumnIndexOrThrow("analysis_epoch")) != analysisEpoch) {
+                    String inferredStatus = !cloudBound ? "unbound" : ((acceptedThrough > 0 || unprocessed.length() > 0) ? "pending" : "empty");
+                    out.put("status", inferredStatus);
+                    out.put("analysisEnabled", true);
+                    out.put("unprocessedCount", unprocessed.length());
+                    out.put("portrait", JSONObject.NULL);
+                    out.put("searchPlan", JSONObject.NULL);
+                    out.put("featureSpace", JSONObject.NULL);
+                    out.put("isFixture", false);
+                    return out;
+                }
+
+                long rowProcessed = cp.getLong(cp.getColumnIndexOrThrow("processed_through"));
+                out.put("status", cp.getString(cp.getColumnIndexOrThrow("status")));
+                out.put("analysisEnabled", true);
+                out.put("processedThrough", Math.max(processedThrough, rowProcessed));
+                out.put("unprocessedCount", unprocessed.length());
+                out.put("subjectId", cp.isNull(cp.getColumnIndexOrThrow("subject_id")) ? (subjectId != null ? subjectId : JSONObject.NULL) : cp.getString(cp.getColumnIndexOrThrow("subject_id")));
+                out.put("modelVersion", cp.isNull(cp.getColumnIndexOrThrow("model_version")) ? JSONObject.NULL : cp.getString(cp.getColumnIndexOrThrow("model_version")));
+                out.put("featureSpaceVersion", cp.isNull(cp.getColumnIndexOrThrow("feature_space_version")) ? JSONObject.NULL : cp.getString(cp.getColumnIndexOrThrow("feature_space_version")));
+                out.put("catalogSnapshotId", cp.isNull(cp.getColumnIndexOrThrow("catalog_snapshot_id")) ? JSONObject.NULL : cp.getString(cp.getColumnIndexOrThrow("catalog_snapshot_id")));
+                out.put("generationId", cp.isNull(cp.getColumnIndexOrThrow("generation_id")) ? JSONObject.NULL : cp.getString(cp.getColumnIndexOrThrow("generation_id")));
+                out.put("referenceTime", cp.isNull(cp.getColumnIndexOrThrow("reference_time")) ? JSONObject.NULL : cp.getLong(cp.getColumnIndexOrThrow("reference_time")));
+                out.put("generatedAt", cp.isNull(cp.getColumnIndexOrThrow("generated_at")) ? JSONObject.NULL : cp.getLong(cp.getColumnIndexOrThrow("generated_at")));
+                out.put("inputDigest", cp.isNull(cp.getColumnIndexOrThrow("input_digest")) ? JSONObject.NULL : cp.getString(cp.getColumnIndexOrThrow("input_digest")));
+                out.put("isFixture", cp.getInt(cp.getColumnIndexOrThrow("is_fixture")) == 1);
+                out.put("fetchedAt", cp.getLong(cp.getColumnIndexOrThrow("fetched_at")));
+
+                String ivStr = cp.getString(cp.getColumnIndexOrThrow("input_versions_json"));
+                out.put("inputVersions", ivStr != null ? new JSONObject(ivStr) : new JSONObject());
+                String covStr = cp.getString(cp.getColumnIndexOrThrow("coverage_json"));
+                out.put("coverage", covStr != null ? new JSONObject(covStr) : JSONObject.NULL);
+                String portStr = cp.getString(cp.getColumnIndexOrThrow("portrait_json"));
+                out.put("portrait", portStr != null ? new JSONObject(portStr) : JSONObject.NULL);
+                String planStr = cp.getString(cp.getColumnIndexOrThrow("search_plan_json"));
+                out.put("searchPlan", planStr != null ? new JSONObject(planStr) : JSONObject.NULL);
+                String fsStr = cp.getString(cp.getColumnIndexOrThrow("feature_space_json"));
+                out.put("featureSpace", fsStr != null ? new JSONObject(fsStr) : JSONObject.NULL);
+                return out;
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+    }
+
+    public synchronized JSONObject saveCloudPortrait(String accountId, JSONObject payload) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long now = System.currentTimeMillis();
+            ensureAccountV3State(db, accountId, now);
+
+            boolean analysisEnabled = true;
+            String subjectId = null;
+            try (Cursor ca = db.rawQuery("SELECT subject_id, analysis_enabled FROM cloud_account_state WHERE account_id = ?", new String[]{accountId})) {
+                if (ca.moveToFirst()) {
+                    subjectId = ca.isNull(0) ? null : ca.getString(0);
+                    analysisEnabled = ca.getInt(1) == 1;
+                }
+            }
+            if (!analysisEnabled && !"analysis_disabled".equals(payload.optString("status"))) {
+                db.setTransactionSuccessful();
+                return readCloudPortrait(accountId);
+            }
+
+            long currentEpoch = 1, currentProcessed = 0;
+            try (Cursor ls = db.rawQuery("SELECT analysis_epoch, processed_through FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+                if (ls.moveToFirst()) {
+                    currentEpoch = ls.getLong(0);
+                    currentProcessed = ls.getLong(1);
+                }
+            }
+            long payloadEpoch = payload.has("analysisEpoch") && !payload.isNull("analysisEpoch") ? payload.optLong("analysisEpoch", currentEpoch) : currentEpoch;
+            if (payloadEpoch != currentEpoch) {
+                db.setTransactionSuccessful();
+                return readCloudPortrait(accountId);
+            }
+
+            long oldProcessed = 0, oldGeneratedAt = 0, oldEpoch = -1;
+            String oldModelVer = null, oldFsVer = null, oldGenId = null, oldStatus = null;
+            String oldPortJson = null, oldPlanJson = null, oldFsJson = null, oldCovJson = null;
+            try (Cursor ex = db.rawQuery("SELECT analysis_epoch, processed_through, generated_at, model_version, feature_space_version, generation_id, status, portrait_json, search_plan_json, feature_space_json, coverage_json FROM cloud_portraits WHERE account_id = ?", new String[]{accountId})) {
+                if (ex.moveToFirst()) {
+                    oldEpoch = ex.getLong(0);
+                    oldProcessed = ex.getLong(1);
+                    oldGeneratedAt = ex.isNull(2) ? 0 : ex.getLong(2);
+                    oldModelVer = ex.isNull(3) ? null : ex.getString(3);
+                    oldFsVer = ex.isNull(4) ? null : ex.getString(4);
+                    oldGenId = ex.isNull(5) ? null : ex.getString(5);
+                    oldStatus = ex.getString(6);
+                    oldPortJson = ex.getString(7);
+                    oldPlanJson = ex.getString(8);
+                    oldFsJson = ex.getString(9);
+                    oldCovJson = ex.getString(10);
+                }
+            }
+
+            long incomingProcessed = payload.has("processedThrough") && !payload.isNull("processedThrough")
+                    ? payload.optLong("processedThrough")
+                    : (oldEpoch == currentEpoch ? oldProcessed : currentProcessed);
+            if (oldEpoch == currentEpoch) {
+                if (incomingProcessed < oldProcessed) {
+                    db.setTransactionSuccessful();
+                    return readCloudPortrait(accountId);
+                }
+                long incGenAt = payload.optLong("generatedAt", 0);
+                if (incGenAt > 0 && oldGeneratedAt > 0 && incGenAt < oldGeneratedAt && incomingProcessed <= oldProcessed) {
+                    db.setTransactionSuccessful();
+                    return readCloudPortrait(accountId);
+                }
+            }
+
+            long nextProcessed = Math.max(currentProcessed, incomingProcessed);
+            if (nextProcessed != currentProcessed) {
+                ContentValues pUpd = new ContentValues();
+                pUpd.put("processed_through", nextProcessed);
+                db.update("local_sync_state", pUpd, "account_id = ?", new String[]{accountId});
+            }
+
+            JSONObject rawPortrait = payload.optJSONObject("portrait");
+            if (rawPortrait == null) rawPortrait = payload.optJSONObject("profile");
+            boolean hasEvidence = false;
+            if (rawPortrait != null) {
+                JSONArray ti = rawPortrait.optJSONArray("topInterests");
+                JSONArray dirs = rawPortrait.optJSONArray("directions");
+                JSONObject langs = rawPortrait.optJSONObject("languages");
+                JSONObject tops = rawPortrait.optJSONObject("topics");
+                hasEvidence = (ti != null && ti.length() > 0) || (dirs != null && dirs.length() > 0)
+                        || (langs != null && langs.length() > 0) || (tops != null && tops.length() > 0);
+            }
+
+            String nextStatus = payload.has("status") && !payload.isNull("status")
+                    ? payload.optString("status")
+                    : (rawPortrait != null ? (hasEvidence ? "ready" : "empty") : "pending");
+            String nextModelVer = payload.has("modelVersion") && !payload.isNull("modelVersion") ? payload.optString("modelVersion") : oldModelVer;
+            String nextFsVer = payload.has("featureSpaceVersion") && !payload.isNull("featureSpaceVersion") ? payload.optString("featureSpaceVersion") : oldFsVer;
+            String nextGenId = payload.has("generationId") && !payload.isNull("generationId") ? payload.optString("generationId") : oldGenId;
+
+            ContentValues cv = new ContentValues();
+            cv.put("account_id", accountId);
+            if (payload.has("subjectId") && !payload.isNull("subjectId")) cv.put("subject_id", payload.optString("subjectId"));
+            else if (subjectId != null) cv.put("subject_id", subjectId);
+            cv.put("analysis_epoch", currentEpoch);
+            cv.put("status", nextStatus);
+            if (nextModelVer != null) cv.put("model_version", nextModelVer);
+            if (nextFsVer != null) cv.put("feature_space_version", nextFsVer);
+            if (payload.has("catalogSnapshotId") && !payload.isNull("catalogSnapshotId")) cv.put("catalog_snapshot_id", payload.optString("catalogSnapshotId"));
+            if (nextGenId != null) cv.put("generation_id", nextGenId);
+            if (payload.has("referenceTime") && !payload.isNull("referenceTime")) cv.put("reference_time", payload.optLong("referenceTime"));
+            if (payload.has("generatedAt") && !payload.isNull("generatedAt")) cv.put("generated_at", payload.optLong("generatedAt"));
+            else if (oldGeneratedAt > 0) cv.put("generated_at", oldGeneratedAt);
+            cv.put("processed_through", nextProcessed);
+            if (payload.has("inputDigest") && !payload.isNull("inputDigest")) cv.put("input_digest", payload.optString("inputDigest"));
+            cv.put("input_versions_json", payload.optJSONObject("inputVersions") != null ? payload.optJSONObject("inputVersions").toString() : "{}");
+            if (payload.optJSONObject("coverage") != null) cv.put("coverage_json", payload.optJSONObject("coverage").toString());
+            else if (oldCovJson != null) cv.put("coverage_json", oldCovJson);
+            if (rawPortrait != null) cv.put("portrait_json", rawPortrait.toString());
+            else if (!"empty".equals(nextStatus) && !"pending".equals(nextStatus) && oldPortJson != null) cv.put("portrait_json", oldPortJson);
+            if (payload.optJSONObject("searchPlan") != null) cv.put("search_plan_json", payload.optJSONObject("searchPlan").toString());
+            else if (oldPlanJson != null) cv.put("search_plan_json", oldPlanJson);
+            if (payload.optJSONObject("featureSpace") != null) cv.put("feature_space_json", payload.optJSONObject("featureSpace").toString());
+            else if (oldFsVer != null && oldFsVer.equals(nextFsVer) && oldFsJson != null) cv.put("feature_space_json", oldFsJson);
+            cv.put("is_fixture", payload.optBoolean("isFixture", false) ? 1 : 0);
+            cv.put("fetched_at", now);
+
+            db.insertWithOnConflict("cloud_portraits", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+
+            JSONObject sp = payload.optJSONObject("searchPlan");
+            JSONArray seedCandidates = sp != null ? sp.optJSONArray("seedCandidates") : payload.optJSONArray("seedCandidates");
+            if (seedCandidates != null && seedCandidates.length() > 0) {
+                ContentValues dcCv = new ContentValues();
+                dcCv.put("account_id", accountId);
+                dcCv.put("query_key", "cloud:seed_candidates");
+                dcCv.put("query_json", "{\"source\":\"cloud_search_plan\"}");
+                dcCv.put("result_json", seedCandidates.toString());
+                dcCv.put("fetched_at", now);
+                dcCv.put("expires_at", now + 7L * 86400000L);
+                db.insertWithOnConflict("discovery_cache", null, dcCv, SQLiteDatabase.CONFLICT_REPLACE);
+                bumpRevision(db, accountId, "discovery_revision");
+            }
+
+            if (oldEpoch != currentEpoch || nextProcessed != oldProcessed || !String.valueOf(nextGenId).equals(String.valueOf(oldGenId)) || !nextStatus.equals(oldStatus)) {
+                bumpRevision(db, accountId, "profile_revision");
+            }
+
+            db.setTransactionSuccessful();
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        } finally {
+            db.endTransaction();
+        }
+        return readCloudPortrait(accountId);
+    }
+
+    public synchronized JSONObject saveCloudSearchPlan(String accountId, JSONObject planPayload) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long now = System.currentTimeMillis();
+            ensureAccountV3State(db, accountId, now);
+            long currentEpoch = 1;
+            try (Cursor ls = db.rawQuery("SELECT analysis_epoch FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+                if (ls.moveToFirst()) currentEpoch = ls.getLong(0);
+            }
+            if (planPayload.has("analysisEpoch") && !planPayload.isNull("analysisEpoch") && planPayload.optLong("analysisEpoch") != currentEpoch) {
+                db.setTransactionSuccessful();
+                return readCloudPortrait(accountId);
+            }
+
+            String existingGen = null;
+            long existingEpoch = -1;
+            try (Cursor cp = db.rawQuery("SELECT analysis_epoch, generation_id FROM cloud_portraits WHERE account_id = ?", new String[]{accountId})) {
+                if (cp.moveToFirst()) {
+                    existingEpoch = cp.getLong(0);
+                    existingGen = cp.isNull(1) ? null : cp.getString(1);
+                }
+            }
+            if (existingEpoch == currentEpoch) {
+                String planGen = planPayload.optString("generationId", "");
+                if (existingGen != null && !planGen.isEmpty() && !existingGen.equals(planGen)) {
+                    db.setTransactionSuccessful();
+                    return readCloudPortrait(accountId);
+                }
+                ContentValues upd = new ContentValues();
+                upd.put("search_plan_json", planPayload.toString());
+                if (planPayload.optJSONObject("featureSpace") != null) {
+                    upd.put("feature_space_json", planPayload.optJSONObject("featureSpace").toString());
+                }
+                upd.put("fetched_at", now);
+                db.update("cloud_portraits", upd, "account_id = ?", new String[]{accountId});
+            } else {
+                JSONObject wrapper = new JSONObject();
+                wrapper.put("analysisEpoch", currentEpoch);
+                wrapper.put("status", "pending");
+                wrapper.put("modelVersion", planPayload.opt("modelVersion"));
+                wrapper.put("featureSpaceVersion", planPayload.opt("featureSpaceVersion"));
+                wrapper.put("generationId", planPayload.opt("generationId"));
+                wrapper.put("searchPlan", planPayload);
+                if (planPayload.optJSONObject("featureSpace") != null) wrapper.put("featureSpace", planPayload.optJSONObject("featureSpace"));
+                saveCloudPortrait(accountId, wrapper);
+            }
+
+            JSONArray seedCandidates = planPayload.optJSONArray("seedCandidates");
+            if (seedCandidates == null) seedCandidates = planPayload.optJSONArray("supplementCandidates");
+            if (seedCandidates != null && seedCandidates.length() > 0) {
+                ContentValues dcCv = new ContentValues();
+                dcCv.put("account_id", accountId);
+                dcCv.put("query_key", "cloud:seed_candidates");
+                dcCv.put("query_json", "{\"source\":\"cloud_search_plan\"}");
+                dcCv.put("result_json", seedCandidates.toString());
+                dcCv.put("fetched_at", now);
+                dcCv.put("expires_at", now + 7L * 86400000L);
+                db.insertWithOnConflict("discovery_cache", null, dcCv, SQLiteDatabase.CONFLICT_REPLACE);
+                bumpRevision(db, accountId, "discovery_revision");
+            }
+            db.setTransactionSuccessful();
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        } finally {
+            db.endTransaction();
+        }
+        return readCloudPortrait(accountId);
+    }
+
+    public synchronized JSONObject saveCloudCohorts(String cacheKey, JSONObject payload) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        try {
+            String key = (cacheKey != null && !cacheKey.isEmpty()) ? cacheKey : "default";
+            long now = System.currentTimeMillis();
+            JSONArray cohorts = payload.optJSONArray("cohorts");
+            if (cohorts == null) cohorts = payload.optJSONArray("items");
+            if (cohorts == null) cohorts = new JSONArray();
+
+            long totalSubjects = 0;
+            for (int i = 0; i < cohorts.length(); i++) {
+                JSONObject c = cohorts.optJSONObject(i);
+                if (c != null) totalSubjects += c.optLong("memberCount", 0);
+            }
+
+            JSONObject normalized = new JSONObject();
+            normalized.put("modelVersion", payload.opt("modelVersion"));
+            normalized.put("generationId", payload.opt("generationId"));
+            normalized.put("catalogSnapshotId", payload.opt("catalogSnapshotId"));
+            normalized.put("sourceKind", payload.optString("sourceKind", "real_production"));
+            normalized.put("referenceTime", payload.opt("referenceTime"));
+            normalized.put("generatedAt", payload.optLong("generatedAt", now));
+            normalized.put("isFixture", payload.optBoolean("isFixture", false));
+            normalized.put("totalSubjects", payload.has("totalSubjects") ? payload.optLong("totalSubjects", totalSubjects) : totalSubjects);
+            normalized.put("cohorts", cohorts);
+
+            ContentValues cv = new ContentValues();
+            cv.put("cache_key", key);
+            if (!payload.isNull("modelVersion")) cv.put("model_version", payload.optString("modelVersion"));
+            if (!payload.isNull("generationId")) cv.put("generation_id", payload.optString("generationId"));
+            cv.put("source_kind", normalized.optString("sourceKind"));
+            if (!payload.isNull("referenceTime")) cv.put("reference_time", payload.optLong("referenceTime"));
+            cv.put("generated_at", normalized.optLong("generatedAt"));
+            cv.put("cohorts_json", normalized.toString());
+            cv.put("fetched_at", now);
+            db.insertWithOnConflict("cloud_cohorts_cache", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+            return readCloudCohorts(key);
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+    }
+
+    public synchronized JSONObject readCloudCohorts(String cacheKey) {
+        SQLiteDatabase db = dbHelper.getReadableDatabase();
+        String key = (cacheKey != null && !cacheKey.isEmpty()) ? cacheKey : "default";
+        try (Cursor c = db.rawQuery("SELECT cohorts_json, fetched_at FROM cloud_cohorts_cache WHERE cache_key = ?", new String[]{key})) {
+            if (c.moveToFirst()) {
+                JSONObject obj = new JSONObject(c.getString(0));
+                obj.put("fetchedAt", c.getLong(1));
+                return obj;
+            }
+            return null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private JSONObject getExtendedSnapshotVersions(SQLiteDatabase db, String accountId) throws Exception {
+        JSONObject base = getAccountRevisions(accountId);
+        try (Cursor actC = db.rawQuery("SELECT 1 FROM accounts WHERE account_id = ?", new String[]{accountId})) {
+            if (!actC.moveToFirst()) return base;
+        }
+        ensureAccountV3State(db, accountId, System.currentTimeMillis());
+        try (Cursor ls = db.rawQuery("SELECT analysis_epoch, processed_through FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
+            if (ls.moveToFirst()) {
+                base.put("analysisEpoch", ls.getLong(0));
+                base.put("processedThrough", ls.getLong(1));
+            }
+        }
+        try (Cursor cp = db.rawQuery("SELECT generation_id, model_version, feature_space_version FROM cloud_portraits WHERE account_id = ?", new String[]{accountId})) {
+            if (cp.moveToFirst()) {
+                base.put("portraitGenerationId", cp.isNull(0) ? JSONObject.NULL : cp.getString(0));
+                base.put("portraitModelVersion", cp.isNull(1) ? JSONObject.NULL : cp.getString(1));
+                base.put("featureSpaceVersion", cp.isNull(2) ? JSONObject.NULL : cp.getString(2));
+            }
+        }
+        return base;
     }
 
     public synchronized JSONObject readCollectionForCloudSync(String accountId, String collectionKind) {
@@ -1584,7 +2064,7 @@ public class LocalRepository {
         db.beginTransaction();
         try {
             long now = System.currentTimeMillis();
-            JSONObject revisions = getAccountRevisions(accountId);
+            JSONObject revisions = getExtendedSnapshotVersions(db, accountId);
             String inputId = "snap_" + now + "_" + UUID.randomUUID().toString().substring(0, 6);
             String safePurpose = (purpose != null && !purpose.isEmpty()) ? purpose : "ranking";
 
@@ -1686,6 +2166,32 @@ public class LocalRepository {
             res.put("historyEnabled", historyEnabled);
             res.put("candidates", candidates);
 
+            JSONObject cloudPortraitState = readCloudPortrait(accountId);
+            JSONArray unprocessedEvents = historyEnabled ? readUnprocessedEvents(accountId) : new JSONArray();
+            Object cloudPortraitObj = JSONObject.NULL;
+            if (cloudPortraitState != null) {
+                String st = cloudPortraitState.optString("status", "");
+                if (("ready".equals(st) || "stale".equals(st)) && !cloudPortraitState.isNull("portrait")) {
+                    JSONObject merged = new JSONObject(cloudPortraitState.optJSONObject("portrait").toString());
+                    merged.put("subjectId", cloudPortraitState.opt("subjectId"));
+                    merged.put("modelVersion", cloudPortraitState.opt("modelVersion"));
+                    merged.put("featureSpaceVersion", cloudPortraitState.opt("featureSpaceVersion"));
+                    merged.put("catalogSnapshotId", cloudPortraitState.opt("catalogSnapshotId"));
+                    merged.put("generationId", cloudPortraitState.opt("generationId"));
+                    merged.put("referenceTime", cloudPortraitState.opt("referenceTime"));
+                    merged.put("generatedAt", cloudPortraitState.opt("generatedAt"));
+                    merged.put("processedThrough", cloudPortraitState.optLong("processedThrough", 0));
+                    merged.put("status", st);
+                    merged.put("isFixture", cloudPortraitState.optBoolean("isFixture", false));
+                    cloudPortraitObj = merged;
+                }
+            }
+            res.put("cloudPortrait", cloudPortraitObj);
+            res.put("cloudPortraitState", cloudPortraitState != null ? cloudPortraitState : JSONObject.NULL);
+            res.put("featureSpace", cloudPortraitState != null && !cloudPortraitState.isNull("featureSpace") ? cloudPortraitState.optJSONObject("featureSpace") : JSONObject.NULL);
+            res.put("unprocessedEvents", unprocessedEvents);
+            res.put("processedThrough", cloudPortraitState != null ? cloudPortraitState.optLong("processedThrough", 0) : 0);
+
             db.setTransactionSuccessful();
         } catch (Exception e) {
             throw new IllegalStateException(e.getMessage(), e);
@@ -1707,7 +2213,7 @@ public class LocalRepository {
                 return res;
             }
 
-            JSONObject currentRevisions = getAccountRevisions(accountId);
+            JSONObject currentRevisions = getExtendedSnapshotVersions(db, accountId);
             JSONObject savedVersions = null;
             boolean snapFound = false;
 
@@ -1750,14 +2256,14 @@ public class LocalRepository {
             Iterator<String> curKeys = currentRevisions.keys();
             while (curKeys.hasNext()) {
                 String k = curKeys.next();
-                int curVal = currentRevisions.getInt(k);
-                if (baselineVersions.has(k) && baselineVersions.getInt(k) != curVal) {
+                String curVal = String.valueOf(currentRevisions.opt(k));
+                if (baselineVersions.has(k) && !String.valueOf(baselineVersions.opt(k)).equals(curVal)) {
                     res.put("ok", false);
                     res.put("error", "INPUT_CHANGED");
                     db.setTransactionSuccessful();
                     return res;
                 }
-                if (inputVersions != null && inputVersions.has(k) && inputVersions.getInt(k) != curVal) {
+                if (inputVersions != null && inputVersions.has(k) && !String.valueOf(inputVersions.opt(k)).equals(curVal)) {
                     res.put("ok", false);
                     res.put("error", "INPUT_CHANGED");
                     db.setTransactionSuccessful();
@@ -1769,7 +2275,7 @@ public class LocalRepository {
             if ("profile".equals(purpose) && profile != null) {
                 ContentValues cv = new ContentValues();
                 cv.put("account_id", accountId);
-                cv.put("model_version", "content-v1");
+                cv.put("model_version", profile.optString("modelVersion", "content-v1"));
                 cv.put("input_versions_json", baselineVersions.toString());
                 cv.put("profile_json", profile.toString());
                 cv.put("generated_at", now);
@@ -1781,7 +2287,7 @@ public class LocalRepository {
                 String batchId = batch.getString("batchId");
                 bCv.put("batch_id", batchId);
                 bCv.put("account_id", accountId);
-                bCv.put("model_version", "content-v1");
+                bCv.put("model_version", batch.optString("modelVersion", "content-v1"));
                 bCv.put("input_versions_json", baselineVersions.toString());
                 bCv.put("created_at", batch.optLong("createdAt", now));
                 bCv.put("expires_at", batch.optLong("expiresAt", now + 86400000L));

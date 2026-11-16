@@ -639,6 +639,144 @@ class CloudService {
     if (state?.cloudBound && state?.accountMatched) state = await this.registerDeviceAndSyncStream(accountId)
     return { reset: true, analysisEpoch: nextAnalysisEpoch, cloudSync: state }
   }
+
+  // ---------------------------------------------------------------------------
+  // 第二轮：云端画像、搜索方向、特征空间与群体结果读取
+  // ---------------------------------------------------------------------------
+
+  async requestText(path, { token = null } = {}) {
+    const baseUrl = await this.getBaseUrl()
+    const headers = { Accept: 'application/json' }
+    if (token) headers.Authorization = `Bearer ${token}`
+    let response
+    try {
+      response = await this.fetchImpl(`${baseUrl}${path}`, { method: 'GET', headers })
+    } catch (err) {
+      throw Object.assign(new Error(`NETWORK_UNAVAILABLE: ${err.message}`), { code: 'NETWORK_UNAVAILABLE' })
+    }
+    const text = await response.text()
+    if (!response.ok) {
+      let json = {}
+      try { json = text ? JSON.parse(text) : {} } catch (_) {}
+      throw Object.assign(new Error(json?.message || `Cloud API HTTP ${response.status}`), {
+        code: json?.code || `HTTP_${response.status}`,
+        status: response.status
+      })
+    }
+    return text
+  }
+
+  /**
+   * 读取已发布特征空间并核对摘要：featureSpaceVersion = SHA-256(原始 JSON 行 [+ "\n"])。
+   * 摘要不一致时拒绝使用，避免客户端投影与服务端坐标不兼容。
+   */
+  async fetchVerifiedFeatureSpace(token, featureSpaceVersion) {
+    if (!featureSpaceVersion || !/^[a-f0-9]{64}$/.test(String(featureSpaceVersion))) return null
+    const raw = await this.requestText(`/api/v2/feature-spaces/${encodeURIComponent(featureSpaceVersion)}`, { token })
+    const trimmed = raw.replace(/\r?\n$/, '')
+    const digestA = crypto.createHash('sha256').update(trimmed + '\n', 'utf8').digest('hex')
+    const digestB = crypto.createHash('sha256').update(trimmed, 'utf8').digest('hex')
+    if (digestA !== featureSpaceVersion && digestB !== featureSpaceVersion) {
+      throw Object.assign(new Error('特征空间摘要与 featureSpaceVersion 不一致'), { code: 'FEATURE_SPACE_DIGEST_MISMATCH' })
+    }
+    const parsed = JSON.parse(trimmed)
+    return { ...parsed, featureSpaceVersion }
+  }
+
+  async readPortrait(context) {
+    if (!context?.accountId) return null
+    return this.database.callDatabase('readCloudPortrait', { accountId: context.accountId })
+  }
+
+  /**
+   * 从 /me/portrait 与 /me/search-plan 拉取同代结果并写入本机缓存。
+   * 接口不可用时保留缓存原状态与真实 fetchedAt，不把旧结果或本地画像标记为新模型结果。
+   */
+  async refreshPortrait(context) {
+    if (!context?.accountId) return { refreshed: false, reason: 'NO_ACTIVE_ACCOUNT' }
+    const accountId = context.accountId
+    const state = await this.database.callDatabase('readCloudSyncState', { accountId })
+    if (!state?.analysisEnabled) {
+      return { refreshed: false, reason: 'ANALYSIS_DISABLED', cloudPortrait: await this.readPortrait(context) }
+    }
+    if (!state?.cloudBound || !state?.accountMatched) {
+      return { refreshed: false, reason: state?.cloudBound ? 'CLOUD_ACCOUNT_MISMATCH' : 'CLOUD_UNBOUND', cloudPortrait: await this.readPortrait(context) }
+    }
+    const token = await this.getValidAccessToken(accountId)
+    if (!token) return { refreshed: false, reason: 'CLOUD_AUTH_REQUIRED', cloudPortrait: await this.readPortrait(context) }
+
+    try {
+      const portrait = await this.requestJson('/api/v2/me/portrait', { token })
+      if (portrait?.analysisEpoch != null && Number(portrait.analysisEpoch) !== Number(state.analysisEpoch)) {
+        // 旧授权范围的结果不进入当前缓存
+        return { refreshed: false, reason: 'STALE_ANALYSIS_EPOCH', cloudPortrait: await this.readPortrait(context) }
+      }
+      const cached = await this.readPortrait(context)
+      let featureSpace = portrait.featureSpace || null
+      if (!featureSpace && portrait.featureSpaceVersion && portrait.featureSpaceVersion !== cached?.featureSpaceVersion) {
+        try {
+          featureSpace = await this.fetchVerifiedFeatureSpace(token, portrait.featureSpaceVersion)
+        } catch (err) {
+          if (err.code === 'FEATURE_SPACE_DIGEST_MISMATCH') throw err
+          featureSpace = null
+        }
+      }
+      let saved = await this.database.callDatabase('saveCloudPortrait', {
+        accountId,
+        portrait: {
+          ...portrait,
+          analysisEpoch: portrait.analysisEpoch ?? state.analysisEpoch,
+          portrait: portrait.profile || portrait.portrait || null,
+          featureSpace
+        }
+      })
+
+      if (portrait.generationId && (portrait.status || 'ready') !== 'pending') {
+        try {
+          const plan = await this.requestJson('/api/v2/me/search-plan', { token })
+          saved = await this.database.callDatabase('saveCloudSearchPlan', { accountId, searchPlan: plan })
+        } catch (planErr) {
+          if (planErr.status !== 404) throw planErr
+        }
+      }
+
+      if (Number(portrait.processedThrough) > Number(state.processedThrough || 0)) {
+        await this.database.callDatabase('applyOutboxAck', {
+          accountId,
+          ackPayload: { streamEpoch: state.streamEpoch, analysisEpoch: state.analysisEpoch, processedThrough: Number(portrait.processedThrough) }
+        })
+        saved = await this.readPortrait(context)
+      }
+      return { refreshed: true, cloudPortrait: saved }
+    } catch (err) {
+      return {
+        refreshed: false,
+        reason: err.status === 404 ? 'PORTRAIT_API_UNAVAILABLE' : (err.code || 'PORTRAIT_FETCH_FAILED'),
+        error: { code: err.code || 'PORTRAIT_FETCH_FAILED', message: err.message },
+        cloudPortrait: await this.readPortrait(context)
+      }
+    }
+  }
+
+  async readCohorts() {
+    return this.database.callDatabase('readCloudCohorts', { cacheKey: 'default' })
+  }
+
+  async refreshCohorts(context) {
+    const accountId = context?.accountId
+    const token = accountId ? await this.getValidAccessToken(accountId) : null
+    try {
+      const res = await this.requestJson('/api/v2/cohorts', { token })
+      const saved = await this.database.callDatabase('saveCloudCohorts', { cacheKey: 'default', cohorts: res })
+      return { refreshed: true, cohorts: saved }
+    } catch (err) {
+      return {
+        refreshed: false,
+        reason: err.status === 404 ? 'COHORTS_API_UNAVAILABLE' : (err.code || 'COHORTS_FETCH_FAILED'),
+        cohorts: await this.readCohorts()
+      }
+    }
+  }
 }
 
 module.exports = {

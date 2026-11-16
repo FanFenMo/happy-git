@@ -32,8 +32,17 @@
         </button>
       </div>
 
-      <!-- 刷新按钮 -->
+      <!-- 刷新与探索下一轮按钮 -->
       <div class="flex items-center gap-2">
+        <button
+          v-if="feedStore.isRecommendedTab && userStore.hasAccount && feedStore.searchSummary?.hasNextPages"
+          @click="feedStore.exploreNextSearchRound()"
+          :disabled="isLoading"
+          class="px-3 py-1.5 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)] hover:border-[var(--color-primary)] text-xs text-[var(--color-primary)] font-medium transition cursor-pointer"
+          title="继续检索下一轮有界搜索结果"
+        >
+          探索下批项目
+        </button>
         <button
           @click="handleRefresh"
           :disabled="isLoading"
@@ -54,13 +63,22 @@
     </header>
 
     <!-- Sub Header Status -->
-    <div class="feed-summary py-3 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex items-center justify-between text-xs text-[var(--color-text-muted)] shrink-0 no-select">
+    <div class="feed-summary py-3 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--color-text-muted)] shrink-0 no-select">
       <div class="flex items-center gap-2">
-        <span class="w-2 h-2 rounded-full" :class="feedStore.isRecommendedTab ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-success)]'"></span>
-        <span>{{ feedStore.isRecommendedTab ? '本地画像与技术标签排序' : '近 3 个月 GitHub 趋势' }}</span>
+        <span
+          class="w-2 h-2 rounded-full shrink-0"
+          :class="
+            !feedStore.isRecommendedTab ? 'bg-[var(--color-success)]' :
+            feedStore.rankingSource === 'cloud_portrait' ? 'bg-[var(--color-primary)]' : 'bg-amber-500'
+          "
+        ></span>
+        <span>{{ feedStatusDescription }}</span>
       </div>
-      <div class="text-[11px] text-[var(--color-text-subtle)] font-mono">
-        {{ currentList.length }} 个公开项目
+      <div class="flex items-center gap-3 text-[11px] text-[var(--color-text-subtle)] font-mono">
+        <span v-if="feedStore.isRecommendedTab && feedStore.searchSummary">
+          有界搜索第 {{ feedStore.searchSummary.round }} 轮 · {{ feedStore.searchSummary.queriesCount }} 查询 / {{ feedStore.searchSummary.pagesUsed }} 页 (局部结果)
+        </span>
+        <span>{{ currentList.length }} 个公开项目</span>
       </div>
     </div>
 
@@ -81,74 +99,101 @@
         :key="itemKey(item)"
         class="project-card border border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-text-subtle)] transition-colors duration-150 group flex flex-col justify-between"
       >
-        <!-- 推荐理由胶囊 (若有) -->
-        <div v-if="item.reasons && item.reasons.length > 0" class="mb-2 flex flex-wrap items-center gap-1.5 no-select">
-          <span
-            v-for="(r, idx) in item.reasons"
-            :key="idx"
-            class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-[var(--color-success)] border border-emerald-500/20 flex items-center gap-1"
-          >
-            <span>💡</span> {{ r }}
-          </span>
-        </div>
-
-        <!-- Card Top Bar: Repo Name & Stars -->
-        <div class="flex items-start justify-between gap-3 mb-2.5">
-          <div class="min-w-0">
-            <h3
-              @click="handleOpenRepo(repoOf(item))"
-              class="text-sm font-bold text-[var(--color-text)] group-hover:text-[var(--color-primary)] cursor-pointer transition flex items-center gap-1.5 truncate selectable"
+        <div>
+          <!-- 推荐理由胶囊 (若有) -->
+          <div v-if="item.reasons && item.reasons.length > 0" class="mb-2 flex flex-wrap items-center gap-1.5 no-select">
+            <span
+              v-for="(r, idx) in item.reasons"
+              :key="idx"
+              class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-[var(--color-success)] border border-emerald-500/20 flex items-center gap-1"
             >
-              <svg class="w-4 h-4 text-[var(--color-text-subtle)] shrink-0 no-select" fill="currentColor" viewBox="0 0 24 24">
-                <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"></path>
-              </svg>
-              <span class="truncate">{{ repoOf(item).fullName || repoOf(item).name }}</span>
-            </h3>
-            <span class="text-[10px] text-[var(--color-text-subtle)] font-mono mt-0.5 block no-select">
-              {{ repoOf(item).updatedAt ? `更新于: ${formatRepoDate(repoOf(item).updatedAt)}` : '' }}
+              <span>💡</span> {{ r }}
             </span>
           </div>
 
-          <div class="flex items-center gap-2 shrink-0 no-select">
-            <span class="px-2 py-0.5 rounded-lg bg-amber-500/10 text-[var(--color-star)] border border-amber-500/20 text-xs font-mono font-bold flex items-center gap-1">
-              ⭐ {{ formatNumber(repoOf(item).starCount) }}
+          <!-- Card Top Bar: Repo Name & Attention Signal (关注度信号) -->
+          <div class="flex items-start justify-between gap-3 mb-2">
+            <div class="min-w-0">
+              <h3
+                @click="handleOpenRepo(repoOf(item))"
+                class="text-sm font-bold text-[var(--color-text)] group-hover:text-[var(--color-primary)] cursor-pointer transition flex items-center gap-1.5 truncate selectable"
+              >
+                <svg class="w-4 h-4 text-[var(--color-text-subtle)] shrink-0 no-select" fill="currentColor" viewBox="0 0 24 24">
+                  <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"></path>
+                </svg>
+                <span class="truncate">{{ repoOf(item).fullName || repoOf(item).name }}</span>
+              </h3>
+              <div class="flex flex-wrap items-center gap-2 text-[10px] text-[var(--color-text-subtle)] font-mono mt-0.5 no-select">
+                <span v-if="repoOf(item).pushedAt || repoOf(item).updatedAt">
+                  最近维护: {{ formatRepoDate(repoOf(item).pushedAt || repoOf(item).updatedAt) }}
+                </span>
+                <span v-if="repoOf(item).licenseSpdx" class="px-1.5 py-0.5 rounded bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-[var(--color-text-muted)]">
+                  {{ repoOf(item).licenseSpdx }}
+                </span>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2 shrink-0 no-select" title="社区关注度信号 (GitHub Star 数，非质量评分)">
+              <span class="px-2 py-0.5 rounded-lg bg-amber-500/10 text-[var(--color-star)] border border-amber-500/20 text-[11px] font-mono font-bold flex items-center gap-1">
+                <span class="text-[10px] font-normal">关注度</span> ⭐ {{ formatNumber(repoOf(item).starCount) }}
+              </span>
+            </div>
+          </div>
+
+          <!-- Rectangular Text Summary Box (项目用途线索与描述) -->
+          <div class="project-description my-2 text-[var(--color-text-muted)] font-sans selectable">
+            <p class="line-clamp-3">
+              {{ repoOf(item).purposeCue || repoOf(item).description || '该开源仓库暂未提供简介，可前往 GitHub 原始页面查阅完整 README。' }}
+            </p>
+            <div v-if="repoOf(item).installCue" class="mt-2 px-2.5 py-1.5 rounded-lg bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-[11px] font-mono text-[var(--color-text)] truncate" title="从 README 实际提取的安装/运行线索">
+              安装线索: {{ repoOf(item).installCue }}
+            </div>
+          </div>
+
+          <!-- Topics & Language Row -->
+          <div class="flex flex-wrap items-center gap-1.5 mb-3 no-select">
+            <span
+              v-if="repoOf(item).primaryLanguage && repoOf(item).primaryLanguage !== '未标注'"
+              class="px-2 py-0.5 rounded-md text-[10px] font-medium bg-[var(--color-surface-raised)] text-[var(--color-text-muted)] flex items-center gap-1 border border-[var(--color-border)]"
+            >
+              <span class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: getLangColor(repoOf(item).primaryLanguage) }"></span>
+              {{ repoOf(item).primaryLanguage }}
+            </span>
+
+            <span
+              v-for="topic in (repoOf(item).topics || []).slice(0, 3)"
+              :key="topic"
+              class="px-2 py-0.5 rounded-md text-[10px] bg-[var(--color-surface-raised)] text-[var(--color-text-subtle)] border border-[var(--color-border)]"
+            >
+              #{{ topic }}
+            </span>
+
+            <span
+              v-if="repoOf(item).purposeSource && repoOf(item).purposeSource !== 'missing'"
+              class="text-[10px] text-[var(--color-text-subtle)] ml-auto"
+            >
+              来源: {{ repoOf(item).purposeSource === 'readme' ? 'README' : repoOf(item).purposeSource === 'description' ? '仓库简介' : '技术标签' }}
             </span>
           </div>
-        </div>
-
-        <!-- Rectangular Text Summary Box -->
-        <div class="project-description my-2.5 text-[var(--color-text-muted)] font-sans selectable">
-          <p class="line-clamp-3">
-            {{ repoOf(item).description || '该开源仓库暂未提供简介，点击下方链接可在 GitHub 查阅详细源码与 README。' }}
-          </p>
-        </div>
-
-        <!-- Topics & Language Row -->
-        <div class="flex flex-wrap items-center gap-1.5 mb-3 no-select">
-          <span
-            v-if="repoOf(item).primaryLanguage && repoOf(item).primaryLanguage !== '未标注'"
-            class="px-2 py-0.5 rounded-md text-[10px] font-medium bg-[var(--color-surface-raised)] text-[var(--color-text-muted)] flex items-center gap-1 border border-[var(--color-border)]"
-          >
-            <span class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: getLangColor(repoOf(item).primaryLanguage) }"></span>
-            {{ repoOf(item).primaryLanguage }}
-          </span>
-
-          <span
-            v-for="topic in (repoOf(item).topics || []).slice(0, 3)"
-            :key="topic"
-            class="px-2 py-0.5 rounded-md text-[10px] bg-[var(--color-surface-raised)] text-[var(--color-text-subtle)] border border-[var(--color-border)]"
-          >
-            #{{ topic }}
-          </span>
         </div>
 
         <!-- Card Action Footer -->
         <div class="flex items-center justify-between pt-2 border-t border-[var(--color-border)] text-xs no-select">
-          <span class="text-[11px] text-[var(--color-text-subtle)]">
-            {{ repoOf(item).forkCount ? `🍴 ${formatNumber(repoOf(item).forkCount)} forks` : '' }}
-          </span>
+          <div class="flex items-center gap-2 text-[11px] text-[var(--color-text-subtle)] min-w-0">
+            <span v-if="repoOf(item).forkCount">🍴 {{ formatNumber(repoOf(item).forkCount) }}</span>
+            <a
+              v-if="repoOf(item).htmlUrl"
+              :href="repoOf(item).htmlUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              @click.prevent="handleOpenRepo(repoOf(item))"
+              class="hover:text-[var(--color-primary)] underline truncate"
+            >
+              GitHub 原页
+            </a>
+          </div>
 
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 shrink-0">
             <!-- 不感兴趣反馈 (仅推荐页展示) -->
             <button
               v-if="feedStore.isRecommendedTab"
@@ -188,14 +233,14 @@
         </div>
       </div>
 
-      <!-- 加载更多推荐 (滚动分页) -->
+      <!-- 加载更多推荐 (固定批次分页，避免边滚边重算造成重复或漏项) -->
       <div v-if="feedStore.isRecommendedTab && feedStore.recHasMore" class="feed-state text-center py-4">
         <button
           @click="feedStore.loadMoreRecommendations"
           :disabled="feedStore.recLoading"
           class="btn-secondary text-xs px-4 py-2 cursor-pointer"
         >
-          {{ feedStore.recLoading ? '正在加载...' : '加载更多推荐' }}
+          {{ feedStore.recLoading ? '正在加载...' : '加载当前批次更多项目' }}
         </button>
       </div>
 
@@ -243,6 +288,24 @@ const isLoading = computed(() => {
 
 const currentList = computed(() => {
   return feedStore.isRecommendedTab ? feedStore.recItems : feedStore.trendingItems
+})
+
+const feedStatusDescription = computed(() => {
+  if (!feedStore.isRecommendedTab) return '近 3 个月 GitHub 热门与活跃公开项目'
+  if (feedStore.rankingSource === 'cloud_portrait') {
+    const model = feedStore.modelVersion || '已发布模型'
+    const inc = feedStore.unprocessedEventCount > 0 ? ` + ${feedStore.unprocessedEventCount} 条未处理近期增量` : ''
+    const staleHint = feedStore.portraitStatus === 'stale' ? ' (旧代结果)' : ''
+    return `云端画像 (${model}${staleHint})${inc}`
+  }
+  if (userStore.preferences?.analysisEnabled === false) {
+    return '已关闭云端分析 · 仅基于本机标签与公开历史基线排序'
+  }
+  if (feedStore.portraitStatus === 'pending') {
+    const inc = feedStore.unprocessedEventCount > 0 ? ` · ${feedStore.unprocessedEventCount} 条待处理近期事件` : ''
+    return `云端画像计算中 · 当前使用本机基线与近期线索${inc}`
+  }
+  return '本机基线画像排序 (待同步服务端已发布画像)'
 })
 
 function itemKey(item) {
@@ -335,7 +398,7 @@ async function toggleStar(repo) {
 async function handleHide(repo) {
   const key = repo.repoId || repo.canonicalKey
   await feedStore.hideRecommendation(key)
-  showToast('已隐藏该项目，画像将调整')
+  showToast('已隐藏该项目，推荐排序已更新')
 }
 
 onMounted(() => {

@@ -298,30 +298,91 @@ public class HappyGitPlugin extends Plugin {
                             queryPlan = planObj.optJSONArray("queryPlan");
                         }
                     }
+                    int maxQueries = 4;
+                    int maxTotalPages = 8;
+                    int pagesUsed = 0;
+                    java.util.Set<String> seen = new java.util.HashSet<>();
                     JSONArray candidates = new JSONArray();
+                    JSONArray queryReports = new JSONArray();
+
                     if (queryPlan != null) {
-                        for (int i = 0; i < Math.min(queryPlan.length(), 4); i++) {
+                        for (int i = 0; i < Math.min(queryPlan.length(), maxQueries); i++) {
                             JSONObject q = queryPlan.getJSONObject(i);
                             String queryStr = q.optString("query", "stars:>100");
-                            String sort = q.optString("sort", "stars");
-                            String url = "https://github.com/search?q=" + URLEncoder.encode(queryStr, "UTF-8") + "&type=repositories&s=" + URLEncoder.encode(sort, "UTF-8");
+                            String sort = "updated".equals(q.optString("sort", "stars")) ? "updated" : "stars";
+                            int startPage = Math.max(1, q.optInt("startPage", 1));
+                            int maxPages = Math.max(1, Math.min(2, q.optInt("maxPages", 1)));
 
-                            try {
-                                JSONObject sRes = scheduler.withPageLease(contextId, "discovery", () -> {
-                                    pageExecutor.navigate(url, 25000);
-                                    return pageExecutor.executeScript("readSearchResults", null);
-                                });
-                                JSONArray found = sRes.optJSONArray("items");
-                                if (found != null) {
-                                    for (int j = 0; j < found.length(); j++) candidates.put(found.getJSONObject(j));
-                                    localRepository.saveDiscoveryCache(accountId, "search:" + queryStr + ":" + sort, q.toString(), found.toString(), System.currentTimeMillis(), System.currentTimeMillis() + 86400000L);
+                            JSONObject report = new JSONObject();
+                            report.put("id", q.optString("id", ""));
+                            report.put("query", queryStr);
+                            report.put("sort", sort);
+                            report.put("startPage", startPage);
+                            int pagesFetched = 0;
+                            int itemCount = 0;
+                            Integer nextPageNum = null;
+                            boolean exhausted = false;
+
+                            for (int page = startPage; page < startPage + maxPages && pagesUsed < maxTotalPages; page++) {
+                                final String url = "https://github.com/search?q=" + URLEncoder.encode(queryStr, "UTF-8")
+                                        + "&type=repositories&s=" + URLEncoder.encode(sort, "UTF-8") + "&o=desc"
+                                        + (page > 1 ? "&p=" + page : "");
+                                try {
+                                    JSONObject sRes = scheduler.withPageLease(contextId, "discovery", () -> {
+                                        pageExecutor.navigate(url, 25000);
+                                        return pageExecutor.executeScript("readSearchResults", null);
+                                    });
+                                    pagesUsed++;
+                                    pagesFetched++;
+                                    JSONArray found = sRes.optJSONArray("items");
+                                    String nextUrl = sRes.optString("nextUrl", "");
+                                    if (found != null) {
+                                        for (int j = 0; j < found.length(); j++) {
+                                            JSONObject item = found.getJSONObject(j);
+                                            String key = item.optString("repoId", item.optString("canonicalKey", ""));
+                                            if (!key.isEmpty() && seen.add(key)) {
+                                                candidates.put(item);
+                                                itemCount++;
+                                            }
+                                        }
+                                        localRepository.saveDiscoveryCache(
+                                                accountId,
+                                                "search:" + queryStr + ":" + sort + ":p" + page,
+                                                q.toString(),
+                                                found.toString(),
+                                                System.currentTimeMillis(),
+                                                System.currentTimeMillis() + 86400000L
+                                        );
+                                    }
+                                    if (!nextUrl.isEmpty() && !"null".equals(nextUrl)) {
+                                        nextPageNum = page + 1;
+                                    } else {
+                                        nextPageNum = null;
+                                        exhausted = true;
+                                        break;
+                                    }
+                                } catch (Exception err) {
+                                    report.put("error", err.getMessage());
+                                    if (err.getMessage() != null && err.getMessage().contains("RATE_LIMITED")) {
+                                        pagesUsed = maxTotalPages;
+                                    }
+                                    break;
                                 }
-                            } catch (Exception ignored) {}
+                            }
+                            report.put("pagesFetched", pagesFetched);
+                            report.put("itemCount", itemCount);
+                            report.put("nextPage", nextPageNum != null ? nextPageNum : JSONObject.NULL);
+                            report.put("exhausted", exhausted);
+                            queryReports.put(report);
                         }
                     }
                     JSObject res = new JSObject();
                     res.put("candidates", new JSArray(candidates.toString()));
                     res.put("count", candidates.length());
+                    res.put("pagesUsed", pagesUsed);
+                    res.put("bounded", true);
+                    res.put("complete", false);
+                    res.put("queries", new JSArray(queryReports.toString()));
                     resolveSuccess(call, res);
                 } else {
                     JSObject res = new JSObject();
@@ -466,6 +527,42 @@ public class HappyGitPlugin extends Plugin {
                 break;
             }
 
+            case "cloud.portrait.read": {
+                JSONObject res = cloudService.readPortrait(accountId);
+                resolveSuccess(call, res != null ? new JSObject(res.toString()) : new JSObject());
+                break;
+            }
+
+            case "cloud.portrait.refresh": {
+                JSONObject res = cloudService.refreshPortrait(accountId);
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
+            case "cloud.searchPlan.read": {
+                JSONObject portrait = cloudService.readPortrait(accountId);
+                JSObject res = new JSObject();
+                res.put("status", portrait != null ? portrait.optString("status", "unbound") : "unbound");
+                res.put("generationId", portrait != null ? portrait.opt("generationId") : JSONObject.NULL);
+                res.put("modelVersion", portrait != null ? portrait.opt("modelVersion") : JSONObject.NULL);
+                res.put("searchPlan", portrait != null ? portrait.opt("searchPlan") : JSONObject.NULL);
+                resolveSuccess(call, res);
+                break;
+            }
+
+            case "cloud.cohorts.read": {
+                JSONObject res = cloudService.readCohorts();
+                if (res != null) resolveSuccess(call, new JSObject(res.toString()));
+                else resolveSuccess(call, new JSObject());
+                break;
+            }
+
+            case "cloud.cohorts.refresh": {
+                JSONObject res = cloudService.refreshCohorts(accountId);
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
             default:
                 resolveFailure(call, "UNKNOWN_OPERATION", "未知的原生操作: " + operation);
                 break;
@@ -497,6 +594,9 @@ public class HappyGitPlugin extends Plugin {
             case "cloud.preferences.save":
             case "cloud.analysis.reset":
             case "cloud.collections.sync":
+            case "cloud.portrait.read":
+            case "cloud.portrait.refresh":
+            case "cloud.searchPlan.read":
                 return true;
             default:
                 return false;

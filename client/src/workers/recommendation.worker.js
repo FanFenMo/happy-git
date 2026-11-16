@@ -1,7 +1,7 @@
 /**
  * client/src/workers/recommendation.worker.js
- * 纯前端 Web Worker: 本地画像计算与 MMR 排序
- * (依据 project.md 第二节、第九节与共享推荐协议)
+ * 纯前端 Web Worker: 本地基线画像计算、云端画像投影与本机未处理事件增量 MMR 排序
+ * (依据 project.md 第二节、第九节与第二轮本地排序接续规范)
  */
 
 import { COMPUTE_PURPOSE, createComputeResult } from '../../shared/recommendation/protocol.js'
@@ -69,6 +69,10 @@ self.onmessage = async (e) => {
       const {
         accountId,
         profile,
+        cloudPortrait = null,
+        featureSpace = null,
+        unprocessedEvents = [],
+        processedThrough = 0,
         starred = [],
         candidates = [],
         history = [],
@@ -79,44 +83,8 @@ self.onmessage = async (e) => {
         batchId
       } = payload
 
-      // 构建同构词表：合并用户证据仓库与当前候选池
-      const historyRepos = history.map(h => h?.repository || h).filter(Boolean)
-      const evidenceFromProfile = Array.isArray(profile?.evidenceRepos) ? profile.evidenceRepos : []
-      const allSampleRepos = [
-        ...starred,
-        ...owned,
-        ...historyRepos,
-        ...evidenceFromProfile,
-        ...candidates
-      ]
-      const vocabulary = buildVocabulary(allSampleRepos)
-
-      let effectiveProfile = profile
-      if (starred.length > 0 || owned.length > 0 || history.length > 0 || manualTags.length > 0) {
-        effectiveProfile = buildInterestProfile({
-          accountId,
-          starred: starred.map(r => extractRepositoryFeatures(r, vocabulary)),
-          owned: owned.map(r => extractRepositoryFeatures(r, vocabulary)),
-          history: history.map(h => ({
-            ...h,
-            repository: extractRepositoryFeatures(h?.repository || h, vocabulary)
-          })),
-          manualTags: manualTags.length > 0 ? manualTags : (profile?.manualTags || []),
-          hiddenRepoIds,
-          historyEnabled,
-          now,
-          inputVersions,
-          vocabulary
-        })
-      } else if (effectiveProfile) {
-        effectiveProfile = {
-          ...effectiveProfile,
-          vocabulary,
-          vocabularyVersion: vocabulary.version
-        }
-      }
-
-      const enrichedCandidates = candidates.map(c => extractRepositoryFeatures(c, vocabulary))
+      const effectiveCloudPortrait = cloudPortrait || (profile?.generationId ? profile : null)
+      const effectiveFeatureSpace = featureSpace || effectiveCloudPortrait?.featureSpace || null
 
       const historyMap = new Map()
       for (const h of history) {
@@ -135,6 +103,49 @@ self.onmessage = async (e) => {
         if (key) ownedSet.add(key)
       }
 
+      let effectiveProfile = effectiveCloudPortrait || profile
+      let enrichedCandidates = candidates
+
+      // 仅当不存在云端画像/特征空间时，才使用本地词表拟合基线画像；
+      // 云端画像模式下严禁自行重拟合与服务端不兼容的词表。
+      if (!effectiveCloudPortrait && !effectiveFeatureSpace) {
+        const historyRepos = history.map(h => h?.repository || h).filter(Boolean)
+        const evidenceFromProfile = Array.isArray(profile?.evidenceRepos) ? profile.evidenceRepos : []
+        const allSampleRepos = [
+          ...starred,
+          ...owned,
+          ...historyRepos,
+          ...evidenceFromProfile,
+          ...candidates
+        ]
+        const vocabulary = buildVocabulary(allSampleRepos)
+
+        if (starred.length > 0 || owned.length > 0 || history.length > 0 || manualTags.length > 0) {
+          effectiveProfile = buildInterestProfile({
+            accountId,
+            starred: starred.map(r => extractRepositoryFeatures(r, vocabulary)),
+            owned: owned.map(r => extractRepositoryFeatures(r, vocabulary)),
+            history: history.map(h => ({
+              ...h,
+              repository: extractRepositoryFeatures(h?.repository || h, vocabulary)
+            })),
+            manualTags: manualTags.length > 0 ? manualTags : (profile?.manualTags || []),
+            hiddenRepoIds,
+            historyEnabled,
+            now,
+            inputVersions,
+            vocabulary
+          })
+        } else if (effectiveProfile) {
+          effectiveProfile = {
+            ...effectiveProfile,
+            vocabulary,
+            vocabularyVersion: vocabulary.version
+          }
+        }
+        enrichedCandidates = candidates.map(c => extractRepositoryFeatures(c, vocabulary))
+      }
+
       const batch = createRecommendationBatch({
         batchId: batchId || `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         accountId,
@@ -145,7 +156,10 @@ self.onmessage = async (e) => {
         seed,
         historyMap,
         hiddenSet,
-        ownedSet
+        ownedSet,
+        featureSpace: effectiveFeatureSpace,
+        unprocessedEvents,
+        processedThrough: Number(processedThrough ?? effectiveCloudPortrait?.processedThrough ?? 0)
       })
 
       const result = createComputeResult({

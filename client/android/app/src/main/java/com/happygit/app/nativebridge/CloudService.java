@@ -440,4 +440,160 @@ public class CloudService {
         out.put("cloudSync", localRepository.readCloudSyncState(accountId));
         return out;
     }
+
+    private String requestText(String path, String bearerToken) throws Exception {
+        URL url = new URL(getBaseUrl() + path);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(25000);
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("Accept", "application/json");
+        if (bearerToken != null && !bearerToken.isEmpty()) {
+            conn.setRequestProperty("Authorization", "Bearer " + bearerToken);
+        }
+        int status = conn.getResponseCode();
+        InputStream is = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
+        StringBuilder sb = new StringBuilder();
+        if (is != null) {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (sb.length() > 0) sb.append('\n');
+                    sb.append(line);
+                }
+            }
+        }
+        if (status < 200 || status >= 300) {
+            throw new IllegalStateException("HTTP_" + status);
+        }
+        return sb.toString();
+    }
+
+    public JSONObject fetchVerifiedFeatureSpace(String bearerToken, String featureSpaceVersion) throws Exception {
+        if (featureSpaceVersion == null || !featureSpaceVersion.matches("[a-f0-9]{64}")) {
+            return null;
+        }
+        String raw = requestText("/api/v2/feature-spaces/" + featureSpaceVersion, bearerToken);
+        String trimmed = raw.replaceAll("\\r?\\n$", "");
+        String digestA = LocalRepository.sha256Hex(trimmed + "\n");
+        String digestB = LocalRepository.sha256Hex(trimmed);
+        if (!featureSpaceVersion.equals(digestA) && !featureSpaceVersion.equals(digestB)) {
+            throw new IllegalStateException("FEATURE_SPACE_DIGEST_MISMATCH");
+        }
+        JSONObject parsed = new JSONObject(trimmed);
+        parsed.put("featureSpaceVersion", featureSpaceVersion);
+        return parsed;
+    }
+
+    public JSONObject readPortrait(String accountId) {
+        if (accountId == null || accountId.isEmpty()) return null;
+        return localRepository.readCloudPortrait(accountId);
+    }
+
+    public JSONObject refreshPortrait(String accountId) throws Exception {
+        JSONObject out = new JSONObject();
+        if (accountId == null || accountId.isEmpty()) {
+            out.put("refreshed", false);
+            out.put("reason", "NO_ACTIVE_ACCOUNT");
+            return out;
+        }
+        JSONObject state = localRepository.readCloudSyncState(accountId);
+        if (state == null || !state.optBoolean("analysisEnabled", true)) {
+            out.put("refreshed", false);
+            out.put("reason", "ANALYSIS_DISABLED");
+            out.put("cloudPortrait", readPortrait(accountId));
+            return out;
+        }
+        if (!state.optBoolean("cloudBound", false) || !state.optBoolean("accountMatched", false)) {
+            out.put("refreshed", false);
+            out.put("reason", state.optBoolean("cloudBound", false) ? "CLOUD_ACCOUNT_MISMATCH" : "CLOUD_UNBOUND");
+            out.put("cloudPortrait", readPortrait(accountId));
+            return out;
+        }
+        String token = getValidAccessToken(accountId);
+        if (token == null) {
+            out.put("refreshed", false);
+            out.put("reason", "CLOUD_AUTH_REQUIRED");
+            out.put("cloudPortrait", readPortrait(accountId));
+            return out;
+        }
+        try {
+            JSONObject portrait = requestJson("/api/v2/me/portrait", "GET", token, null);
+            if (portrait.has("analysisEpoch") && !portrait.isNull("analysisEpoch")
+                    && portrait.optLong("analysisEpoch") != state.optLong("analysisEpoch", 1)) {
+                out.put("refreshed", false);
+                out.put("reason", "STALE_ANALYSIS_EPOCH");
+                out.put("cloudPortrait", readPortrait(accountId));
+                return out;
+            }
+            JSONObject cached = readPortrait(accountId);
+            String cachedFsVer = cached != null ? cached.optString("featureSpaceVersion", "") : "";
+            String fsVer = portrait.optString("featureSpaceVersion", "");
+            JSONObject featureSpace = portrait.optJSONObject("featureSpace");
+            if (featureSpace == null && !fsVer.isEmpty() && !fsVer.equals(cachedFsVer)) {
+                try {
+                    featureSpace = fetchVerifiedFeatureSpace(token, fsVer);
+                } catch (Exception fsErr) {
+                    if ("FEATURE_SPACE_DIGEST_MISMATCH".equals(fsErr.getMessage())) throw fsErr;
+                }
+            }
+            JSONObject savePayload = new JSONObject(portrait.toString());
+            if (!savePayload.has("analysisEpoch") || savePayload.isNull("analysisEpoch")) {
+                savePayload.put("analysisEpoch", state.optLong("analysisEpoch", 1));
+            }
+            if (featureSpace != null) savePayload.put("featureSpace", featureSpace);
+            JSONObject saved = localRepository.saveCloudPortrait(accountId, savePayload);
+
+            String genId = portrait.optString("generationId", "");
+            if (!genId.isEmpty() && !"pending".equals(portrait.optString("status", "ready"))) {
+                try {
+                    JSONObject plan = requestJson("/api/v2/me/search-plan", "GET", token, null);
+                    saved = localRepository.saveCloudSearchPlan(accountId, plan);
+                } catch (Exception planErr) {
+                    if (planErr.getMessage() == null || !planErr.getMessage().contains("HTTP_404")) {
+                        throw planErr;
+                    }
+                }
+            }
+            long pt = portrait.optLong("processedThrough", 0);
+            if (pt > state.optLong("processedThrough", 0)) {
+                JSONObject ack = new JSONObject();
+                ack.put("streamEpoch", state.optString("streamEpoch", "1"));
+                ack.put("analysisEpoch", state.optLong("analysisEpoch", 1));
+                ack.put("processedThrough", pt);
+                localRepository.applyOutboxAck(accountId, ack);
+                saved = readPortrait(accountId);
+            }
+            out.put("refreshed", true);
+            out.put("cloudPortrait", saved);
+            return out;
+        } catch (Exception e) {
+            out.put("refreshed", false);
+            out.put("reason", e.getMessage() != null ? e.getMessage() : "PORTRAIT_FETCH_FAILED");
+            out.put("cloudPortrait", readPortrait(accountId));
+            return out;
+        }
+    }
+
+    public JSONObject readCohorts() {
+        return localRepository.readCloudCohorts("default");
+    }
+
+    public JSONObject refreshCohorts(String accountId) {
+        JSONObject out = new JSONObject();
+        String token = (accountId != null && !accountId.isEmpty()) ? getValidAccessToken(accountId) : null;
+        try {
+            JSONObject res = requestJson("/api/v2/cohorts", "GET", token, null);
+            JSONObject saved = localRepository.saveCloudCohorts("default", res);
+            out.put("refreshed", true);
+            out.put("cohorts", saved);
+            return out;
+        } catch (Exception e) {
+            out.put("refreshed", false);
+            out.put("reason", e.getMessage() != null ? e.getMessage() : "COHORTS_FETCH_FAILED");
+            JSONObject cached = readCohorts();
+            out.put("cohorts", cached != null ? cached : JSONObject.NULL);
+            return out;
+        }
+    }
 }

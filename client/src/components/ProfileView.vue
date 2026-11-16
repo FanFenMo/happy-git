@@ -112,32 +112,80 @@
         {{ profile?.bio || (userStore.hasAccount ? '暂未填写个人简介' : '游客模式仅提供公开热门开源项目浏览，未开启个人浏览历史与同步。') }}
       </p>
 
-      <!-- Technical Interest Tags (技术兴趣) -->
-      <div class="relative z-10 mb-4">
-        <div class="flex items-center justify-between text-[11px] text-[var(--color-text-muted)] font-semibold mb-2">
-          <span>技术兴趣 (根据公开仓库与 Star 归纳)</span>
-          <button
-            v-if="userStore.hasAccount"
-            @click="$emit('edit-profile')"
-            class="text-[var(--color-primary)] hover:underline cursor-pointer"
-          >
-            兴趣设置
-          </button>
+      <!-- Technical Interest Tags (本机手选标签与云端画像摘要) -->
+      <div class="relative z-10 mb-4 space-y-3">
+        <div>
+          <div class="flex items-center justify-between text-[11px] text-[var(--color-text-muted)] font-semibold mb-2">
+            <span>本机兴趣标签 (手动设置)</span>
+            <button
+              v-if="userStore.hasAccount"
+              @click="$emit('edit-profile')"
+              class="text-[var(--color-primary)] hover:underline cursor-pointer"
+            >
+              兴趣设置
+            </button>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <span
+              v-for="tag in interestTags"
+              :key="tag"
+              class="px-2.5 py-1 rounded-lg text-xs card-raised border border-[var(--color-border)] text-[var(--color-text)] transition"
+            >
+              # {{ tag }}
+            </span>
+            <span
+              v-if="interestTags.length === 0"
+              class="text-[11px] text-[var(--color-text-subtle)] italic py-1"
+            >
+              {{ userStore.hasAccount ? '暂未添加手动标签，可点击“兴趣设置”补充' : '登录后可自定义兴趣标签' }}
+            </span>
+          </div>
         </div>
-        <div class="flex flex-wrap gap-1.5">
-          <span
-            v-for="tag in interestTags"
-            :key="tag"
-            class="px-2.5 py-1 rounded-lg text-xs card-raised border border-[var(--color-border)] text-[var(--color-text)] transition"
-          >
-            # {{ tag }}
-          </span>
-          <span
-            v-if="interestTags.length === 0"
-            class="text-[11px] text-[var(--color-text-subtle)] italic py-1"
-          >
-            {{ userStore.hasAccount ? '暂未归纳出技术兴趣，可点击“兴趣设置”手动添加' : '登录后将基于公开仓库与 Star 自动提取' }}
-          </span>
+
+        <!-- 云端技术画像摘要卡 -->
+        <div v-if="userStore.hasAccount" class="p-3.5 rounded-2xl card-raised border border-[var(--color-border)] space-y-2">
+          <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div class="flex items-center gap-2">
+              <span class="font-semibold text-[var(--color-text)]">云端技术兴趣画像</span>
+              <span
+                class="px-2 py-0.5 rounded-full text-[10px] font-medium border"
+                :class="portraitBadgeClass"
+              >
+                {{ portraitStatusLabel }}
+              </span>
+            </div>
+            <button
+              @click="refreshPortrait"
+              :disabled="userStore.cloudPortraitLoading"
+              class="text-[11px] text-[var(--color-primary)] hover:underline cursor-pointer"
+            >
+              {{ userStore.cloudPortraitLoading ? '刷新中...' : '刷新云端画像' }}
+            </button>
+          </div>
+
+          <div class="text-[11px] text-[var(--color-text-muted)] leading-relaxed">
+            {{ portraitSummaryText }}
+          </div>
+
+          <div v-if="cloudDirections.length > 0" class="flex flex-wrap gap-1.5 pt-1">
+            <span
+              v-for="dir in cloudDirections.slice(0, 4)"
+              :key="dir.directionId || dir.label"
+              class="px-2 py-0.5 rounded-lg text-[11px] bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+            >
+              {{ dir.label || dir.directionId }}
+              <span v-if="dir.weight !== undefined" class="font-mono text-[var(--color-primary)] ml-1">{{ Math.round(dir.weight * 100) }}%</span>
+            </span>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-[var(--color-text-subtle)] font-mono pt-1">
+            <span>模型: {{ cloudPortrait?.modelVersion || '待生成' }}</span>
+            <span v-if="cloudPortrait?.generatedAt">更新: {{ formatHistoryTime(cloudPortrait.generatedAt) }}</span>
+            <span>处理进度: {{ cloudPortrait?.processedThrough ?? userStore.cloudSync.processedThrough ?? 0 }} / {{ userStore.cloudSync.acceptedThrough ?? 0 }}</span>
+            <span v-if="(cloudPortrait?.unprocessedCount || 0) > 0">
+              本机待合并: {{ cloudPortrait.unprocessedCount }} 次浏览
+            </span>
+          </div>
         </div>
       </div>
 
@@ -438,6 +486,178 @@
           </button>
         </div>
       </div>
+
+      <!-- 4. 个人学习画像明细与证据引用 -->
+      <div v-if="activeTab === 'portrait'" class="space-y-4">
+        <div v-if="userStore.hasAccount">
+          <div class="flex items-center justify-between mb-3">
+            <div class="text-xs text-[var(--color-text-muted)]">
+              状态：<strong class="text-[var(--color-text)]">{{ portraitStatusLabel }}</strong>
+              <span v-if="cloudPortrait?.generationId" class="ml-2 font-mono text-[10px]">Generation: {{ cloudPortrait.generationId }}</span>
+            </div>
+            <button
+              @click="refreshPortrait"
+              :disabled="userStore.cloudPortraitLoading"
+              class="px-3 py-1.5 rounded-xl btn-secondary text-xs !min-h-0 cursor-pointer"
+            >
+              {{ userStore.cloudPortraitLoading ? '正在同步...' : '同步最新画像' }}
+            </button>
+          </div>
+
+          <div v-if="portraitDetail" class="space-y-4">
+            <!-- 学习到的方向权重 -->
+            <div class="p-4 rounded-2xl card-surface space-y-3">
+              <div class="text-xs font-bold text-[var(--color-text)]">学习到的技术兴趣方向</div>
+              <div v-if="cloudDirections.length > 0" class="space-y-2.5">
+                <div v-for="dir in cloudDirections" :key="dir.directionId || dir.label" class="space-y-1">
+                  <div class="flex items-center justify-between text-xs">
+                    <span class="font-medium text-[var(--color-text)]">{{ dir.label || dir.directionId }}</span>
+                    <span class="font-mono text-[var(--color-primary)]">{{ Math.round((dir.weight || 0) * 100) }}%</span>
+                  </div>
+                  <div class="w-full h-1.5 rounded-full bg-[var(--color-surface-raised)] overflow-hidden">
+                    <div class="h-full bg-[var(--color-primary)] rounded-full" :style="{ width: `${Math.min(100, Math.round((dir.weight || 0) * 100))}%` }"></div>
+                  </div>
+                  <div v-if="dir.topics && dir.topics.length > 0" class="flex flex-wrap gap-1 pt-0.5">
+                    <span v-for="t in dir.topics.slice(0, 5)" :key="t" class="px-1.5 py-0.5 rounded text-[10px] bg-[var(--color-surface-raised)] text-[var(--color-text-subtle)]">#{{ t }}</span>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="text-xs text-[var(--color-text-subtle)]">
+                暂无学习型方向分布，当前仅展示个人基础语言与主题统计。
+              </div>
+            </div>
+
+            <!-- 语言与主题权重 -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="p-4 rounded-2xl card-surface space-y-2">
+                <div class="text-xs font-bold text-[var(--color-text)]">主要编程生态分布</div>
+                <div v-for="[lang, w] in topLanguages" :key="lang" class="flex items-center justify-between text-xs">
+                  <span class="text-[var(--color-text-muted)]">{{ lang }}</span>
+                  <span class="font-mono text-[var(--color-text)]">{{ Math.round(w * 100) }}%</span>
+                </div>
+                <div v-if="topLanguages.length === 0" class="text-[11px] text-[var(--color-text-subtle)]">暂无语言分布</div>
+              </div>
+
+              <div class="p-4 rounded-2xl card-surface space-y-2">
+                <div class="text-xs font-bold text-[var(--color-text)]">Top 兴趣标签</div>
+                <div v-for="ti in (portraitDetail.topInterests || []).slice(0, 8)" :key="ti.tag" class="flex items-center justify-between text-xs">
+                  <span class="text-[var(--color-text-muted)]">#{{ ti.tag }}</span>
+                  <span class="font-mono text-[var(--color-text)]">{{ Math.round((ti.score || 0) * 100) }}%</span>
+                </div>
+                <div v-if="!(portraitDetail.topInterests || []).length" class="text-[11px] text-[var(--color-text-subtle)]">暂无主题分布</div>
+              </div>
+            </div>
+
+            <!-- 可追溯证据项目 (严格源自个人可用输入) -->
+            <div class="p-4 rounded-2xl card-surface space-y-2.5">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold text-[var(--color-text)]">个人证据引用项目</span>
+                <span class="text-[10px] text-[var(--color-text-subtle)]">均来自本人公开项目、Star 或有效浏览</span>
+              </div>
+              <div v-if="portraitEvidenceRepos.length > 0" class="space-y-2">
+                <div
+                  v-for="ev in portraitEvidenceRepos"
+                  :key="ev.repoId || ev.fullName"
+                  class="p-2.5 rounded-xl bg-[var(--color-surface-raised)] border border-[var(--color-border)] flex items-center justify-between gap-2 text-xs"
+                >
+                  <div class="min-w-0">
+                    <span
+                      @click="ev.htmlUrl && openRepo(ev, 'portrait_evidence')"
+                      class="font-medium text-[var(--color-text)] hover:text-[var(--color-primary)] cursor-pointer truncate block"
+                    >
+                      {{ ev.fullName || `项目 ID: ${ev.repoId}` }}
+                    </span>
+                    <span v-if="ev.sources && ev.sources.length > 0" class="text-[10px] text-[var(--color-text-subtle)]">
+                      依据来源: {{ ev.sources.join(' / ') }}
+                    </span>
+                  </div>
+                  <span v-if="ev.primaryLanguage" class="text-[10px] text-[var(--color-text-muted)] shrink-0">{{ ev.primaryLanguage }}</span>
+                </div>
+              </div>
+              <div v-else class="text-xs text-[var(--color-text-subtle)]">
+                暂无引用项目明细。
+              </div>
+            </div>
+          </div>
+
+          <div v-else class="py-12 text-center space-y-2 card-surface p-6">
+            <div class="text-sm font-bold text-[var(--color-text)]">{{ portraitStatusLabel }}</div>
+            <p class="text-xs text-[var(--color-text-muted)] max-w-md mx-auto leading-relaxed">
+              {{ portraitSummaryText }}
+            </p>
+          </div>
+        </div>
+        <div v-else class="py-16 text-center text-xs text-[var(--color-text-subtle)]">
+          连接 GitHub 并开启云端分析后，可在此查看离线训练与个人画像进展。
+        </div>
+      </div>
+
+      <!-- 5. 群体聚合技术分布 (绝不用个人标签冒充群体分析) -->
+      <div v-if="activeTab === 'cohorts'" class="space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2 pb-1">
+          <div class="text-xs text-[var(--color-text-muted)]">
+            <span v-if="userStore.cloudCohorts">
+              模型 {{ userStore.cloudCohorts.modelVersion || '未标注' }} · 来源: {{ formatCohortSource(userStore.cloudCohorts.sourceKind) }}
+              <span v-if="userStore.cloudCohorts.generatedAt"> · 生成于 {{ formatHistoryTime(userStore.cloudCohorts.generatedAt) }}</span>
+            </span>
+            <span v-else>展示群体聚合技术分布与样本量（仅聚合统计，不含未授权个人标签）</span>
+          </div>
+          <button
+            @click="refreshCohorts"
+            :disabled="userStore.cloudCohortsLoading"
+            class="px-3 py-1.5 rounded-xl btn-secondary text-xs !min-h-0 cursor-pointer"
+          >
+            {{ userStore.cloudCohortsLoading ? '刷新中...' : '刷新群体分布' }}
+          </button>
+        </div>
+
+        <div v-if="cohortList.length > 0" class="space-y-3">
+          <div
+            v-for="cohort in cohortList"
+            :key="cohort.cohortId"
+            class="p-4 rounded-2xl card-surface space-y-2.5"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-sm font-bold text-[var(--color-text)]">{{ cohort.label || cohort.cohortId }}</div>
+              <span class="px-2 py-0.5 rounded-lg bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-[11px] font-mono text-[var(--color-text-muted)]">
+                样本数: {{ cohort.memberCount }}
+              </span>
+            </div>
+
+            <div v-if="cohort.suppressed" class="text-xs text-[var(--color-text-subtle)] italic">
+              该分组当前真实样本少于 10 名，为保护隐私已抑制细分技术分布展示。
+            </div>
+            <div v-else class="space-y-2">
+              <div class="flex flex-wrap gap-1.5">
+                <span
+                  v-for="[lang, val] in topEntries(cohort.languages, 4)"
+                  :key="lang"
+                  class="px-2 py-0.5 rounded-md text-[10px] bg-blue-500/10 text-[var(--color-primary)] border border-blue-500/20 font-mono"
+                >
+                  {{ lang }} {{ Math.round(val * 100) }}%
+                </span>
+                <span
+                  v-for="[topic, val] in topEntries(cohort.topics, 5)"
+                  :key="topic"
+                  class="px-2 py-0.5 rounded-md text-[10px] bg-[var(--color-surface-raised)] text-[var(--color-text-muted)] border border-[var(--color-border)]"
+                >
+                  #{{ topic }} ({{ Math.round(val * 100) }}%)
+                </span>
+              </div>
+              <div v-if="(cohort.representativeRepositories || []).length > 0" class="text-[11px] text-[var(--color-text-subtle)]">
+                群体代表项目:
+                <span class="font-mono text-[var(--color-text-muted)]">
+                  {{ cohort.representativeRepositories.slice(0, 3).map(r => r.fullName || r.repoId).join(', ') }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="py-12 text-center text-xs text-[var(--color-text-subtle)] card-surface">
+          暂无服务端群体分布缓存，请点击右上角“刷新群体分布”拉取已发布的群体聚合统计。
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -464,6 +684,83 @@ const profile = computed(() => userStore.profile)
 const interestTags = computed(() => userStore.interestTags)
 const avatarUrl = computed(() => profile.value?.avatarUrl || 'https://avatars.githubusercontent.com/u/9919?s=200&v=4')
 
+const cloudPortrait = computed(() => userStore.cloudPortrait)
+const portraitDetail = computed(() => cloudPortrait.value?.portrait || null)
+const cloudDirections = computed(() => {
+  const dirs = portraitDetail.value?.directions || []
+  return Array.isArray(dirs) ? dirs : []
+})
+const portraitEvidenceRepos = computed(() => {
+  const ev = portraitDetail.value?.evidenceRepos || []
+  return Array.isArray(ev) ? ev : []
+})
+const topLanguages = computed(() => topEntries(portraitDetail.value?.languages, 5))
+const cohortList = computed(() => {
+  const list = userStore.cloudCohorts?.cohorts || []
+  return Array.isArray(list) ? list : []
+})
+
+function topEntries(obj, limit = 5) {
+  if (!obj || typeof obj !== 'object') return []
+  return Object.entries(obj)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .slice(0, limit)
+}
+
+const portraitStatusLabel = computed(() => {
+  const status = cloudPortrait.value?.status || (userStore.preferences?.analysisEnabled === false ? 'analysis_disabled' : 'unbound')
+  const map = {
+    ready: '当前已发布',
+    pending: '处理中 / 待推断',
+    stale: '旧代结果 (有新行为待处理)',
+    empty: '暂无足够个人证据',
+    analysis_disabled: '已关闭云端分析',
+    unbound: '未绑定云端会话'
+  }
+  return map[status] || status
+})
+
+const portraitBadgeClass = computed(() => {
+  const status = cloudPortrait.value?.status || 'unbound'
+  if (status === 'ready') return 'bg-emerald-500/10 text-[var(--color-success)] border-emerald-500/20'
+  if (status === 'pending' || status === 'stale') return 'bg-amber-500/10 text-[var(--color-star)] border-amber-500/20'
+  return 'bg-[var(--color-surface)] text-[var(--color-text-subtle)] border-[var(--color-border)]'
+})
+
+const portraitSummaryText = computed(() => {
+  const status = cloudPortrait.value?.status || (userStore.preferences?.analysisEnabled === false ? 'analysis_disabled' : 'unbound')
+  if (status === 'analysis_disabled') {
+    return '您已在设置中关闭云端分析，已停止上传后续行为并清除云端分析依赖。'
+  }
+  if (status === 'unbound') {
+    return '尚未在设置中绑定云端分析会话，当前发现页使用本机公开信息基线与手动标签排序。'
+  }
+  if (status === 'empty') {
+    return '当前账号暂无足够公开仓库、Star 或有效浏览证据，系统保持空画像，不会强行猜测兴趣方向。'
+  }
+  if (status === 'pending') {
+    return '服务端已接收上传的行为与集合，正在排队进行离线画像推断，结果发布前本地近期浏览会作为补充增量。'
+  }
+  if (status === 'stale') {
+    return `当前展示的是 ${cloudPortrait.value?.generatedAt ? formatHistoryTime(cloudPortrait.value.generatedAt) : '上一批次'} 的历史结果；新增行为尚未被该代处理进度完全覆盖。`
+  }
+  return `已使用模型 ${cloudPortrait.value?.modelVersion || ''} 完成个人兴趣方向推断，所有证据项目均来自当前账号可用输入。`
+})
+
+function formatCohortSource(sourceKind) {
+  if (sourceKind === 'synthetic') return '合成基准样本'
+  if (sourceKind === 'mixed') return '混合样本'
+  return '真实生产观测'
+}
+
+const refreshPortrait = async () => {
+  await userStore.refreshCloudPortraitData()
+}
+
+const refreshCohorts = async () => {
+  await userStore.refreshCloudCohortsData()
+}
+
 const starCountDisplay = computed(() => {
   if (userStore.starSync.complete) {
     return userStore.starPage.total ?? userStore.starSync.loadedCount
@@ -474,7 +771,9 @@ const starCountDisplay = computed(() => {
 const tabs = computed(() => [
   { id: 'history', label: '浏览历史', count: historyStore.total },
   { id: 'stars', label: '我的 Star', count: userStore.starPage.total ?? userStore.starSync.loadedCount },
-  { id: 'projects', label: '我的项目', count: userStore.repoPage.total ?? userStore.repoSync.loadedCount }
+  { id: 'projects', label: '我的项目', count: userStore.repoPage.total ?? userStore.repoSync.loadedCount },
+  { id: 'portrait', label: '技术画像' },
+  { id: 'cohorts', label: '群体分布' }
 ])
 
 const openRepo = async (repo, source) => {

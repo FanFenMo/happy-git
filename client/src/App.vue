@@ -36,6 +36,7 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useUserStore } from './stores/user'
+import { useFeedStore } from './stores/feed'
 import TrendingView from './components/TrendingView.vue'
 import ProfileView from './components/ProfileView.vue'
 import EditProfileModal from './components/EditProfileModal.vue'
@@ -43,6 +44,7 @@ import SettingsModal from './components/SettingsModal.vue'
 import LoginModal from './components/LoginModal.vue'
 
 const userStore = useUserStore()
+const feedStore = useFeedStore()
 const currentNav = ref('trending')
 const isLoginModalOpen = ref(false)
 const isEditModalOpen = ref(false)
@@ -53,6 +55,14 @@ onMounted(async () => {
 })
 watch(() => userStore.session?.contextId, () => {
   if (userStore.session.status === 'authenticated') isLoginModalOpen.value = false
+})
+watch(() => userStore.sessionEpoch, () => {
+  feedStore.resetRecommendationState()
+  if (userStore.hasAccount) {
+    feedStore.refreshRecommendations()
+  } else {
+    feedStore.loadTrendingFeed()
+  }
 })
 const handleSkipLogin = () => {
   isLoginModalOpen.value = false

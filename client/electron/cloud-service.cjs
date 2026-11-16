@@ -548,12 +548,14 @@ class CloudService {
       }
 
       try {
+        const preferences = await this.requestJson('/api/v2/me/preferences', { token })
+        const operationId = `${prep.operationId}_${preferences.revision}`
         const res = await this.requestJson('/api/v2/me/collections', {
           method: 'PUT',
           token,
           body: {
-            operationId: prep.operationId,
-            expectedRevision: prep.expectedRevision,
+            operationId,
+            expectedRevision: preferences.revision,
             analysisEpoch: prep.analysisEpoch,
             collectionKind: prep.collectionKind,
             complete: prep.complete,
@@ -568,7 +570,7 @@ class CloudService {
             revision: res.revision,
             complete: true,
             snapshotHash: prep.snapshotHash,
-            operationId: prep.operationId
+            operationId
           }
         })
         results[collectionKind] = {
@@ -592,93 +594,50 @@ class CloudService {
   }
 
   async savePreferences(context, payload = {}) {
-    if (!context || !context.accountId) {
-      throw new Error('AUTH_REQUIRED')
-    }
+    if (!context?.accountId) throw new Error('AUTH_REQUIRED')
     const accountId = context.accountId
-    await this.database.callDatabase('savePreferences', {
-      accountId,
-      preferences: payload
-    })
-
+    await this.database.callDatabase('savePreferences', { accountId, preferences: payload })
     if (typeof payload.analysisEnabled === 'boolean') {
       const state = await this.database.callDatabase('readCloudSyncState', { accountId })
       if (state?.cloudBound && state?.accountMatched) {
         const token = await this.getValidAccessToken(accountId)
         if (token) {
-          try {
-            const res = await this.requestJson('/api/v2/me/preferences', {
-              method: 'PUT',
-              token,
-              body: {
-                operationId: `pref_${accountId}_${Date.now()}`,
-                analysisEnabled: payload.analysisEnabled
-              }
-            })
-            if (res.analysisEpoch != null) {
-              await this.database.callDatabase('syncCloudStreamState', {
-                accountId,
-                serverState: {
-                  streamEpoch: state.streamEpoch,
-                  analysisEpoch: res.analysisEpoch,
-                  acceptedThrough: state.acceptedThrough,
-                  exportedThrough: state.exportedThrough,
-                  processedThrough: state.processedThrough
-                }
-              })
+          const preferences = await this.requestJson('/api/v2/me/preferences', { token })
+          await this.requestJson('/api/v2/me/preferences', {
+            method: 'PUT', token,
+            body: {
+              operationId: `pref_${accountId}_${Date.now()}`,
+              expectedRevision: preferences.revision,
+              analysisEnabled: payload.analysisEnabled,
+              manualTags: payload.manualTags ?? preferences.manualTags ?? [],
+              hiddenRepoIds: payload.hiddenRepoIds ?? preferences.hiddenRepoIds ?? []
             }
-          } catch (_) {}
+          })
+          await this.registerDeviceAndSyncStream(accountId)
         }
       }
     }
-
-    return {
-      saved: true,
-      cloudSync: await this.database.callDatabase('readCloudSyncState', { accountId })
-    }
+    return { saved: true, cloudSync: await this.database.callDatabase('readCloudSyncState', { accountId }) }
   }
 
   async resetAnalysis(context) {
-    if (!context || !context.accountId) {
-      throw new Error('AUTH_REQUIRED')
-    }
+    if (!context?.accountId) throw new Error('AUTH_REQUIRED')
     const accountId = context.accountId
     let state = await this.database.callDatabase('readCloudSyncState', { accountId })
     let nextAnalysisEpoch = (state?.analysisEpoch || 1) + 1
-
     if (state?.cloudBound && state?.accountMatched) {
       const token = await this.getValidAccessToken(accountId)
-      if (token) {
-        try {
-          const res = await this.requestJson('/api/v2/me/analysis/reset', {
-            method: 'POST',
-            token,
-            body: {
-              operationId: `reset_${accountId}_${Date.now()}`
-            }
-          })
-          if (res.analysisEpoch != null) {
-            nextAnalysisEpoch = Number(res.analysisEpoch)
-          }
-        } catch (_) {}
-      }
+      if (!token) throw Object.assign(new Error('CLOUD_AUTH_REQUIRED'), { code: 'CLOUD_AUTH_REQUIRED' })
+      const preferences = await this.requestJson('/api/v2/me/preferences', { token })
+      const result = await this.requestJson('/api/v2/me/analysis/reset', {
+        method: 'POST', token,
+        body: { operationId: `reset_${accountId}_${Date.now()}`, expectedRevision: preferences.revision }
+      })
+      nextAnalysisEpoch = Number(result.analysisEpoch)
     }
-
-    state = await this.database.callDatabase('resetCloudAnalysisLocalState', {
-      accountId,
-      newAnalysisEpoch: nextAnalysisEpoch
-    })
-
-    // 若仍存在需上传的 discard 墓碑，尝试立即冲洗
-    try {
-      await this.flushOutbox(context)
-    } catch (_) {}
-
-    return {
-      reset: true,
-      analysisEpoch: nextAnalysisEpoch,
-      cloudSync: await this.database.callDatabase('readCloudSyncState', { accountId })
-    }
+    state = await this.database.callDatabase('resetCloudAnalysisLocalState', { accountId, newAnalysisEpoch: nextAnalysisEpoch })
+    if (state?.cloudBound && state?.accountMatched) state = await this.registerDeviceAndSyncStream(accountId)
+    return { reset: true, analysisEpoch: nextAnalysisEpoch, cloudSync: state }
   }
 }
 

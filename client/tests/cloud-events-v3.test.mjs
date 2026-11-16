@@ -30,7 +30,7 @@ test('sha256HexUtf8 与 computeOpenEventPayloadHash 严格对齐服务端 Ingest
   const expectedTupleJson = JSON.stringify([
     '1.0.0',
     sample.eventId,
-    sample.streamEpoch,
+    String(sample.streamEpoch),
     sample.deviceSeq,
     sample.analysisEpoch,
     sample.repoId,
@@ -226,6 +226,7 @@ test('SQLite v2 -> v3 迁移保留历史数据，并正确实现 30 秒按次事
 
     // 模拟与服务端 /api/v2 交互：验证账号不一致阻断、正常绑定、批量上传 ACK 与 processedThrough 独立水位
     const serverCalls = []
+    let mockAnalysisEpoch = 1
     let mockAuthAccountId = '9999' // 先模拟不一致的 GitHub 账号
 
     const mockFetch = async (url, options = {}) => {
@@ -267,8 +268,8 @@ test('SQLite v2 -> v3 迁移保留历史数据，并正确实现 30 秒按次事
           text: async () =>
             JSON.stringify({
               deviceId: 'dev_win_1001',
-              streamEpoch: 1,
-              analysisEpoch: 1,
+              streamEpoch: "11111111-2222-4333-8444-555555555555",
+              analysisEpoch: mockAnalysisEpoch,
               acceptedThrough: 0,
               exportedThrough: 0,
               processedThrough: 0,
@@ -315,6 +316,9 @@ test('SQLite v2 -> v3 迁移保留历史数据，并正确实现 30 秒按次事
             })
         }
       }
+      if (parsedUrl.pathname === '/api/v2/me/preferences') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ revision: 0, manualTags: [], hiddenRepoIds: [] }) }
+      }
       if (parsedUrl.pathname === '/api/v2/me/collections') {
         return {
           ok: true,
@@ -329,6 +333,7 @@ test('SQLite v2 -> v3 迁移保留历史数据，并正确实现 30 秒按次事
         }
       }
       if (parsedUrl.pathname === '/api/v2/me/analysis/reset') {
+        mockAnalysisEpoch = 2
         return {
           ok: true,
           status: 200,

@@ -213,7 +213,7 @@ export function computeOpenEventPayloadHash({
   const tuple = [
     EVENT_SCHEMA_VERSION,
     String(eventId),
-    Number(streamEpoch),
+    String(streamEpoch),
     Number(deviceSeq),
     Number(analysisEpoch),
     String(repoId),
@@ -235,7 +235,7 @@ export function computeDiscardEventPayloadHash({
   const tuple = [
     EVENT_SCHEMA_VERSION,
     String(eventId),
-    Number(streamEpoch),
+    String(streamEpoch),
     Number(deviceSeq),
     Number(analysisEpoch),
     'discard'

@@ -94,7 +94,7 @@ public class CloudIngestService {
             }
             if (seq != accepted+1) throw error(409,"SEQUENCE_GAP","下一序号应为 "+(accepted+1));
             if (!discard) record.put("effectiveAt",effective).put("receivedAt",now);
-            db.update("INSERT INTO cloud_events VALUES(?,?,?,?,?,?,?,?,?,?)",subject,eventId,streamId,seq,epoch,payloadHash,contentHash,discard?null:effective,discard?null:record.toString());
+            db.update("INSERT INTO cloud_events VALUES(?,?,?,?,?,?,?,?,?)",subject,eventId,streamId,seq,epoch,payloadHash,contentHash,discard?null:effective,discard?null:record.toString());
             if (!discard) adjustments.add(object().put("eventId",eventId).put("effectiveAt",effective));
             accepted=seq;
         }

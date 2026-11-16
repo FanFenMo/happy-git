@@ -21,12 +21,17 @@ public final class GitHubCollector {
     private ObjectNode lastResponse=Json.object();
     public GitHubCollector(String token) { this(token,null,null,"",""); }
     GitHubCollector(String token,TaskStore store,GitHubCache cache,String planId,String taskId) { this.token=token;this.store=store;this.cache=cache;this.planId=planId;this.taskId=taskId; }
+    static URI apiUri(String path) {
+        URI uri=URI.create("https://api.github.com"+path);
+        if (!"api.github.com".equals(uri.getHost()) || Arrays.asList(uri.getPath().split("/")).contains(".."))
+            throw new IllegalArgumentException("Invalid GitHub route");
+        return uri;
+    }
     ObjectNode observation(){return lastResponse.deepCopy();}
     private JsonNode get(String path, boolean optional) throws Exception {
         String rateKey=path.startsWith("/search/")?"github-rate-search":"github-rate-core";
         if(store!=null){ObjectNode gate=store.observation(rateKey);if(gate!=null&&gate.path("retryAt").asLong()>System.currentTimeMillis())throw new FetchException("Waiting for GitHub rate window",gate.path("retryAt").asLong(),false);}
-        URI uri = URI.create("https://api.github.com" + path);
-        if (!"api.github.com".equals(uri.getHost()) || path.contains("..")) throw new IllegalArgumentException("Invalid GitHub route");
+        URI uri = apiUri(path);
         HttpRequest.Builder request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(45))
                 .header("Accept", "application/vnd.github+json").header("User-Agent", "HappyGit-data-platform")
                 .header("X-GitHub-Api-Version", "2022-11-28");

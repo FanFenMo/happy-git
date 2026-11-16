@@ -12,8 +12,8 @@
 - `taxonomy_aliases.json`：冻结的语言与主题别名映射表（与 `tools/datasets/taxonomy.json` 同源）。
 - `metrics.py`：核心指标与分组统计计算模块（Top-8 标签 P/R/F1/Jaccard/nDCG、语言与主题分布 Cosine / `1-JSD`、证据引用真实性与幻觉计数、无证据空画像诚实率，以及按场景 `byScenario`、数据源 `bySourceKind`、稀疏度 `bySparsity` 聚合）。
 - `prompt_builder.py`：大模型提示词构建与输入防泄漏校验（逐条核对 `evidenceHash` 并拒绝包含任何真值/算法字段）。
-- `run_experiment.py`：端到端文件型评测 CLI，产出 `run-manifest.json`、`llm-prompts.jsonl`、`predictions/*.jsonl`、`report.json` 与 `report.md`。
-- `test_experiment_runner.py`：防泄漏、空画像/幻觉审计与端到端报告生成单元测试。
+- `run_experiment.py`：端到端文件型评测 CLI，支持 `--baseline-cmd`、`--learned-cmd`、`--blind-review-count`，产出 `run-manifest.json`、`llm-prompts.jsonl`、`predictions/*.jsonl`、`report.json`、`report.md` 及多方法匿名盲评抽查包（`blind-review-sample.jsonl` 与 `blind-review-key.json`）。
+- `test_experiment_runner.py`：防泄漏、空画像/幻觉审计、外部 CLI 适配器、匿名盲评导出与端到端报告生成单元测试。
 
 ---
 

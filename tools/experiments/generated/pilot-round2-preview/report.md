@@ -1,7 +1,7 @@
 # HappyGit 画像评测报告 (Experiment Report)
 
-- **运行时间**：`2026-11-16T12:50:08Z`
-- **代码提交**：`809bf57bf4d1cc6250eba0fe08a97e39387f3152`
+- **运行时间**：`2026-11-16T13:08:15Z`
+- **代码提交**：`705eefc43cb253b2f496b1754a5fd1fcc4d15a07`
 - **数据集版本**：`hg-pilot-synthetic_fixture-20261103` (`split=test`, 样本数 `5`)
 - **词表别名版本**：`hg-taxonomy-2026-11-v1`
 

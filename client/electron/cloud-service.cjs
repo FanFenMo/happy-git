@@ -12,6 +12,25 @@ try {
   electronShell = electron.shell || null
 } catch (_) {}
 
+const CLOUD_PREF_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
+
+function sanitizeCloudIdList(values, { maxItems = 100, normalizeWhitespace = false } = {}) {
+  const result = []
+  const seen = new Set()
+  if (!Array.isArray(values)) return result
+  for (const raw of values) {
+    let text = String(raw || '').trim()
+    if (normalizeWhitespace) {
+      text = text.replace(/\s+/g, '-')
+    }
+    if (!text || !CLOUD_PREF_ID_REGEX.test(text) || seen.has(text)) continue
+    seen.add(text)
+    result.push(text)
+    if (result.length >= maxItems) break
+  }
+  return result
+}
+
 function base64UrlEncode(buffer) {
   return Buffer.from(buffer)
     .toString('base64')
@@ -355,6 +374,7 @@ class CloudService {
 
     try {
       await this.registerDeviceAndSyncStream(accountId)
+      await this.flushPendingPreferencesMutations(accountId).catch(() => {})
       const syncState = await this.database.callDatabase('readCloudSyncState', { accountId })
       return { state: 'authenticated', cloudSync: syncState }
     } catch (err) {
@@ -433,9 +453,6 @@ class CloudService {
       if (!state.accountMatched) {
         return { flushed: false, reason: 'CLOUD_ACCOUNT_MISMATCH', cloudSync: state }
       }
-      if (!state.analysisEnabled) {
-        return { flushed: false, reason: 'ANALYSIS_DISABLED', cloudSync: state }
-      }
 
       const token = await this.getValidAccessToken(accountId)
       if (!token) {
@@ -444,6 +461,12 @@ class CloudService {
           reason: 'CLOUD_AUTH_REQUIRED',
           cloudSync: await this.database.callDatabase('readCloudSyncState', { accountId })
         }
+      }
+
+      await this.flushPendingPreferencesMutations(accountId)
+
+      if (!state.analysisEnabled) {
+        return { flushed: false, reason: 'ANALYSIS_DISABLED', cloudSync: state }
       }
 
       if (!state.deviceId) {
@@ -593,27 +616,167 @@ class CloudService {
     }
   }
 
+  async syncPreferencesState(
+    accountId,
+    {
+      operationId = null,
+      analysisEnabled = undefined,
+      manualTags = undefined,
+      hiddenRepoIds = undefined,
+      token = null
+    } = {}
+  ) {
+    const authToken = token || (await this.getValidAccessToken(accountId))
+    if (!authToken) {
+      throw Object.assign(new Error('CLOUD_AUTH_REQUIRED'), { code: 'CLOUD_AUTH_REQUIRED' })
+    }
+    const localPref = await this.database.callDatabase('readCloudPreferencesSyncPayload', { accountId })
+    const remote = await this.requestJson('/api/v2/me/preferences', { token: authToken })
+    const resolvedAnalysisEnabled = typeof analysisEnabled === 'boolean'
+      ? analysisEnabled
+      : (localPref ? Boolean(localPref.analysisEnabled) : Boolean(remote?.analysisEnabled))
+    const resolvedManualTags = Array.isArray(manualTags)
+      ? sanitizeCloudIdList(manualTags, { maxItems: 100, normalizeWhitespace: true })
+      : (localPref?.manualTags || sanitizeCloudIdList(remote?.manualTags || [], { maxItems: 100, normalizeWhitespace: true }))
+    const resolvedHiddenRepoIds = Array.isArray(hiddenRepoIds)
+      ? sanitizeCloudIdList(hiddenRepoIds, { maxItems: 20000, normalizeWhitespace: false })
+      : (localPref?.hiddenRepoIds || sanitizeCloudIdList(remote?.hiddenRepoIds || [], { maxItems: 20000, normalizeWhitespace: false }))
+
+    const resolvedOpId = operationId || `pref_${accountId}_${Date.now()}`
+    const updated = await this.requestJson('/api/v2/me/preferences', {
+      method: 'PUT',
+      token: authToken,
+      body: {
+        operationId: resolvedOpId,
+        expectedRevision: remote.revision,
+        analysisEnabled: resolvedAnalysisEnabled,
+        manualTags: resolvedManualTags,
+        hiddenRepoIds: resolvedHiddenRepoIds
+      }
+    })
+
+    const epochChanged = Number(updated?.analysisEpoch ?? remote?.analysisEpoch ?? 0) !== Number(remote?.analysisEpoch ?? 0)
+    if (typeof analysisEnabled === 'boolean' || epochChanged) {
+      await this.registerDeviceAndSyncStream(accountId)
+    }
+    return {
+      synced: true,
+      operationId: resolvedOpId,
+      preferences: updated
+    }
+  }
+
+  async flushPendingPreferencesMutations(accountId) {
+    let pending = []
+    try {
+      pending = await this.database.callDatabase('readPendingClientMutations', {
+        accountId,
+        mutationKind: 'preferences'
+      })
+    } catch (_) {
+      return { flushed: false, count: 0 }
+    }
+    if (!Array.isArray(pending) || !pending.length) {
+      return { flushed: true, count: 0 }
+    }
+    const latest = pending[pending.length - 1]
+    try {
+      await this.syncPreferencesState(accountId, { operationId: latest.operationId })
+      for (const item of pending) {
+        await this.database.callDatabase('markClientMutationDone', { operationId: item.operationId })
+      }
+      return { flushed: true, count: pending.length }
+    } catch (err) {
+      for (const item of pending) {
+        await this.database.callDatabase('markClientMutationFailed', {
+          operationId: item.operationId,
+          errorCode: err.code || 'PREF_SYNC_FAILED'
+        }).catch(() => {})
+      }
+      return { flushed: false, count: 0, error: { code: err.code || 'PREF_SYNC_FAILED', message: err.message } }
+    }
+  }
+
+  async syncFeedbackPreferences(context, { operationId = null } = {}) {
+    if (!context?.accountId) throw new Error('AUTH_REQUIRED')
+    const accountId = context.accountId
+    const resolvedOpId = String(operationId || `pref_fb_${accountId}_${Date.now()}`)
+    const state = await this.database.callDatabase('readCloudSyncState', { accountId })
+    if (!state?.cloudBound || !state?.accountMatched) {
+      return { synced: false, queued: false, reason: 'CLOUD_UNBOUND' }
+    }
+    await this.database.callDatabase('enqueueClientMutation', {
+      accountId,
+      operationId: resolvedOpId,
+      mutationKind: 'preferences',
+      payload: { trigger: 'feedback' }
+    })
+    const flushRes = await this.flushPendingPreferencesMutations(accountId)
+    return {
+      synced: Boolean(flushRes?.flushed),
+      queued: !flushRes?.flushed,
+      error: flushRes?.error || null
+    }
+  }
+
   async savePreferences(context, payload = {}) {
     if (!context?.accountId) throw new Error('AUTH_REQUIRED')
     const accountId = context.accountId
     await this.database.callDatabase('savePreferences', { accountId, preferences: payload })
-    if (typeof payload.analysisEnabled === 'boolean') {
+    const shouldSyncCloud =
+      typeof payload.analysisEnabled === 'boolean' ||
+      Array.isArray(payload.manualTags) ||
+      Array.isArray(payload.hiddenRepoIds) ||
+      Boolean(payload.syncPreferences)
+
+    if (shouldSyncCloud) {
       const state = await this.database.callDatabase('readCloudSyncState', { accountId })
       if (state?.cloudBound && state?.accountMatched) {
+        const opId = String(payload.operationId || `pref_${accountId}_${Date.now()}`)
         const token = await this.getValidAccessToken(accountId)
-        if (token) {
-          const preferences = await this.requestJson('/api/v2/me/preferences', { token })
-          await this.requestJson('/api/v2/me/preferences', {
-            method: 'PUT', token,
-            body: {
-              operationId: `pref_${accountId}_${Date.now()}`,
-              expectedRevision: preferences.revision,
-              analysisEnabled: payload.analysisEnabled,
-              manualTags: payload.manualTags ?? preferences.manualTags ?? [],
-              hiddenRepoIds: payload.hiddenRepoIds ?? preferences.hiddenRepoIds ?? []
-            }
+        if (!token) {
+          await this.database.callDatabase('enqueueClientMutation', {
+            accountId,
+            operationId: opId,
+            mutationKind: 'preferences',
+            payload: { trigger: 'savePreferences' }
           })
-          await this.registerDeviceAndSyncStream(accountId)
+          return {
+            saved: true,
+            cloudSynced: false,
+            queued: true,
+            cloudSync: await this.database.callDatabase('readCloudSyncState', { accountId })
+          }
+        }
+        try {
+          await this.syncPreferencesState(accountId, {
+            operationId: opId,
+            analysisEnabled: payload.analysisEnabled,
+            manualTags: payload.manualTags,
+            hiddenRepoIds: payload.hiddenRepoIds,
+            token
+          })
+          const pending = await this.database.callDatabase('readPendingClientMutations', {
+            accountId,
+            mutationKind: 'preferences'
+          }).catch(() => [])
+          for (const item of pending) {
+            await this.database.callDatabase('markClientMutationDone', { operationId: item.operationId }).catch(() => {})
+          }
+        } catch (err) {
+          await this.database.callDatabase('enqueueClientMutation', {
+            accountId,
+            operationId: opId,
+            mutationKind: 'preferences',
+            payload: { trigger: 'savePreferences' }
+          }).catch(() => {})
+          await this.database.callDatabase('markClientMutationFailed', {
+            operationId: opId,
+            errorCode: err.code || 'PREF_SYNC_FAILED'
+          }).catch(() => {})
+          if (!payload.bestEffort) {
+            throw err
+          }
         }
       }
     }

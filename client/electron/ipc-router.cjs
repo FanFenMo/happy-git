@@ -30,6 +30,7 @@ class IpcRouter {
       'stars.set', 'history.record', 'history.list', 'history.delete', 'history.clear',
       'account.savePreferences', 'account.forgetLocalData', 'recommendation.createSnapshot',
       'recommendation.commit', 'recommendation.list', 'recommendation.feedback',
+      'recommendation.listHidden',
       'cloud.auth.begin', 'cloud.auth.poll', 'cloud.session.restore', 'cloud.session.logout',
       'cloud.sync.readState', 'cloud.sync.flush', 'cloud.preferences.save',
       'cloud.analysis.reset', 'cloud.collections.sync',
@@ -215,14 +216,24 @@ class IpcRouter {
           limit: payload.limit || 20
         })
 
-      case 'recommendation.feedback':
-        await this.database.callDatabase('recordRecommendationFeedback', {
+      case 'recommendation.feedback': {
+        const fbResult = await this.database.callDatabase('recordRecommendationFeedback', {
           accountId: context.accountId,
           repoId: payload.repoId,
           kind: payload.kind,
+          hidden: typeof payload.hidden === 'boolean' ? payload.hidden : undefined,
           eventId: payload.eventId || `fb_${Date.now()}`
         })
-        return { recorded: true }
+        this.cloudService.syncFeedbackPreferences(context, {
+          operationId: fbResult?.eventId || payload.eventId
+        }).catch(() => {})
+        return fbResult || { recorded: true }
+      }
+
+      case 'recommendation.listHidden':
+        return this.database.callDatabase('listHiddenRecommendations', {
+          accountId: context.accountId
+        })
 
       case 'repository.open': {
         const repo = payload.repository

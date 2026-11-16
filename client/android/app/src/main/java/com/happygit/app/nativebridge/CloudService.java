@@ -262,6 +262,7 @@ public class CloudService {
         }
         try {
             registerDeviceAndSyncStream(accountId);
+            try { flushPendingPreferencesMutations(accountId); } catch (Exception ignored) {}
             out.put("state", "authenticated");
         } catch (Exception e) {
             out.put("state", "offline");
@@ -303,7 +304,7 @@ public class CloudService {
         }
         try {
             JSONObject state = localRepository.readCloudSyncState(accountId);
-            if (state == null || !state.optBoolean("cloudBound") || !state.optBoolean("accountMatched") || !state.optBoolean("analysisEnabled", true)) {
+            if (state == null || !state.optBoolean("cloudBound") || !state.optBoolean("accountMatched")) {
                 out.put("flushed", false);
                 out.put("cloudSync", state != null ? state : JSONObject.NULL);
                 return out;
@@ -312,6 +313,12 @@ public class CloudService {
             if (token == null) {
                 out.put("flushed", false);
                 out.put("cloudSync", state);
+                return out;
+            }
+            try { flushPendingPreferencesMutations(accountId); } catch (Exception ignored) {}
+            if (!state.optBoolean("analysisEnabled", true)) {
+                out.put("flushed", false);
+                out.put("cloudSync", localRepository.readCloudSyncState(accountId));
                 return out;
             }
             if (state.isNull("deviceId") || state.optString("deviceId", "").isEmpty()) {
@@ -393,22 +400,124 @@ public class CloudService {
         return out;
     }
 
+    public JSONObject syncPreferencesState(String accountId, String operationId, Boolean analysisEnabledOverride, JSONArray manualTagsOverride, JSONArray hiddenRepoIdsOverride, String tokenOverride) throws Exception {
+        String token = tokenOverride != null ? tokenOverride : getValidAccessToken(accountId);
+        if (token == null) throw new IllegalStateException("CLOUD_AUTH_REQUIRED");
+        JSONObject localPref = localRepository.readCloudPreferencesSyncPayload(accountId);
+        JSONObject remote = requestJson("/api/v2/me/preferences", "GET", token, null);
+
+        boolean resolvedAnalysisEnabled = analysisEnabledOverride != null
+                ? analysisEnabledOverride
+                : localPref.optBoolean("analysisEnabled", remote.optBoolean("analysisEnabled", true));
+        JSONArray resolvedManualTags = manualTagsOverride != null
+                ? LocalRepository.sanitizeCloudIds(manualTagsOverride, 100, true)
+                : localPref.optJSONArray("manualTags");
+        if (resolvedManualTags == null) resolvedManualTags = new JSONArray();
+        JSONArray resolvedHiddenRepoIds = hiddenRepoIdsOverride != null
+                ? LocalRepository.sanitizeCloudIds(hiddenRepoIdsOverride, 20000, false)
+                : localPref.optJSONArray("hiddenRepoIds");
+        if (resolvedHiddenRepoIds == null) resolvedHiddenRepoIds = new JSONArray();
+
+        String resolvedOpId = (operationId != null && !operationId.isEmpty())
+                ? operationId
+                : ("pref_" + accountId + "_" + System.currentTimeMillis());
+
+        JSONObject req = new JSONObject();
+        req.put("operationId", resolvedOpId);
+        req.put("expectedRevision", remote.getLong("revision"));
+        req.put("analysisEnabled", resolvedAnalysisEnabled);
+        req.put("manualTags", resolvedManualTags);
+        req.put("hiddenRepoIds", resolvedHiddenRepoIds);
+        JSONObject updated = requestJson("/api/v2/me/preferences", "PUT", token, req);
+
+        long prevEpoch = remote.optLong("analysisEpoch", 0);
+        long nextEpoch = updated.optLong("analysisEpoch", prevEpoch);
+        if (analysisEnabledOverride != null || prevEpoch != nextEpoch) {
+            registerDeviceAndSyncStream(accountId);
+        }
+        return updated;
+    }
+
+    public JSONObject flushPendingPreferencesMutations(String accountId) {
+        JSONObject out = new JSONObject();
+        try {
+            JSONArray pending = localRepository.readPendingClientMutations(accountId, "preferences");
+            if (pending == null || pending.length() == 0) {
+                out.put("flushed", true);
+                out.put("count", 0);
+                return out;
+            }
+            JSONObject latest = pending.getJSONObject(pending.length() - 1);
+            syncPreferencesState(accountId, latest.getString("operationId"), null, null, null, null);
+            for (int i = 0; i < pending.length(); i++) {
+                localRepository.markClientMutationDone(pending.getJSONObject(i).getString("operationId"));
+            }
+            out.put("flushed", true);
+            out.put("count", pending.length());
+            return out;
+        } catch (Exception e) {
+            try {
+                JSONArray pending = localRepository.readPendingClientMutations(accountId, "preferences");
+                for (int i = 0; i < pending.length(); i++) {
+                    localRepository.markClientMutationFailed(pending.getJSONObject(i).getString("operationId"), e.getMessage());
+                }
+                out.put("flushed", false);
+                out.put("error", e.getMessage());
+            } catch (Exception ignored) {}
+            return out;
+        }
+    }
+
+    public JSONObject syncFeedbackPreferences(String accountId, String operationId) throws Exception {
+        JSONObject out = new JSONObject();
+        JSONObject state = localRepository.readCloudSyncState(accountId);
+        if (state == null || !state.optBoolean("cloudBound") || !state.optBoolean("accountMatched")) {
+            out.put("synced", false);
+            out.put("queued", false);
+            return out;
+        }
+        String opId = (operationId != null && !operationId.isEmpty())
+                ? operationId
+                : ("pref_fb_" + accountId + "_" + System.currentTimeMillis());
+        JSONObject payload = new JSONObject();
+        payload.put("trigger", "feedback");
+        localRepository.enqueueClientMutation(accountId, opId, "preferences", payload);
+        JSONObject flushRes = flushPendingPreferencesMutations(accountId);
+        out.put("synced", flushRes.optBoolean("flushed", false));
+        out.put("queued", !flushRes.optBoolean("flushed", false));
+        return out;
+    }
+
     public JSONObject savePreferences(String accountId, JSONObject payload) throws Exception {
         localRepository.savePreferences(accountId, payload);
-        if (payload.has("analysisEnabled")) {
+        boolean shouldSyncCloud = payload.has("analysisEnabled") || payload.has("manualTags") || payload.has("hiddenRepoIds") || payload.optBoolean("syncPreferences", false);
+        if (shouldSyncCloud) {
             JSONObject state = localRepository.readCloudSyncState(accountId);
             if (state != null && state.optBoolean("cloudBound") && state.optBoolean("accountMatched")) {
+                String opId = payload.optString("operationId", "");
+                if (opId.isEmpty()) opId = "pref_" + accountId + "_" + System.currentTimeMillis();
                 String token = getValidAccessToken(accountId);
-                if (token != null) {
-                    JSONObject preferences = requestJson("/api/v2/me/preferences", "GET", token, null);
-                    JSONObject req = new JSONObject();
-                    req.put("operationId", "pref_" + accountId + "_" + System.currentTimeMillis());
-                    req.put("expectedRevision", preferences.getLong("revision"));
-                    req.put("analysisEnabled", payload.optBoolean("analysisEnabled", true));
-                    req.put("manualTags", payload.has("manualTags") ? payload.getJSONArray("manualTags") : preferences.optJSONArray("manualTags"));
-                    req.put("hiddenRepoIds", payload.has("hiddenRepoIds") ? payload.getJSONArray("hiddenRepoIds") : preferences.optJSONArray("hiddenRepoIds"));
-                    requestJson("/api/v2/me/preferences", "PUT", token, req);
-                    registerDeviceAndSyncStream(accountId);
+                JSONObject meta = new JSONObject();
+                meta.put("trigger", "savePreferences");
+                if (token == null) {
+                    localRepository.enqueueClientMutation(accountId, opId, "preferences", meta);
+                } else {
+                    try {
+                        Boolean enabledOverride = payload.has("analysisEnabled") ? payload.optBoolean("analysisEnabled", true) : null;
+                        JSONArray tagsOverride = payload.has("manualTags") && !payload.isNull("manualTags") ? payload.getJSONArray("manualTags") : null;
+                        JSONArray hiddenOverride = payload.has("hiddenRepoIds") && !payload.isNull("hiddenRepoIds") ? payload.getJSONArray("hiddenRepoIds") : null;
+                        syncPreferencesState(accountId, opId, enabledOverride, tagsOverride, hiddenOverride, token);
+                        JSONArray pending = localRepository.readPendingClientMutations(accountId, "preferences");
+                        for (int i = 0; i < pending.length(); i++) {
+                            localRepository.markClientMutationDone(pending.getJSONObject(i).getString("operationId"));
+                        }
+                    } catch (Exception e) {
+                        localRepository.enqueueClientMutation(accountId, opId, "preferences", meta);
+                        localRepository.markClientMutationFailed(opId, e.getMessage());
+                        if (!payload.optBoolean("bestEffort", false)) {
+                            throw e;
+                        }
+                    }
                 }
             }
         }

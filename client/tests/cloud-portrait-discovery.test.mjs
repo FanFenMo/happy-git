@@ -131,6 +131,14 @@ test('云端画像缓存、特征空间校验、accepted/processed 水位独立�
     const { rawLine, digest, space } = buildSampleFeatureSpace()
     let failFeatureDigest = false
     const streamEpoch = 'aaaa1111-bbbb-4ccc-8ddd-000000000001'
+    const SERVER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
+    const serverPrefs = {
+      revision: 1,
+      analysisEpoch: 1,
+      analysisEnabled: true,
+      manualTags: [],
+      hiddenRepoIds: []
+    }
 
     const repoRust = normalizeRepository({
       repoId: '7001',
@@ -177,7 +185,7 @@ test('云端画像缓存、特征空间校验、accepted/processed 水位独立�
 
     const cloudService = new CloudService({
       database: { callDatabase },
-      fetchImpl: async (url) => {
+      fetchImpl: async (url, options = {}) => {
         const pathname = new URL(url).pathname
         if (pathname === '/api/v2/devices/register') {
           return {
@@ -187,13 +195,36 @@ test('云端画像缓存、特征空间校验、accepted/processed 水位独立�
               subjectId: 'subj_2001',
               deviceId: 'dev_2001',
               streamEpoch,
-              analysisEpoch: 1,
+              analysisEpoch: serverPrefs.analysisEpoch,
               acceptedThrough: 0,
               exportedThrough: 0,
               processedThrough: 0,
-              preferences: { analysisEnabled: true, manualTags: [], hiddenRepoIds: [] }
+              preferences: { ...serverPrefs }
             })
           }
+        }
+        if (pathname === '/api/v2/me/preferences') {
+          if ((options.method || 'GET').toUpperCase() === 'GET') {
+            return { ok: true, status: 200, text: async () => JSON.stringify({ ...serverPrefs }) }
+          }
+          const body = JSON.parse(options.body || '{}')
+          for (const idItem of [...(body.manualTags || []), ...(body.hiddenRepoIds || [])]) {
+            if (!SERVER_ID_RE.test(String(idItem))) {
+              return {
+                ok: false,
+                status: 400,
+                text: async () => JSON.stringify({ code: 'INVALID_FIELD', message: `invalid id: ${idItem}` })
+              }
+            }
+          }
+          if (typeof body.analysisEnabled === 'boolean' && body.analysisEnabled !== serverPrefs.analysisEnabled) {
+            serverPrefs.analysisEpoch += 1
+          }
+          serverPrefs.analysisEnabled = Boolean(body.analysisEnabled)
+          serverPrefs.manualTags = Array.isArray(body.manualTags) ? [...body.manualTags] : []
+          serverPrefs.hiddenRepoIds = Array.isArray(body.hiddenRepoIds) ? [...body.hiddenRepoIds] : []
+          serverPrefs.revision += 1
+          return { ok: true, status: 200, text: async () => JSON.stringify({ ...serverPrefs }) }
         }
         if (pathname === '/api/v2/events/batches') {
           return {
@@ -439,6 +470,127 @@ test('云端画像缓存、特征空间校验、accepted/processed 水位独立�
     const disabledPortrait = await callDatabase('readCloudPortrait', { accountId })
     assert.equal(disabledPortrait.status, 'analysis_disabled')
     assert.equal(disabledPortrait.portrait, null)
+
+    // 9. 验证反馈 hide/unhide + 正则兼容偏好同步 + 离线队列重放 + 近期事件24h降权
+    // 先恢复 analysisEnabled = true 以验证不影响 epoch 的 tag/hidden sync
+    await cloudService.savePreferences(context, {
+      analysisEnabled: true,
+      manualTags: ['rust-systems', 'AI Agent', '不合法中文标签'],
+      operationId: 'op_tags_sync'
+    })
+    assert.ok(serverPrefs.manualTags.includes('rust-systems'))
+    assert.ok(serverPrefs.manualTags.includes('AI-Agent'))
+    assert.ok(!serverPrefs.manualTags.includes('不合法中文标签'))
+    for (const t of serverPrefs.manualTags) {
+      assert.match(t, /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/)
+    }
+
+    // 隐藏与解除隐藏仓库，并校验仅合法 ID 同步至云端（analysisEpoch 不变）
+    const epochBeforeHide = serverPrefs.analysisEpoch
+    const fbHide = await callDatabase('recordRecommendationFeedback', {
+      accountId,
+      repoId: '8001',
+      hidden: true,
+      eventId: 'fb_hide_8001_v2'
+    })
+    assert.equal(fbHide.hidden, true)
+    await callDatabase('recordRecommendationFeedback', {
+      accountId,
+      repoId: 'invalid/key/format',
+      hidden: true,
+      eventId: 'fb_hide_invalid'
+    })
+    await cloudService.syncFeedbackPreferences(context, { operationId: 'fb_hide_8001_v2' })
+    assert.equal(serverPrefs.analysisEpoch, epochBeforeHide)
+    assert.ok(serverPrefs.hiddenRepoIds.includes('8001'))
+    assert.ok(!serverPrefs.hiddenRepoIds.includes('invalid/key/format'))
+
+    const hiddenList = await callDatabase('listHiddenRecommendations', { accountId })
+    assert.ok(hiddenList.items.some(it => it.repoId === '8001' && it.fullName === 'systems/rust-llm-server'))
+
+    await callDatabase('recordRecommendationFeedback', {
+      accountId,
+      repoId: '8001',
+      hidden: false,
+      eventId: 'fb_unhide_8001_v2'
+    })
+    await cloudService.syncFeedbackPreferences(context, { operationId: 'fb_unhide_8001_v2' })
+    assert.ok(!serverPrefs.hiddenRepoIds.includes('8001'))
+
+    // 验证离线时偏好变更先入 client_mutation_outbox，断网恢复 flushOutbox 后自动补传云端
+    await callDatabase('recordRecommendationFeedback', {
+      accountId,
+      repoId: '8002',
+      hidden: true,
+      eventId: 'fb_hide_8002_offline'
+    })
+    await callDatabase('enqueueClientMutation', {
+      accountId,
+      operationId: 'fb_hide_8002_offline',
+      mutationKind: 'preferences',
+      payload: { trigger: 'offline_test' }
+    })
+    const pendingBeforeReconnect = await callDatabase('readPendingClientMutations', {
+      accountId,
+      mutationKind: 'preferences'
+    })
+    assert.equal(pendingBeforeReconnect.length, 1)
+    await cloudService.flushOutbox(context)
+    const pendingAfterReconnect = await callDatabase('readPendingClientMutations', {
+      accountId,
+      mutationKind: 'preferences'
+    })
+    assert.equal(pendingAfterReconnect.length, 0)
+    assert.ok(serverPrefs.hiddenRepoIds.includes('8002'))
+
+    // 验证 unprocessedEvents（不在 historyMap 内但发生于24小时内）同样触发 openedRecent 降权
+    const recentBatch = createRecommendationBatch({
+      batchId: 'batch_recent_demotion',
+      accountId,
+      profile: {
+        languages: { Rust: 1.0 },
+        topics: { llm: 1.0 },
+        topInterests: [{ tag: 'llm', score: 1.0 }]
+      },
+      candidates: [candRustMatch],
+      historyMap: new Map(),
+      unprocessedEvents: [
+        {
+          deviceSeq: 99,
+          recordKind: 'open',
+          repoId: candRustMatch.repoId,
+          canonicalKey: candRustMatch.canonicalKey,
+          fullName: candRustMatch.fullName,
+          effectiveAt: Date.now() - 60000
+        }
+      ],
+      processedThrough: 1,
+      now: Date.now()
+    })
+    const staleBatch = createRecommendationBatch({
+      batchId: 'batch_stale_no_demotion',
+      accountId,
+      profile: {
+        languages: { Rust: 1.0 },
+        topics: { llm: 1.0 },
+        topInterests: [{ tag: 'llm', score: 1.0 }]
+      },
+      candidates: [candRustMatch],
+      historyMap: new Map(),
+      unprocessedEvents: [
+        {
+          deviceSeq: 99,
+          recordKind: 'open',
+          repoId: candRustMatch.repoId,
+          canonicalKey: candRustMatch.canonicalKey,
+          fullName: candRustMatch.fullName,
+          effectiveAt: Date.now() - (48 * 3600 * 1000)
+        }
+      ],
+      processedThrough: 1,
+      now: Date.now()
+    })
+    assert.ok(recentBatch.items[0].score < staleBatch.items[0].score)
   } finally {
     await closeDatabaseWorker()
     fs.rmSync(dir, { recursive: true, force: true })

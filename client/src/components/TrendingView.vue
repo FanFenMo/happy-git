@@ -396,7 +396,7 @@ async function toggleStar(repo) {
 }
 
 async function handleHide(repo) {
-  const key = repo.repoId || repo.canonicalKey
+  const key = String(repo.repoId || repo.canonicalKey)
   await feedStore.hideRecommendation(key)
   showToast('已隐藏该项目，推荐排序已更新')
 }

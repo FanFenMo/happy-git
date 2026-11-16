@@ -13,10 +13,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 public class LocalRepository {
 
@@ -345,15 +348,154 @@ public class LocalRepository {
         return obj;
     }
 
+    private static final Pattern CLOUD_PREF_ID_PATTERN = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$");
+
+    public static JSONArray sanitizeCloudIds(JSONArray values, int maxItems, boolean normalizeWhitespace) {
+        JSONArray result = new JSONArray();
+        if (values == null) return result;
+        Set<String> seen = new LinkedHashSet<>();
+        for (int i = 0; i < values.length(); i++) {
+            String raw = values.optString(i, "");
+            if (raw == null) continue;
+            String text = raw.trim();
+            if (normalizeWhitespace) {
+                text = text.replaceAll("\\s+", "-");
+            }
+            if (text.isEmpty() || !CLOUD_PREF_ID_PATTERN.matcher(text).matches() || seen.contains(text)) {
+                continue;
+            }
+            seen.add(text);
+            result.put(text);
+            if (result.length() >= maxItems) break;
+        }
+        return result;
+    }
+
+    public synchronized JSONObject readCloudPreferencesSyncPayload(String accountId) {
+        JSONObject out = new JSONObject();
+        if (accountId == null || accountId.isEmpty()) return out;
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        long now = System.currentTimeMillis();
+        ensureAccountV3State(db, accountId, now);
+
+        boolean analysisEnabled = true;
+        try (Cursor c = db.rawQuery("SELECT analysis_enabled FROM cloud_account_state WHERE account_id = ?", new String[]{accountId})) {
+            if (c.moveToFirst()) analysisEnabled = c.getInt(0) != 0;
+        }
+
+        boolean historyEnabled = true;
+        JSONArray rawManualTags = new JSONArray();
+        try (Cursor c = db.rawQuery("SELECT history_enabled, manual_tags_json FROM account_preferences WHERE account_id = ?", new String[]{accountId})) {
+            if (c.moveToFirst()) {
+                historyEnabled = c.getInt(0) != 0;
+                String tagsJson = c.getString(1);
+                if (tagsJson != null && !tagsJson.isEmpty()) {
+                    try { rawManualTags = new JSONArray(tagsJson); } catch (Exception ignored) {}
+                }
+            }
+        }
+
+        JSONArray rawHidden = new JSONArray();
+        try (Cursor c = db.rawQuery("SELECT repo_id FROM recommendation_feedback WHERE account_id = ? AND hidden = 1 ORDER BY updated_at DESC", new String[]{accountId})) {
+            while (c.moveToNext()) {
+                String rid = c.getString(0);
+                if (rid != null && !rid.isEmpty()) rawHidden.put(rid);
+            }
+        }
+
+        try {
+            out.put("analysisEnabled", analysisEnabled);
+            out.put("historyEnabled", historyEnabled);
+            out.put("rawManualTags", rawManualTags);
+            out.put("rawHiddenRepoIds", rawHidden);
+            out.put("manualTags", sanitizeCloudIds(rawManualTags, 100, true));
+            out.put("hiddenRepoIds", sanitizeCloudIds(rawHidden, 20000, false));
+        } catch (Exception ignored) {}
+        return out;
+    }
+
+    public synchronized void enqueueClientMutation(String accountId, String operationId, String mutationKind, JSONObject payload) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        long now = System.currentTimeMillis();
+        ContentValues cv = new ContentValues();
+        cv.put("operation_id", operationId);
+        cv.put("account_id", accountId);
+        cv.put("mutation_kind", mutationKind);
+        cv.put("payload_json", payload != null ? payload.toString() : "{}");
+        cv.put("state", "pending");
+        cv.put("created_at", now);
+        cv.put("updated_at", now);
+        cv.putNull("error_code");
+        db.insertWithOnConflict("client_mutation_outbox", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    public synchronized JSONArray readPendingClientMutations(String accountId, String mutationKind) {
+        JSONArray arr = new JSONArray();
+        SQLiteDatabase db = dbHelper.getReadableDatabase();
+        String sql = mutationKind != null && !mutationKind.isEmpty()
+                ? "SELECT operation_id, mutation_kind, payload_json, created_at, updated_at, error_code FROM client_mutation_outbox WHERE account_id = ? AND mutation_kind = ? AND state = 'pending' ORDER BY created_at ASC"
+                : "SELECT operation_id, mutation_kind, payload_json, created_at, updated_at, error_code FROM client_mutation_outbox WHERE account_id = ? AND state = 'pending' ORDER BY created_at ASC";
+        String[] args = mutationKind != null && !mutationKind.isEmpty()
+                ? new String[]{accountId, mutationKind}
+                : new String[]{accountId};
+        try (Cursor c = db.rawQuery(sql, args)) {
+            while (c.moveToNext()) {
+                JSONObject item = new JSONObject();
+                try {
+                    item.put("operationId", c.getString(0));
+                    item.put("mutationKind", c.getString(1));
+                    try { item.put("payload", new JSONObject(c.getString(2))); } catch (Exception e) { item.put("payload", new JSONObject()); }
+                    item.put("createdAt", c.getLong(3));
+                    item.put("updatedAt", c.getLong(4));
+                    item.put("errorCode", c.isNull(5) ? JSONObject.NULL : c.getString(5));
+                    arr.put(item);
+                } catch (Exception ignored) {}
+            }
+        }
+        return arr;
+    }
+
+    public synchronized void markClientMutationDone(String operationId) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        db.delete("client_mutation_outbox", "operation_id = ?", new String[]{operationId});
+    }
+
+    public synchronized void markClientMutationFailed(String operationId, String errorCode) {
+        SQLiteDatabase db = dbHelper.getWritableDatabase();
+        ContentValues cv = new ContentValues();
+        cv.put("error_code", errorCode != null ? errorCode : "UNKNOWN");
+        cv.put("updated_at", System.currentTimeMillis());
+        db.update("client_mutation_outbox", cv, "operation_id = ?", new String[]{operationId});
+    }
+
     public synchronized void savePreferences(String accountId, JSONObject preferences) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.beginTransaction();
         try {
             long now = System.currentTimeMillis();
+            int existingHistory = 1;
+            String existingManualJson = "[]";
+            try (Cursor c = db.rawQuery("SELECT history_enabled, manual_tags_json FROM account_preferences WHERE account_id = ?", new String[]{accountId})) {
+                if (c.moveToFirst()) {
+                    existingHistory = c.getInt(0);
+                    String mj = c.getString(1);
+                    if (mj != null && !mj.isEmpty()) existingManualJson = mj;
+                }
+            }
+            int nextHistory = preferences.has("historyEnabled")
+                    ? (preferences.optBoolean("historyEnabled", true) ? 1 : 0)
+                    : existingHistory;
+            JSONArray optTags = (preferences.has("manualTags") && !preferences.isNull("manualTags"))
+                    ? preferences.optJSONArray("manualTags")
+                    : null;
+            String nextManualJson = optTags != null
+                    ? optTags.toString()
+                    : existingManualJson;
+
             ContentValues cv = new ContentValues();
             cv.put("account_id", accountId);
-            cv.put("history_enabled", preferences.optBoolean("historyEnabled", true) ? 1 : 0);
-            cv.put("manual_tags_json", preferences.optJSONArray("manualTags") != null ? preferences.optJSONArray("manualTags").toString() : "[]");
+            cv.put("history_enabled", nextHistory);
+            cv.put("manual_tags_json", nextManualJson);
             cv.put("updated_at", now);
             db.insertWithOnConflict("account_preferences", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
 
@@ -2172,18 +2314,21 @@ public class LocalRepository {
             if (cloudPortraitState != null) {
                 String st = cloudPortraitState.optString("status", "");
                 if (("ready".equals(st) || "stale".equals(st)) && !cloudPortraitState.isNull("portrait")) {
-                    JSONObject merged = new JSONObject(cloudPortraitState.optJSONObject("portrait").toString());
-                    merged.put("subjectId", cloudPortraitState.opt("subjectId"));
-                    merged.put("modelVersion", cloudPortraitState.opt("modelVersion"));
-                    merged.put("featureSpaceVersion", cloudPortraitState.opt("featureSpaceVersion"));
-                    merged.put("catalogSnapshotId", cloudPortraitState.opt("catalogSnapshotId"));
-                    merged.put("generationId", cloudPortraitState.opt("generationId"));
-                    merged.put("referenceTime", cloudPortraitState.opt("referenceTime"));
-                    merged.put("generatedAt", cloudPortraitState.opt("generatedAt"));
-                    merged.put("processedThrough", cloudPortraitState.optLong("processedThrough", 0));
-                    merged.put("status", st);
-                    merged.put("isFixture", cloudPortraitState.optBoolean("isFixture", false));
-                    cloudPortraitObj = merged;
+                    JSONObject pObj = cloudPortraitState.optJSONObject("portrait");
+                    if (pObj != null) {
+                        JSONObject merged = new JSONObject(pObj.toString());
+                        merged.put("subjectId", cloudPortraitState.opt("subjectId"));
+                        merged.put("modelVersion", cloudPortraitState.opt("modelVersion"));
+                        merged.put("featureSpaceVersion", cloudPortraitState.opt("featureSpaceVersion"));
+                        merged.put("catalogSnapshotId", cloudPortraitState.opt("catalogSnapshotId"));
+                        merged.put("generationId", cloudPortraitState.opt("generationId"));
+                        merged.put("referenceTime", cloudPortraitState.opt("referenceTime"));
+                        merged.put("generatedAt", cloudPortraitState.opt("generatedAt"));
+                        merged.put("processedThrough", cloudPortraitState.optLong("processedThrough", 0));
+                        merged.put("status", st);
+                        merged.put("isFixture", cloudPortraitState.optBoolean("isFixture", false));
+                        cloudPortraitObj = merged;
+                    }
                 }
             }
             res.put("cloudPortrait", cloudPortraitObj);
@@ -2384,21 +2529,112 @@ public class LocalRepository {
         return res;
     }
 
-    public synchronized void recordRecommendationFeedback(String accountId, String repoId, String kind, String eventId) {
+    public synchronized JSONObject recordRecommendationFeedback(String accountId, String repoId, String kind, String eventId, Boolean hiddenOverride) {
+        String normalizedRepoId = repoId != null ? repoId.trim() : "";
+        if (normalizedRepoId.isEmpty()) {
+            throw new IllegalArgumentException("INVALID_REPO_ID");
+        }
+        boolean hiddenBool = hiddenOverride != null ? hiddenOverride : "hide".equals(kind);
+        String resolvedEventId = (eventId != null && !eventId.trim().isEmpty()) ? eventId.trim() : ("fb_" + System.currentTimeMillis());
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.beginTransaction();
         try {
             ContentValues cv = new ContentValues();
             cv.put("account_id", accountId);
-            cv.put("repo_id", repoId);
-            cv.put("hidden", "hide".equals(kind) ? 1 : 0);
-            cv.put("event_id", eventId);
+            cv.put("repo_id", normalizedRepoId);
+            cv.put("hidden", hiddenBool ? 1 : 0);
+            cv.put("event_id", resolvedEventId);
             cv.put("updated_at", System.currentTimeMillis());
             db.insertWithOnConflict("recommendation_feedback", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
             bumpRevision(db, accountId, "feedback_revision");
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
+        }
+        JSONObject out = new JSONObject();
+        try {
+            out.put("recorded", true);
+            out.put("repoId", normalizedRepoId);
+            out.put("hidden", hiddenBool);
+            out.put("eventId", resolvedEventId);
+        } catch (Exception ignored) {}
+        return out;
+    }
+
+    public synchronized JSONObject listHiddenRecommendations(String accountId) {
+        JSONObject out = new JSONObject();
+        JSONArray items = new JSONArray();
+        SQLiteDatabase db = dbHelper.getReadableDatabase();
+        try {
+            Map<String, JSONObject> metaMap = new HashMap<>();
+            try (Cursor c = db.rawQuery(
+                    "SELECT repository_json FROM recommendation_items WHERE batch_id IN (SELECT batch_id FROM recommendation_batches WHERE account_id = ?) ORDER BY position ASC LIMIT 400",
+                    new String[]{accountId})) {
+                while (c.moveToNext()) {
+                    try { indexHiddenRepoMetadata(metaMap, new JSONObject(c.getString(0))); } catch (Exception ignored) {}
+                }
+            }
+            try (Cursor c = db.rawQuery("SELECT result_json FROM discovery_cache WHERE account_id = ? LIMIT 100", new String[]{accountId})) {
+                while (c.moveToNext()) {
+                    try {
+                        JSONArray arr = new JSONArray(c.getString(0));
+                        for (int i = 0; i < arr.length(); i++) {
+                            JSONObject repo = arr.optJSONObject(i);
+                            if (repo != null) indexHiddenRepoMetadata(metaMap, repo);
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+            try (Cursor c = db.rawQuery("SELECT repository_json FROM browse_history WHERE account_id = ? ORDER BY last_viewed_at DESC LIMIT 200", new String[]{accountId})) {
+                while (c.moveToNext()) {
+                    try { indexHiddenRepoMetadata(metaMap, new JSONObject(c.getString(0))); } catch (Exception ignored) {}
+                }
+            }
+
+            try (Cursor c = db.rawQuery(
+                    "SELECT repo_id, event_id, updated_at FROM recommendation_feedback WHERE account_id = ? AND hidden = 1 ORDER BY updated_at DESC",
+                    new String[]{accountId})) {
+                while (c.moveToNext()) {
+                    String key = c.getString(0);
+                    JSONObject row = new JSONObject();
+                    row.put("repoId", key);
+                    row.put("eventId", c.getString(1));
+                    row.put("updatedAt", c.getLong(2));
+                    JSONObject meta = metaMap.get(key);
+                    row.put("fullName", meta != null ? meta.opt("fullName") : JSONObject.NULL);
+                    row.put("name", meta != null ? meta.opt("name") : JSONObject.NULL);
+                    row.put("description", meta != null ? meta.opt("description") : JSONObject.NULL);
+                    row.put("language", meta != null ? meta.opt("language") : JSONObject.NULL);
+                    row.put("htmlUrl", meta != null ? meta.opt("htmlUrl") : JSONObject.NULL);
+                    items.put(row);
+                }
+            }
+            out.put("items", items);
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+        return out;
+    }
+
+    private void indexHiddenRepoMetadata(Map<String, JSONObject> map, JSONObject repo) {
+        if (repo == null) return;
+        JSONObject meta = new JSONObject();
+        try {
+            meta.put("fullName", repo.has("fullName") ? repo.opt("fullName") : repo.opt("canonicalKey"));
+            meta.put("name", repo.has("name") ? repo.opt("name") : JSONObject.NULL);
+            meta.put("description", repo.has("description") ? repo.opt("description") : JSONObject.NULL);
+            meta.put("language", repo.has("language") ? repo.opt("language") : JSONObject.NULL);
+            meta.put("htmlUrl", repo.has("htmlUrl") ? repo.opt("htmlUrl") : JSONObject.NULL);
+        } catch (Exception ignored) {}
+        String[] keys = new String[]{
+                repo.optString("repoId", ""),
+                repo.optString("canonicalKey", ""),
+                repo.optString("fullName", "")
+        };
+        for (String k : keys) {
+            if (k != null && !k.isEmpty() && !map.containsKey(k)) {
+                map.put(k, meta);
+            }
         }
     }
 

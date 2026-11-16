@@ -688,11 +688,127 @@ function readAccountSnapshot(accountId) {
   }
 }
 
-function savePreferences(accountId, preferences) {
-  const manualJson = JSON.stringify(preferences.manualTags || [])
-  const historyVal = preferences.historyEnabled !== false ? 1 : 0
+const CLOUD_PREF_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
+
+function sanitizeCloudIds(values, { maxItems = 100, normalizeWhitespace = false } = {}) {
+  const result = []
+  const seen = new Set()
+  if (!Array.isArray(values)) return result
+  for (const raw of values) {
+    let text = String(raw || '').trim()
+    if (normalizeWhitespace) {
+      text = text.replace(/\s+/g, '-')
+    }
+    if (!text || !CLOUD_PREF_ID_REGEX.test(text) || seen.has(text)) continue
+    seen.add(text)
+    result.push(text)
+    if (result.length >= maxItems) break
+  }
+  return result
+}
+
+function readCloudPreferencesSyncPayload(accountId) {
+  if (!accountId) return null
+  ensureAccountV3State(accountId)
+  const cloudAcc = db.prepare('SELECT analysis_enabled FROM cloud_account_state WHERE account_id = ?;').get(accountId)
+  const prefRow = db.prepare('SELECT history_enabled, manual_tags_json FROM account_preferences WHERE account_id = ?;').get(accountId)
+  const hiddenRows = db.prepare(`SELECT repo_id FROM recommendation_feedback WHERE account_id = ? AND hidden = 1 ORDER BY updated_at DESC;`).all(accountId)
+
+  let rawManualTags = []
+  try {
+    rawManualTags = prefRow?.manual_tags_json ? JSON.parse(prefRow.manual_tags_json) : []
+  } catch (_) {
+    rawManualTags = []
+  }
+  const rawHiddenRepoIds = hiddenRows.map((r) => String(r.repo_id))
+
+  return {
+    analysisEnabled: cloudAcc ? Boolean(cloudAcc.analysis_enabled) : true,
+    historyEnabled: prefRow ? Boolean(prefRow.history_enabled) : true,
+    rawManualTags: Array.isArray(rawManualTags) ? rawManualTags : [],
+    rawHiddenRepoIds,
+    manualTags: sanitizeCloudIds(rawManualTags, { maxItems: 100, normalizeWhitespace: true }),
+    hiddenRepoIds: sanitizeCloudIds(rawHiddenRepoIds, { maxItems: 20000, normalizeWhitespace: false })
+  }
+}
+
+function enqueueClientMutation(accountId, operationId, mutationKind, payload = {}) {
+  const now = Date.now()
+  db.prepare(`
+    INSERT INTO client_mutation_outbox (operation_id, account_id, mutation_kind, payload_json, state, created_at, updated_at, error_code)
+    VALUES (?, ?, ?, ?, 'pending', ?, ?, NULL)
+    ON CONFLICT(operation_id) DO UPDATE SET
+      mutation_kind = excluded.mutation_kind,
+      payload_json = excluded.payload_json,
+      state = 'pending',
+      updated_at = excluded.updated_at,
+      error_code = NULL;
+  `).run(operationId, accountId, mutationKind, JSON.stringify(payload || {}), now, now)
+  return { operationId, queued: true }
+}
+
+function readPendingClientMutations(accountId, mutationKind = null) {
+  const rows = mutationKind
+    ? db.prepare(`
+        SELECT operation_id, mutation_kind, payload_json, created_at, updated_at, error_code
+        FROM client_mutation_outbox
+        WHERE account_id = ? AND mutation_kind = ? AND state = 'pending'
+        ORDER BY created_at ASC;
+      `).all(accountId, mutationKind)
+    : db.prepare(`
+        SELECT operation_id, mutation_kind, payload_json, created_at, updated_at, error_code
+        FROM client_mutation_outbox
+        WHERE account_id = ? AND state = 'pending'
+        ORDER BY created_at ASC;
+      `).all(accountId)
+  return rows.map((row) => {
+    let payload = {}
+    try {
+      payload = JSON.parse(row.payload_json || '{}')
+    } catch (_) {
+      payload = {}
+    }
+    return {
+      operationId: row.operation_id,
+      mutationKind: row.mutation_kind,
+      payload,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      errorCode: row.error_code || null
+    }
+  })
+}
+
+function markClientMutationDone(operationId) {
+  db.prepare(`DELETE FROM client_mutation_outbox WHERE operation_id = ?;`).run(operationId)
+}
+
+function markClientMutationFailed(operationId, errorCode) {
+  db.prepare(`
+    UPDATE client_mutation_outbox
+    SET error_code = ?, updated_at = ?
+    WHERE operation_id = ?;
+  `).run(errorCode ? String(errorCode) : 'UNKNOWN', Date.now(), operationId)
+}
+
+function savePreferences(accountId, preferences = {}) {
   const now = Date.now()
   withTransaction(() => {
+    const existing = db.prepare('SELECT history_enabled, manual_tags_json FROM account_preferences WHERE account_id = ?;').get(accountId)
+    let nextManualTags = []
+    if (Array.isArray(preferences.manualTags)) {
+      nextManualTags = preferences.manualTags
+    } else if (existing?.manual_tags_json) {
+      try {
+        nextManualTags = JSON.parse(existing.manual_tags_json)
+      } catch (_) {
+        nextManualTags = []
+      }
+    }
+    const nextHistory = typeof preferences.historyEnabled === 'boolean'
+      ? (preferences.historyEnabled ? 1 : 0)
+      : (existing ? existing.history_enabled : 1)
+
     const stmt = db.prepare(`
       INSERT INTO account_preferences (account_id, history_enabled, manual_tags_json, updated_at)
       VALUES (?, ?, ?, ?)
@@ -701,7 +817,7 @@ function savePreferences(accountId, preferences) {
         manual_tags_json = excluded.manual_tags_json,
         updated_at = excluded.updated_at;
     `)
-    stmt.run(accountId, historyVal, manualJson, now)
+    stmt.run(accountId, nextHistory, JSON.stringify(nextManualTags), now)
 
     if (typeof preferences.analysisEnabled === 'boolean') {
       ensureAccountV3State(accountId, now)
@@ -2573,10 +2689,17 @@ function listRecommendation(accountId, batchId = null, offset = 0, limit = 20) {
   }
 }
 
-function recordRecommendationFeedback(accountId, repoId, kind, eventId) {
+function recordRecommendationFeedback(accountId, repoId, kind, eventId, hiddenOverride = undefined) {
+  const normalizedRepoId = String(repoId || '').trim()
+  if (!normalizedRepoId) {
+    throw new Error('INVALID_REPO_ID')
+  }
+  const resolvedHidden = typeof hiddenOverride === 'boolean'
+    ? (hiddenOverride ? 1 : 0)
+    : (kind === 'hide' ? 1 : 0)
+  const resolvedEventId = String(eventId || `fb_${Date.now()}`).trim()
   withTransaction(() => {
     const now = Date.now()
-    const hidden = kind === 'hide' ? 1 : 0
     const stmt = db.prepare(`
       INSERT INTO recommendation_feedback (account_id, repo_id, hidden, event_id, updated_at)
       VALUES (?, ?, ?, ?, ?)
@@ -2585,9 +2708,79 @@ function recordRecommendationFeedback(accountId, repoId, kind, eventId) {
         event_id = excluded.event_id,
         updated_at = excluded.updated_at;
     `)
-    stmt.run(accountId, repoId, hidden, eventId, now)
+    stmt.run(accountId, normalizedRepoId, resolvedHidden, resolvedEventId, now)
     bumpRevision(accountId, 'feedback_revision')
   })
+  return {
+    recorded: true,
+    repoId: normalizedRepoId,
+    hidden: resolvedHidden === 1,
+    eventId: resolvedEventId
+  }
+}
+
+function listHiddenRecommendations(accountId) {
+  const rows = db.prepare(`
+    SELECT repo_id, event_id, updated_at
+    FROM recommendation_feedback
+    WHERE account_id = ? AND hidden = 1
+    ORDER BY updated_at DESC;
+  `).all(accountId)
+  if (!rows.length) return { items: [] }
+
+  const metadataMap = new Map()
+  const indexRepo = (repo) => {
+    if (!repo || typeof repo !== 'object') return
+    const keys = [repo.repoId, repo.canonicalKey, repo.fullName].filter(Boolean).map(String)
+    for (const k of keys) {
+      if (!metadataMap.has(k)) {
+        metadataMap.set(k, {
+          fullName: repo.fullName || repo.canonicalKey || null,
+          name: repo.name || null,
+          description: repo.description || null,
+          language: repo.language || null,
+          htmlUrl: repo.htmlUrl || null
+        })
+      }
+    }
+  }
+
+  for (const r of db.prepare(`
+    SELECT repo_id, repository_json
+    FROM recommendation_items
+    WHERE batch_id IN (SELECT batch_id FROM recommendation_batches WHERE account_id = ?)
+    ORDER BY position ASC
+    LIMIT 400;
+  `).all(accountId)) {
+    try { indexRepo(JSON.parse(r.repository_json)) } catch (_) {}
+  }
+
+  for (const r of db.prepare(`SELECT result_json FROM discovery_cache WHERE account_id = ? LIMIT 100;`).all(accountId)) {
+    try {
+      const items = JSON.parse(r.result_json || '[]')
+      if (Array.isArray(items)) items.forEach(indexRepo)
+    } catch (_) {}
+  }
+
+  for (const r of db.prepare(`SELECT repository_json FROM browse_history WHERE account_id = ? ORDER BY last_viewed_at DESC LIMIT 200;`).all(accountId)) {
+    try { indexRepo(JSON.parse(r.repository_json)) } catch (_) {}
+  }
+
+  const items = rows.map((row) => {
+    const key = String(row.repo_id)
+    const meta = metadataMap.get(key) || null
+    return {
+      repoId: key,
+      eventId: row.event_id,
+      updatedAt: row.updated_at,
+      fullName: meta?.fullName || null,
+      name: meta?.name || null,
+      description: meta?.description || null,
+      language: meta?.language || null,
+      htmlUrl: meta?.htmlUrl || null
+    }
+  })
+  return { items }
 }
 
 function saveDiscoveryCache(accountId, queryKey, queryJson, resultJson, fetchedAt, expiresAt) {
@@ -2744,6 +2937,21 @@ parentPort.on('message', (msg) => {
       case 'markCollectionCloudSynced':
         result = markCollectionCloudSynced(payload.accountId, payload.collectionKind, payload.result)
         break
+      case 'readCloudPreferencesSyncPayload':
+        result = readCloudPreferencesSyncPayload(payload.accountId)
+        break
+      case 'enqueueClientMutation':
+        result = enqueueClientMutation(payload.accountId, payload.operationId, payload.mutationKind, payload.payload)
+        break
+      case 'readPendingClientMutations':
+        result = readPendingClientMutations(payload.accountId, payload.mutationKind || null)
+        break
+      case 'markClientMutationDone':
+        markClientMutationDone(payload.operationId)
+        break
+      case 'markClientMutationFailed':
+        markClientMutationFailed(payload.operationId, payload.errorCode)
+        break
       case 'readUnprocessedEvents':
         result = readUnprocessedEvents(payload.accountId)
         break
@@ -2790,7 +2998,10 @@ parentPort.on('message', (msg) => {
         result = listRecommendation(payload.accountId, payload.batchId, payload.offset, payload.limit)
         break
       case 'recordRecommendationFeedback':
-        recordRecommendationFeedback(payload.accountId, payload.repoId, payload.kind, payload.eventId)
+        result = recordRecommendationFeedback(payload.accountId, payload.repoId, payload.kind, payload.eventId, payload.hidden)
+        break
+      case 'listHiddenRecommendations':
+        result = listHiddenRecommendations(payload.accountId)
         break
       case 'saveDiscoveryCache':
         saveDiscoveryCache(payload.accountId, payload.queryKey, payload.queryJson, payload.resultJson, payload.fetchedAt, payload.expiresAt)

@@ -10,7 +10,8 @@ import {
   computeAndCommitProfile,
   computeAndCommitRanking,
   listRecommendation,
-  recordFeedback
+  recordFeedback,
+  listHiddenRecommendations
 } from '../services/recommendation'
 import { planDiscoveryQueries } from '../../shared/recommendation/recall'
 import { refreshPersonalizedCandidates } from '../services/discovery'
@@ -43,7 +44,9 @@ export const useFeedStore = defineStore('feed', {
     searchPageCursors: {},
     recentQueryStrings: [],
     searchSummary: null,
-    refreshSeq: 0
+    refreshSeq: 0,
+    hiddenItems: [],
+    hiddenLoading: false
   }),
 
   getters: {
@@ -73,6 +76,7 @@ export const useFeedStore = defineStore('feed', {
       this.processedThrough = 0
       this.unprocessedEventCount = 0
       this.searchRound = 0
+      this.hiddenItems = []
       this.searchPageCursors = {}
       this.recentQueryStrings = []
       this.searchSummary = null
@@ -216,12 +220,44 @@ export const useFeedStore = defineStore('feed', {
         const rankSnapshot = await createSnapshot('ranking', advanceSearch ? 'explore_ranking' : 'ranking_compute')
         if (isStaleRun()) return
 
+        const rankCloudState = rankSnapshot.cloudPortraitState || userStore.cloudPortrait || cloudState
+        const effectiveUseCloud = Boolean(
+          userStore.preferences?.analysisEnabled !== false &&
+          rankSnapshot.cloudPortrait &&
+          rankCloudState &&
+          (rankCloudState.status === 'ready' || rankCloudState.status === 'stale')
+        )
+
+        this.portraitStatus = rankCloudState?.status || this.portraitStatus
+        this.processedThrough = Number(rankSnapshot.processedThrough ?? this.processedThrough ?? 0)
+        this.unprocessedEventCount = Array.isArray(rankSnapshot.unprocessedEvents)
+          ? rankSnapshot.unprocessedEvents.length
+          : this.unprocessedEventCount
+
+        let rankingProfile = effectiveUseCloud ? rankSnapshot.cloudPortrait : activeProfile
+        if (effectiveUseCloud) {
+          this.rankingSource = 'cloud_portrait'
+          this.modelVersion = rankCloudState.modelVersion || rankSnapshot.cloudPortrait.modelVersion || this.modelVersion
+          this.generationId = rankCloudState.generationId || rankSnapshot.cloudPortrait.generationId || this.generationId
+          this.recProfile = rankingProfile
+        } else if (canUseCloudPortrait || !rankingProfile) {
+          const fallbackCommit = await computeAndCommitProfile(rankSnapshot)
+          if (isStaleRun()) return
+          rankingProfile = fallbackCommit.profile
+          this.recProfile = rankingProfile
+          this.rankingSource = (this.unprocessedEventCount > 0 && (!rankingProfile?.evidenceRepos || rankingProfile.evidenceRepos.length === 0))
+            ? 'recent_only'
+            : 'local_baseline'
+          this.modelVersion = 'local-baseline-v1'
+          this.generationId = null
+        }
+
         const rankCommit = await computeAndCommitRanking(
           rankSnapshot,
-          canUseCloudPortrait ? rankSnapshot.cloudPortrait : activeProfile,
+          rankingProfile,
           {
-            cloudPortrait: canUseCloudPortrait ? rankSnapshot.cloudPortrait : null,
-            featureSpace: canUseCloudPortrait ? rankSnapshot.featureSpace : null,
+            cloudPortrait: effectiveUseCloud ? rankSnapshot.cloudPortrait : null,
+            featureSpace: effectiveUseCloud ? rankSnapshot.featureSpace : null,
             unprocessedEvents: rankSnapshot.unprocessedEvents || [],
             processedThrough: rankSnapshot.processedThrough || 0
           }
@@ -237,7 +273,7 @@ export const useFeedStore = defineStore('feed', {
 
         const { batch } = rankCommit
         this.recBatchId = batch.batchId
-        if (batch.modelVersion && canUseCloudPortrait) {
+        if (batch.modelVersion && effectiveUseCloud) {
           this.modelVersion = batch.modelVersion
         }
         this.unprocessedEventCount = batch.unprocessedEventCount ?? this.unprocessedEventCount
@@ -289,14 +325,47 @@ export const useFeedStore = defineStore('feed', {
       }
     },
 
+    async loadHiddenRecommendations() {
+      this.hiddenLoading = true
+      try {
+        const items = await listHiddenRecommendations()
+        this.hiddenItems = Array.isArray(items) ? items : []
+        return this.hiddenItems
+      } catch (err) {
+        console.warn('[FeedStore] 读取已隐藏推荐列表失败:', err.message)
+        return this.hiddenItems
+      } finally {
+        this.hiddenLoading = false
+      }
+    },
+
     async hideRecommendation(repoId) {
+      const normalizedId = String(repoId)
       try {
         // 隐藏反馈会提升 feedback_revision，使正在进行的旧计算输入失效
         this.refreshSeq += 1
-        await recordFeedback(repoId, 'hide')
-        this.recItems = this.recItems.filter(item => item.repoId !== repoId && item.repository?.repoId !== repoId)
+        await recordFeedback(normalizedId, 'hide', null, { hidden: true })
+        this.recItems = this.recItems.filter(item =>
+          String(item.repoId) !== normalizedId &&
+          String(item.repository?.repoId || '') !== normalizedId &&
+          String(item.repository?.canonicalKey || '') !== normalizedId
+        )
+        await this.loadHiddenRecommendations()
       } catch (err) {
         console.warn('[FeedStore] 隐藏候选失败:', err.message)
+      }
+    },
+
+    async unhideRecommendation(repoId) {
+      const normalizedId = String(repoId)
+      try {
+        this.refreshSeq += 1
+        await recordFeedback(normalizedId, 'unhide', null, { hidden: false })
+        this.hiddenItems = this.hiddenItems.filter(item => String(item.repoId) !== normalizedId)
+        await this.refreshRecommendations(0, { advanceSearch: false })
+      } catch (err) {
+        console.warn('[FeedStore] 解除隐藏候选失败:', err.message)
+        throw err
       }
     }
   }

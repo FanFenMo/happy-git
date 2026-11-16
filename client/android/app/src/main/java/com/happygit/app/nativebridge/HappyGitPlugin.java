@@ -432,10 +432,29 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "recommendation.feedback": {
-                localRepository.recordRecommendationFeedback(accountId, payload.getString("repoId"), payload.getString("kind"), payload.getString("eventId", "fb_" + System.currentTimeMillis()));
-                JSObject res = new JSObject();
-                res.put("recorded", true);
-                resolveSuccess(call, res);
+                Boolean hiddenOverride = (payload.has("hidden") && !payload.isNull("hidden"))
+                        ? payload.getBoolean("hidden")
+                        : null;
+                String eventId = payload.getString("eventId", "fb_" + System.currentTimeMillis());
+                JSONObject fbRes = localRepository.recordRecommendationFeedback(
+                        accountId,
+                        payload.getString("repoId"),
+                        payload.optString("kind", ""),
+                        eventId,
+                        hiddenOverride
+                );
+                backgroundExecutor.execute(() -> {
+                    try {
+                        cloudService.syncFeedbackPreferences(accountId, fbRes.optString("eventId", eventId));
+                    } catch (Exception ignored) {}
+                });
+                resolveSuccess(call, new JSObject(fbRes.toString()));
+                break;
+            }
+
+            case "recommendation.listHidden": {
+                JSONObject hiddenRes = localRepository.listHiddenRecommendations(accountId);
+                resolveSuccess(call, new JSObject(hiddenRes.toString()));
                 break;
             }
 
@@ -585,6 +604,7 @@ public class HappyGitPlugin extends Plugin {
             case "recommendation.commit":
             case "recommendation.list":
             case "recommendation.feedback":
+            case "recommendation.listHidden":
             case "cloud.auth.begin":
             case "cloud.auth.poll":
             case "cloud.session.restore":

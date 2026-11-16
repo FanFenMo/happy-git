@@ -77,6 +77,7 @@ export const OPERATIONS = {
   RECOMMENDATION_COMMIT: 'recommendation.commit',
   RECOMMENDATION_LIST: 'recommendation.list',
   RECOMMENDATION_FEEDBACK: 'recommendation.feedback',
+  RECOMMENDATION_LIST_HIDDEN: 'recommendation.listHidden',
   REPOSITORY_OPEN: 'repository.open',
   // 第一轮新增：云端应用会话、按次事件上传与兴趣分析控制契约
   CLOUD_AUTH_BEGIN: 'cloud.auth.begin',

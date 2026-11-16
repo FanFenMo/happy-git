@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import shlex
 import subprocess
 import sys
@@ -288,6 +289,120 @@ def load_predictions_map(path: Path) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+def run_prediction_command(
+    cmd_template: str,
+    dataset_dir: Path,
+    split: str,
+    output_path: Path,
+    evidence_path: Path,
+) -> Tuple[bool, int, Optional[str]]:
+    formatted = cmd_template.format(
+        dataset_dir=str(dataset_dir),
+        split=split,
+        output=str(output_path),
+        evidence_file=str(evidence_path),
+    )
+    tokens = shlex.split(formatted, posix=(os.name != "nt"))
+    cleaned_tokens = [
+        tok[1:-1] if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ('"', "'") else tok
+        for tok in tokens
+    ]
+    started = time.perf_counter()
+    proc = subprocess.run(
+        cleaned_tokens,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    if proc.returncode != 0:
+        return False, duration_ms, f"command failed ({proc.returncode}): {proc.stderr.strip()}"
+    return True, duration_ms, None
+
+
+def export_blind_review_sample(
+    output_dir: Path,
+    evidence_by_id: Dict[str, Dict[str, Any]],
+    predictions_by_method: Dict[str, Dict[str, Dict[str, Any]]],
+    sample_count: int = 15,
+    seed: int = 42,
+) -> Optional[Dict[str, Any]]:
+    if sample_count <= 0 or len(predictions_by_method) < 2:
+        return None
+    method_names = sorted(predictions_by_method.keys())
+    eligible_sids = [
+        sid for sid in sorted(evidence_by_id)
+        if sum(1 for m in method_names if sid in predictions_by_method[m]) >= 2
+    ]
+    if not eligible_sids:
+        return None
+
+    rng = random.Random(seed)
+    chosen_sids = list(eligible_sids)
+    if len(chosen_sids) > sample_count:
+        rng.shuffle(chosen_sids)
+        chosen_sids = sorted(chosen_sids[:sample_count])
+
+    samples: List[Dict[str, Any]] = []
+    unblind_key: Dict[str, Dict[str, str]] = {}
+
+    for sid in chosen_sids:
+        row = evidence_by_id[sid]
+        ev = row.get("evidence") or {}
+        avail_methods = [m for m in method_names if sid in predictions_by_method[m]]
+        shuffled = list(avail_methods)
+        rng.shuffle(shuffled)
+
+        anon_entries = []
+        mapping: Dict[str, str] = {}
+        for idx, m_name in enumerate(shuffled):
+            blind_id = f"method_{chr(ord('A') + idx)}"
+            pred = predictions_by_method[m_name][sid]
+            mapping[blind_id] = m_name
+            anon_entries.append({
+                "blindLabel": blind_id,
+                "status": pred.get("status", "ready"),
+                "languages": pred.get("languages") or {},
+                "topics": pred.get("topics") or {},
+                "topInterests": pred.get("topInterests") or [],
+                "evidenceRepos": pred.get("evidenceRepos") or [],
+            })
+
+        unblind_key[sid] = mapping
+        samples.append({
+            "subjectId": sid,
+            "evidenceHash": row.get("evidenceHash"),
+            "repositorySummary": [
+                {
+                    "repoId": str(r.get("repoId")),
+                    "fullName": r.get("fullName"),
+                    "primaryLanguage": r.get("primaryLanguage"),
+                    "topics": (r.get("topics") or [])[:8],
+                    "sources": r.get("sources") or [],
+                }
+                for r in (ev.get("repositories") or [])[:12]
+                if isinstance(r, dict)
+            ],
+            "blindCandidates": anon_entries,
+        })
+
+    sample_path = output_dir / "blind-review-sample.jsonl"
+    key_path = output_dir / "blind-review-key.json"
+    write_jsonl(sample_path, samples)
+    key_path.write_text(json.dumps({
+        "seed": seed,
+        "sampleCount": len(samples),
+        "methodsCompared": method_names,
+        "mappingBySubject": unblind_key,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "sampleCount": len(samples),
+        "sampleFile": "blind-review-sample.jsonl",
+        "keyFile": "blind-review-key.json",
+    }
+
+
 def render_markdown_report(report: Dict[str, Any]) -> str:
     lines: List[str] = []
     lines.append("# HappyGit 画像评测报告 (Experiment Report)")
@@ -363,11 +478,13 @@ def run_experiment_pipeline(
     taxonomy_path: Path = DEFAULT_TAXONOMY_PATH,
     aliases_path: Optional[Path] = None,
     baseline_predictions_path: Optional[Path] = None,
+    baseline_cmd: Optional[str] = None,
     learned_predictions_path: Optional[Path] = None,
     learned_cmd: Optional[str] = None,
     llm_predictions_path: Optional[Path] = None,
     run_llm_api: bool = False,
     subset_repeats: int = 0,
+    blind_review_count: int = 15,
 ) -> Dict[str, Any]:
     dataset_dir = dataset_dir.resolve()
     output_dir = output_dir.resolve()
@@ -421,6 +538,16 @@ def run_experiment_pipeline(
     predictions_by_method: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     # 1. Baseline method
+    base_out_path = preds_dir / "baseline_local_v1.jsonl"
+    base_ms = 0
+    if baseline_cmd:
+        ok, base_ms, base_err = run_prediction_command(
+            baseline_cmd, dataset_dir, split, base_out_path, evidence_path
+        )
+        if not ok:
+            raise RuntimeError(f"baseline_cmd failed: {base_err}")
+        baseline_predictions_path = base_out_path
+
     t0 = time.perf_counter()
     if baseline_predictions_path:
         base_map = load_predictions_map(baseline_predictions_path)
@@ -429,8 +556,8 @@ def run_experiment_pipeline(
             sid: run_rule_baseline_for_subject(row, aliases)
             for sid, row in evidence_by_id.items()
         }
-    base_ms = int((time.perf_counter() - t0) * 1000)
-    write_jsonl(preds_dir / "baseline_local_v1.jsonl", [base_map[sid] for sid in sorted(base_map)])
+    base_ms = base_ms or int((time.perf_counter() - t0) * 1000)
+    write_jsonl(base_out_path, [base_map[sid] for sid in sorted(base_map)])
     base_eval = [
         evaluate_subject_prediction(
             base_map[sid],
@@ -443,10 +570,11 @@ def run_experiment_pipeline(
         for sid in sorted(evidence_by_id)
         if sid in base_map
     ]
+    base_ver = next((p.get("modelVersion") for p in base_map.values() if p.get("modelVersion")), "baseline-local-v1")
     predictions_by_method["baseline_local_v1"] = base_map
     methods_report["baseline_local_v1"] = {
         "status": "completed",
-        "modelVersion": "baseline-local-v1",
+        "modelVersion": base_ver,
         "durationMs": base_ms,
         "predictionsFile": "predictions/baseline_local_v1.jsonl",
         "metrics": aggregate_metrics(base_eval),
@@ -458,23 +586,10 @@ def run_experiment_pipeline(
     learned_error = None
     learned_duration = 0
     if learned_cmd:
-        t1 = time.perf_counter()
-        formatted_cmd = learned_cmd.format(
-            dataset_dir=str(dataset_dir),
-            split=split,
-            output=str(learned_out_path),
-            evidence_file=str(evidence_path),
+        ok, learned_duration, learned_error = run_prediction_command(
+            learned_cmd, dataset_dir, split, learned_out_path, evidence_path
         )
-        proc = subprocess.run(
-            shlex.split(formatted_cmd),
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-        )
-        learned_duration = int((time.perf_counter() - t1) * 1000)
-        if proc.returncode != 0:
-            learned_error = f"learned_cmd failed ({proc.returncode}): {proc.stderr.strip()}"
-        else:
+        if ok:
             learned_predictions_path = learned_out_path
 
     if learned_predictions_path and learned_predictions_path.exists():
@@ -632,6 +747,13 @@ def run_experiment_pipeline(
                 predictions_by_method[m_a], predictions_by_method[m_b], aliases=aliases
             )
 
+    blind_review = export_blind_review_sample(
+        output_dir,
+        evidence_by_id,
+        predictions_by_method,
+        sample_count=blind_review_count,
+    )
+
     report = {
         "schemaVersion": "1.0.0",
         "metadata": {
@@ -645,6 +767,7 @@ def run_experiment_pipeline(
             "promptsFileSha256": file_sha256(prompts_path),
             "aliasesTaxonomyVersion": aliases.get("taxonomyVersion"),
             "referenceTime": dataset_manifest.get("referenceTime"),
+            "blindReview": blind_review,
         },
         "methods": methods_report,
         "pairwiseAgreement": pairwise,
@@ -664,11 +787,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--taxonomy", default=DEFAULT_TAXONOMY_PATH, type=Path, help="Path to public taxonomy.json")
     parser.add_argument("--aliases", default=None, type=Path, help="Path to frozen taxonomy_aliases.json")
     parser.add_argument("--baseline-predictions", default=None, type=Path, help="Optional JSONL of external baseline predictions")
+    parser.add_argument("--baseline-cmd", default=None, type=str, help="Optional CLI command template to invoke baseline inference")
     parser.add_argument("--learned-predictions", default=None, type=Path, help="Optional JSONL of A's learned model predictions")
     parser.add_argument("--learned-cmd", default=None, type=str, help="Optional CLI command template to invoke A's learned inference")
     parser.add_argument("--llm-predictions", default=None, type=Path, help="Optional JSONL of LLM reference predictions")
     parser.add_argument("--run-llm-api", action="store_true", help="Actually call external LLM API using env vars (Round 3)")
     parser.add_argument("--subset-repeats", type=int, default=0, help="Repeat calls on fixed subset to report LLM variance")
+    parser.add_argument("--blind-review-count", type=int, default=15, help="Export anonymized blind spot-check sample count (0 to disable)")
 
     args = parser.parse_args(argv)
     report = run_experiment_pipeline(
@@ -678,11 +803,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         taxonomy_path=args.taxonomy,
         aliases_path=args.aliases,
         baseline_predictions_path=args.baseline_predictions,
+        baseline_cmd=args.baseline_cmd,
         learned_predictions_path=args.learned_predictions,
         learned_cmd=args.learned_cmd,
         llm_predictions_path=args.llm_predictions,
         run_llm_api=args.run_llm_api,
         subset_repeats=args.subset_repeats,
+        blind_review_count=args.blind_review_count,
     )
     print(json.dumps({
         "datasetVersion": report["metadata"]["datasetVersion"],

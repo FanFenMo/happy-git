@@ -688,6 +688,19 @@ export function createRecommendationBatch({
     now
   })
 
+  const recentUnprocessedKeys = new Set()
+  for (const ev of (unprocessedEvents || [])) {
+    if (!ev || ev.recordKind === 'discard') continue
+    const seq = Number(ev.deviceSeq || 0)
+    if (effectiveProcessedThrough > 0 && seq > 0 && seq <= effectiveProcessedThrough) continue
+    const evTime = Number(ev.effectiveAt || ev.occurredAt || 0)
+    if (!evTime || (now - evTime) <= MS_PER_DAY) {
+      if (ev.repoId != null) recentUnprocessedKeys.add(String(ev.repoId))
+      if (ev.canonicalKey) recentUnprocessedKeys.add(String(ev.canonicalKey).toLowerCase())
+      if (ev.fullName) recentUnprocessedKeys.add(String(ev.fullName).toLowerCase())
+    }
+  }
+
   const scored = []
   const seenKeys = new Set()
 
@@ -713,12 +726,18 @@ export function createRecommendationBatch({
     seenKeys.add(key)
 
     const histEntry = historyMap.get(cand.canonicalKey) || (cand.repoId ? historyMap.get(String(cand.repoId)) : null)
-    const openedRecent = Boolean(
+    const openedFromHistory = Boolean(
       histEntry && (
         !histEntry.lastViewedAt ||
         (now - Number(histEntry.lastViewedAt)) <= MS_PER_DAY
       )
     )
+    const openedFromIncrement = Boolean(
+      (cand.repoId && recentUnprocessedKeys.has(String(cand.repoId))) ||
+      (cand.canonicalKey && recentUnprocessedKeys.has(String(cand.canonicalKey).toLowerCase())) ||
+      (cand.fullName && recentUnprocessedKeys.has(String(cand.fullName).toLowerCase()))
+    )
+    const openedRecent = openedFromHistory || openedFromIncrement
 
     const { baseScore, parts } = scoreCandidate(activeProfile, cand, now, openedRecent, {
       featureSpace: effectiveFeatureSpace,

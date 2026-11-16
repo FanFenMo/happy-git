@@ -127,6 +127,52 @@ class ExperimentRunnerTest(unittest.TestCase):
             self.assertIn("baseline_local_v1__vs__learned_model", report["pairwiseAgreement"])
             self.assertTrue((out_dir / "report.md").exists())
             self.assertTrue((out_dir / "llm-prompts.jsonl").exists())
+            # Verify anonymized blind spot-check export contains zero method names or leakage
+            blind_sample_path = out_dir / "blind-review-sample.jsonl"
+            blind_key_path = out_dir / "blind-review-key.json"
+            self.assertTrue(blind_sample_path.exists())
+            self.assertTrue(blind_key_path.exists())
+            blind_text = blind_sample_path.read_text(encoding="utf-8")
+            self.assertNotIn("baseline_local_v1", blind_text)
+            self.assertNotIn("learned_model", blind_text)
+            self.assertNotIn("llm_reference", blind_text)
+            self.assertNotIn("mr-content-v2-data2", blind_text)
+            self.assertNotIn("gpt-ref-test", blind_text)
+
+    def test_baseline_cmd_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            adapter_script = tmp_dir / "mock_baseline.py"
+            adapter_script.write_text(
+                "\n".join([
+                    "import json, sys",
+                    "from pathlib import Path",
+                    "ev_path, out_path = Path(sys.argv[1]), Path(sys.argv[2])",
+                    "rows = [json.loads(l) for l in ev_path.read_text(encoding='utf-8').splitlines() if l.strip()]",
+                    "out = []",
+                    "for r in rows:",
+                    "    repos = (r.get('evidence') or {}).get('repositories') or []",
+                    "    if not repos:",
+                    "        out.append({'subjectId': r['subjectId'], 'modelVersion': 'cmd-base-v1', 'status': 'empty', 'languages': {}, 'topics': {}, 'topInterests': [], 'evidenceRepos': []})",
+                    "    else:",
+                    "        rid = str(repos[0]['repoId'])",
+                    "        out.append({'subjectId': r['subjectId'], 'modelVersion': 'cmd-base-v1', 'status': 'ready', 'languages': {'Python': 1.0}, 'topics': {'llm': 1.0}, 'topInterests': [{'tag': 'llm', 'score': 1.0, 'evidenceRepos': [rid]}], 'evidenceRepos': [rid]})",
+                    "out_path.write_text('\\n'.join(json.dumps(x) for x in out) + '\\n', encoding='utf-8')",
+                ]),
+                encoding="utf-8",
+            )
+            out_dir = tmp_dir / "cmd-out"
+            cmd_tpl = f'"{sys.executable}" "{adapter_script}" "{{evidence_file}}" "{{output}}"'
+            report = run_experiment_pipeline(
+                dataset_dir=PILOT_FIXTURE_DIR,
+                output_dir=out_dir,
+                split="test",
+                baseline_cmd=cmd_tpl,
+                blind_review_count=0,
+            )
+            self.assertEqual(report["methods"]["baseline_local_v1"]["modelVersion"], "cmd-base-v1")
+            self.assertEqual(report["methods"]["baseline_local_v1"]["status"], "completed")
+            self.assertIsNone(report["metadata"]["blindReview"])
 
 
 if __name__ == "__main__":

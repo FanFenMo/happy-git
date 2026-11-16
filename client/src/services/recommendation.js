@@ -144,15 +144,27 @@ export async function listRecommendation(batchId = null, offset = 0, limit = 20)
   return res.data
 }
 
-export async function recordFeedback(repoId, kind = 'hide', eventId = null) {
+export async function recordFeedback(repoId, kind = 'hide', eventId = null, options = {}) {
   const invoke = nativeBridge.capture()
+  const hidden = typeof options?.hidden === 'boolean' ? options.hidden : (kind === 'hide')
   const res = await invoke(OPERATIONS.RECOMMENDATION_FEEDBACK, {
-    repoId,
-    kind,
+    repoId: String(repoId),
+    kind: hidden ? 'hide' : 'unhide',
+    hidden,
     eventId: eventId || `fb_${Date.now()}`
   })
   if (!res.ok) {
     throw new Error(res.error?.message || '记录反馈失败')
   }
   return res.data
+}
+
+export async function listHiddenRecommendations() {
+  const invoke = nativeBridge.capture()
+  const res = await invoke(OPERATIONS.RECOMMENDATION_LIST_HIDDEN)
+  if (!res.ok) {
+    throw new Error(res.error?.message || '读取已隐藏推荐列表失败')
+  }
+  if (Array.isArray(res.data)) return res.data
+  return Array.isArray(res.data?.items) ? res.data.items : []
 }

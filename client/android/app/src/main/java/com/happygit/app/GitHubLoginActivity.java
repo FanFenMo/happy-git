@@ -104,7 +104,7 @@ public class GitHubLoginActivity extends Activity {
         root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
 
-        webView.loadURL("https://github.com/login");
+        webView.loadUrl("https://github.com/login");
     }
 
     private void checkIdentity() {

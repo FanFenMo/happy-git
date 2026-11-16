@@ -326,7 +326,7 @@ public class CloudService {
 
                 JSONObject req = new JSONObject();
                 req.put("requestId", batch.getString("requestId"));
-                req.put("streamEpoch", batch.getLong("streamEpoch"));
+                req.put("streamEpoch", batch.getString("streamEpoch"));
                 req.put("analysisEpoch", batch.getLong("analysisEpoch"));
                 req.put("firstSeq", batch.getLong("firstSeq"));
                 req.put("events", batch.getJSONArray("events"));
@@ -372,8 +372,9 @@ public class CloudService {
             JSONObject prep = localRepository.readCollectionForCloudSync(accountId, kind);
             if (!prep.optBoolean("shouldUpload", false)) continue;
             JSONObject req = new JSONObject();
-            req.put("operationId", prep.getString("operationId"));
-            req.put("expectedRevision", prep.getLong("expectedRevision"));
+            JSONObject preferences = requestJson("/api/v2/me/preferences", "GET", token, null);
+            req.put("operationId", prep.getString("operationId") + "_" + preferences.getLong("revision"));
+            req.put("expectedRevision", preferences.getLong("revision"));
             req.put("analysisEpoch", prep.getLong("analysisEpoch"));
             req.put("collectionKind", kind);
             req.put("complete", true);
@@ -399,18 +400,15 @@ public class CloudService {
             if (state != null && state.optBoolean("cloudBound") && state.optBoolean("accountMatched")) {
                 String token = getValidAccessToken(accountId);
                 if (token != null) {
-                    try {
-                        JSONObject req = new JSONObject();
-                        req.put("operationId", "pref_" + accountId + "_" + System.currentTimeMillis());
-                        req.put("analysisEnabled", payload.optBoolean("analysisEnabled", true));
-                        JSONObject res = requestJson("/api/v2/me/preferences", "PUT", token, req);
-                        if (res.has("analysisEpoch")) {
-                            JSONObject srv = new JSONObject();
-                            srv.put("streamEpoch", state.getLong("streamEpoch"));
-                            srv.put("analysisEpoch", res.getLong("analysisEpoch"));
-                            localRepository.syncCloudStreamState(accountId, srv);
-                        }
-                    } catch (Exception ignored) {}
+                    JSONObject preferences = requestJson("/api/v2/me/preferences", "GET", token, null);
+                    JSONObject req = new JSONObject();
+                    req.put("operationId", "pref_" + accountId + "_" + System.currentTimeMillis());
+                    req.put("expectedRevision", preferences.getLong("revision"));
+                    req.put("analysisEnabled", payload.optBoolean("analysisEnabled", true));
+                    req.put("manualTags", payload.has("manualTags") ? payload.getJSONArray("manualTags") : preferences.optJSONArray("manualTags"));
+                    req.put("hiddenRepoIds", payload.has("hiddenRepoIds") ? payload.getJSONArray("hiddenRepoIds") : preferences.optJSONArray("hiddenRepoIds"));
+                    requestJson("/api/v2/me/preferences", "PUT", token, req);
+                    registerDeviceAndSyncStream(accountId);
                 }
             }
         }
@@ -423,22 +421,19 @@ public class CloudService {
     public JSONObject resetAnalysis(String accountId) throws Exception {
         JSONObject state = localRepository.readCloudSyncState(accountId);
         long nextEpoch = (state != null ? state.optLong("analysisEpoch", 1) : 1) + 1;
-        if (state != null && state.optBoolean("cloudBound") && state.optBoolean("accountMatched")) {
+        boolean bound = state != null && state.optBoolean("cloudBound") && state.optBoolean("accountMatched");
+        if (bound) {
             String token = getValidAccessToken(accountId);
-            if (token != null) {
-                try {
-                    JSONObject req = new JSONObject();
-                    req.put("operationId", "reset_" + accountId + "_" + System.currentTimeMillis());
-                    JSONObject res = requestJson("/api/v2/me/analysis/reset", "POST", token, req);
-                    if (res.has("analysisEpoch")) nextEpoch = res.getLong("analysisEpoch");
-                } catch (Exception ignored) {}
-            }
+            if (token == null) throw new IllegalStateException("CLOUD_AUTH_REQUIRED");
+            JSONObject preferences = requestJson("/api/v2/me/preferences", "GET", token, null);
+            JSONObject req = new JSONObject();
+            req.put("expectedRevision", preferences.getLong("revision"));
+            req.put("operationId", "reset_" + accountId + "_" + System.currentTimeMillis());
+            JSONObject result = requestJson("/api/v2/me/analysis/reset", "POST", token, req);
+            nextEpoch = result.getLong("analysisEpoch");
         }
         localRepository.resetCloudAnalysisLocalState(accountId, nextEpoch);
-        try {
-            flushOutbox(accountId);
-        } catch (Exception ignored) {}
-
+        if (bound) registerDeviceAndSyncStream(accountId);
         JSONObject out = new JSONObject();
         out.put("reset", true);
         out.put("analysisEpoch", nextEpoch);

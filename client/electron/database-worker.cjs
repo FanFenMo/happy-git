@@ -15,7 +15,7 @@ function computeOpenPayloadHash(eventId, streamEpoch, deviceSeq, analysisEpoch, 
   const tuple = [
     '1.0.0',
     String(eventId),
-    Number(streamEpoch),
+    String(streamEpoch),
     Number(deviceSeq),
     Number(analysisEpoch),
     String(repoId),
@@ -29,7 +29,7 @@ function computeDiscardPayloadHash(eventId, streamEpoch, deviceSeq, analysisEpoc
   const tuple = [
     '1.0.0',
     String(eventId),
-    Number(streamEpoch),
+    String(streamEpoch),
     Number(deviceSeq),
     Number(analysisEpoch),
     'discard'
@@ -1259,7 +1259,7 @@ function saveCloudAccountState(accountId, patch = {}) {
     const now = Date.now()
     const nextSubjectId = patch.subjectId !== undefined ? patch.subjectId : curr.subject_id
     const nextDeviceId = patch.deviceId !== undefined ? patch.deviceId : curr.device_id
-    const nextStreamEpoch = patch.streamEpoch !== undefined ? Number(patch.streamEpoch) : curr.stream_epoch
+    const nextStreamEpoch = patch.streamEpoch !== undefined ? String(patch.streamEpoch) : curr.stream_epoch
     const nextAnalysisEpoch = patch.analysisEpoch !== undefined ? Number(patch.analysisEpoch) : curr.analysis_epoch
     const nextAnalysisEnabled = patch.analysisEnabled !== undefined ? (patch.analysisEnabled ? 1 : 0) : curr.analysis_enabled
     const nextCloudBound = patch.cloudBound !== undefined ? (patch.cloudBound ? 1 : 0) : curr.cloud_bound
@@ -1298,10 +1298,10 @@ function syncCloudStreamState(accountId, serverState = {}) {
   return withTransaction(() => {
     ensureAccountV3State(accountId)
     const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
-    const oldStreamEpoch = syncRow.stream_epoch
+    const oldStreamEpoch = String(syncRow.stream_epoch)
     const oldAnalysisEpoch = syncRow.analysis_epoch
 
-    const newStreamEpoch = Number(serverState.streamEpoch || oldStreamEpoch || 1)
+    const newStreamEpoch = String(serverState.streamEpoch || oldStreamEpoch || 1)
     const newAnalysisEpoch = Number(serverState.analysisEpoch || oldAnalysisEpoch || 1)
     const acceptedThrough = Number(serverState.acceptedThrough ?? syncRow.accepted_through ?? 0)
     const exportedThrough = Number(serverState.exportedThrough ?? syncRow.exported_through ?? 0)
@@ -1328,7 +1328,12 @@ function syncCloudStreamState(accountId, serverState = {}) {
       `).run(now, accountId, newStreamEpoch, acceptedThrough)
     }
 
-    // 若 streamEpoch 或 analysisEpoch 发生变化，将尚未确认的本地事件迁移到最新 epoch 并从 acceptedThrough + 1 连续编排
+    // 旧授权范围的未确认内容不进入新范围；同范围离线事件可接续到服务端分配的流。
+    if (oldAnalysisEpoch !== newAnalysisEpoch) {
+      db.prepare('DELETE FROM event_outbox WHERE account_id = ? AND acknowledged = 0 AND analysis_epoch != ?;').run(accountId, newAnalysisEpoch)
+    }
+
+    // 流发生变化时，从服务端已接收位置连续编排剩余事件。
     const pendingRows = db.prepare(`
       SELECT * FROM event_outbox
       WHERE account_id = ? AND acknowledged = 0
@@ -1446,7 +1451,7 @@ function readOutboxBatch(accountId, maxItems = 500, maxBytes = 1048576) {
   return withTransaction(() => {
     ensureAccountV3State(accountId)
     const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
-    const streamEpoch = syncRow.stream_epoch
+    const streamEpoch = String(syncRow.stream_epoch)
     const analysisEpoch = syncRow.analysis_epoch
     const expectedFirstSeq = (syncRow.accepted_through || 0) + 1
 
@@ -1477,7 +1482,10 @@ function readOutboxBatch(accountId, maxItems = 500, maxBytes = 1048576) {
             payloadHash: r.payload_hash
           }
         : {
+            schemaVersion: '1.0.0',
             eventId: r.event_id,
+            streamEpoch,
+            analysisEpoch,
             deviceSeq: r.device_seq,
             recordKind: 'open',
             repoId: r.repo_id,
@@ -1523,8 +1531,11 @@ function applyOutboxAck(accountId, ackPayload = {}) {
   return withTransaction(() => {
     ensureAccountV3State(accountId)
     const syncRow = db.prepare('SELECT * FROM local_sync_state WHERE account_id = ?;').get(accountId)
-    const streamEpoch = Number(ackPayload.streamEpoch || syncRow.stream_epoch)
+    const streamEpoch = String(ackPayload.streamEpoch || syncRow.stream_epoch)
     const analysisEpoch = Number(ackPayload.analysisEpoch || syncRow.analysis_epoch)
+    if (streamEpoch !== String(syncRow.stream_epoch) || analysisEpoch !== syncRow.analysis_epoch) {
+      return readCloudSyncState(accountId)
+    }
     const acceptedThrough = Math.max(syncRow.accepted_through || 0, Number(ackPayload.acceptedThrough || 0))
     const exportedThrough = Math.max(syncRow.exported_through || 0, Number(ackPayload.exportedThrough || 0))
     // 严格区分 acceptedThrough 与 processedThrough，绝不将上传 ACK 等同于已被离线画像消费

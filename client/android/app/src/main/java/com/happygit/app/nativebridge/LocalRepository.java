@@ -52,7 +52,7 @@ public class LocalRepository {
         }
     }
 
-    public static String computeOpenPayloadHash(String eventId, long streamEpoch, long deviceSeq, long analysisEpoch, String repoId, long occurredAt, String source) {
+    public static String computeOpenPayloadHash(String eventId, String streamEpoch, long deviceSeq, long analysisEpoch, String repoId, long occurredAt, String source) {
         JSONArray tuple = new JSONArray();
         tuple.put("1.0.0");
         tuple.put(eventId);
@@ -65,7 +65,7 @@ public class LocalRepository {
         return sha256Hex(tuple.toString());
     }
 
-    public static String computeDiscardPayloadHash(String eventId, long streamEpoch, long deviceSeq, long analysisEpoch) {
+    public static String computeDiscardPayloadHash(String eventId, String streamEpoch, long deviceSeq, long analysisEpoch) {
         JSONArray tuple = new JSONArray();
         tuple.put("1.0.0");
         tuple.put(eventId);
@@ -198,7 +198,7 @@ public class LocalRepository {
                 }
             }
 
-            long streamEpoch = 1;
+            String streamEpoch = "1";
             long analysisEpoch = 1;
             long nextDeviceSeq = 1;
             long acceptedThrough = 0;
@@ -211,7 +211,7 @@ public class LocalRepository {
 
             try (Cursor s = db.rawQuery("SELECT * FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
                 if (s.moveToFirst()) {
-                    streamEpoch = s.getLong(s.getColumnIndexOrThrow("stream_epoch"));
+                    streamEpoch = s.getString(s.getColumnIndexOrThrow("stream_epoch"));
                     analysisEpoch = s.getLong(s.getColumnIndexOrThrow("analysis_epoch"));
                     nextDeviceSeq = s.getLong(s.getColumnIndexOrThrow("next_device_seq"));
                     acceptedThrough = s.getLong(s.getColumnIndexOrThrow("accepted_through"));
@@ -769,12 +769,12 @@ public class LocalRepository {
                     if (ca.moveToFirst()) analysisEnabled = ca.getInt(0) == 1;
                 }
 
-                long streamEpoch = 1;
+                String streamEpoch = "1";
                 long analysisEpoch = 1;
                 long nextSeq = 1;
                 try (Cursor ls = db.rawQuery("SELECT stream_epoch, analysis_epoch, next_device_seq FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
                     if (ls.moveToFirst()) {
-                        streamEpoch = ls.getLong(0);
+                        streamEpoch = ls.getString(0);
                         analysisEpoch = ls.getLong(1);
                         nextSeq = ls.getLong(2);
                     }
@@ -894,19 +894,21 @@ public class LocalRepository {
                 : "SELECT event_id, stream_epoch, device_seq, analysis_epoch FROM event_outbox WHERE account_id = ? AND acknowledged = 0 AND record_kind = 'open'";
         String[] args = repoId != null ? new String[]{accountId, repoId} : new String[]{accountId};
 
+        List<String> streamIds = new ArrayList<>();
         List<long[]> seqInfo = new ArrayList<>();
         List<String> eventIds = new ArrayList<>();
         try (Cursor c = db.rawQuery(sql, args)) {
             while (c.moveToNext()) {
                 eventIds.add(c.getString(0));
-                seqInfo.add(new long[]{c.getLong(1), c.getLong(2), c.getLong(3)});
+                streamIds.add(c.getString(1));
+                seqInfo.add(new long[]{c.getLong(2), c.getLong(3)});
             }
         }
 
         for (int i = 0; i < eventIds.size(); i++) {
             String eid = eventIds.get(i);
             long[] info = seqInfo.get(i);
-            String discardHash = computeDiscardPayloadHash(eid, info[0], info[1], info[2]);
+            String discardHash = computeDiscardPayloadHash(eid, streamIds.get(i), info[0], info[1]);
             ContentValues upd = new ContentValues();
             upd.put("record_kind", "discard");
             upd.putNull("repo_id");
@@ -917,7 +919,7 @@ public class LocalRepository {
             upd.putNull("payload_json");
             upd.put("updated_at", now);
             db.update("event_outbox", upd, "account_id = ? AND stream_epoch = ? AND device_seq = ?",
-                    new String[]{accountId, String.valueOf(info[0]), String.valueOf(info[1])});
+                    new String[]{accountId, streamIds.get(i), String.valueOf(info[0])});
         }
 
         ContentValues clearFlight = new ContentValues();
@@ -1048,7 +1050,7 @@ public class LocalRepository {
                 if (patch.isNull("deviceId")) cv.putNull("device_id");
                 else cv.put("device_id", patch.optString("deviceId"));
             }
-            if (patch.has("streamEpoch")) cv.put("stream_epoch", patch.optLong("streamEpoch", 1));
+            if (patch.has("streamEpoch")) cv.put("stream_epoch", patch.optString("streamEpoch", "1"));
             if (patch.has("analysisEpoch")) cv.put("analysis_epoch", patch.optLong("analysisEpoch", 1));
             if (patch.has("analysisEnabled")) cv.put("analysis_enabled", patch.optBoolean("analysisEnabled", true) ? 1 : 0);
             if (patch.has("cloudBound")) cv.put("cloud_bound", patch.optBoolean("cloudBound", false) ? 1 : 0);
@@ -1069,6 +1071,57 @@ public class LocalRepository {
         return readCloudSyncState(accountId);
     }
 
+    private long rebasePendingOutbox(SQLiteDatabase db, String accountId, String streamEpoch,
+                                     long analysisEpoch, long acceptedThrough, long now) {
+        db.delete("event_outbox", "account_id = ? AND acknowledged = 0 AND analysis_epoch != ?",
+                new String[]{accountId, String.valueOf(analysisEpoch)});
+        List<ContentValues> pending = new ArrayList<>();
+        try (Cursor cursor = db.rawQuery("SELECT * FROM event_outbox WHERE account_id = ? AND acknowledged = 0 ORDER BY stream_epoch, device_seq",
+                new String[]{accountId})) {
+            while (cursor.moveToNext()) {
+                ContentValues row = new ContentValues();
+                android.database.DatabaseUtils.cursorRowToContentValues(cursor, row);
+                pending.add(row);
+            }
+        }
+        db.delete("event_outbox", "account_id = ? AND acknowledged = 0", new String[]{accountId});
+        long next = acceptedThrough + 1;
+        for (ContentValues row : pending) {
+            long seq = next++;
+            String eventId = row.getAsString("event_id");
+            row.put("stream_epoch", streamEpoch);
+            row.put("analysis_epoch", analysisEpoch);
+            row.put("device_seq", seq);
+            row.put("updated_at", now);
+            if ("open".equals(row.getAsString("record_kind"))) {
+                String repo = row.getAsString("repo_id"), source = row.getAsString("source");
+                long occurredAt = row.getAsLong("occurred_at");
+                String digest = computeOpenPayloadHash(eventId, streamEpoch, seq, analysisEpoch, repo, occurredAt, source);
+                try {
+                    JSONObject payload = new JSONObject();
+                    payload.put("schemaVersion", "1.0.0");
+                    payload.put("eventId", eventId);
+                    payload.put("streamEpoch", streamEpoch);
+                    payload.put("analysisEpoch", analysisEpoch);
+                    payload.put("deviceSeq", seq);
+                    payload.put("recordKind", "open");
+                    payload.put("repoId", repo);
+                    payload.put("occurredAt", occurredAt);
+                    payload.put("source", source);
+                    payload.put("entrySource", row.getAsString("entry_source"));
+                    payload.put("payloadHash", digest);
+                    row.put("payload_hash", digest);
+                    row.put("payload_json", payload.toString());
+                } catch (org.json.JSONException error) { throw new IllegalStateException(error); }
+            } else {
+                row.put("payload_hash", computeDiscardPayloadHash(eventId, streamEpoch, seq, analysisEpoch));
+                row.putNull("payload_json");
+            }
+            db.insertOrThrow("event_outbox", null, row);
+        }
+        return next;
+    }
+
     public synchronized JSONObject syncCloudStreamState(String accountId, JSONObject serverState) {
         SQLiteDatabase db = dbHelper.getWritableDatabase();
         db.beginTransaction();
@@ -1076,7 +1129,7 @@ public class LocalRepository {
             long now = System.currentTimeMillis();
             ensureAccountV3State(db, accountId, now);
 
-            long oldStreamEpoch = 1;
+            String oldStreamEpoch = "1";
             long oldAnalysisEpoch = 1;
             long nextDeviceSeq = 1;
             long curAccepted = 0;
@@ -1085,7 +1138,7 @@ public class LocalRepository {
 
             try (Cursor c = db.rawQuery("SELECT stream_epoch, analysis_epoch, next_device_seq, accepted_through, exported_through, processed_through FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
                 if (c.moveToFirst()) {
-                    oldStreamEpoch = c.getLong(0);
+                    oldStreamEpoch = c.getString(0);
                     oldAnalysisEpoch = c.getLong(1);
                     nextDeviceSeq = c.getLong(2);
                     curAccepted = c.getLong(3);
@@ -1094,7 +1147,7 @@ public class LocalRepository {
                 }
             }
 
-            long newStreamEpoch = serverState.optLong("streamEpoch", oldStreamEpoch);
+            String newStreamEpoch = serverState.optString("streamEpoch", oldStreamEpoch);
             long newAnalysisEpoch = serverState.optLong("analysisEpoch", oldAnalysisEpoch);
             long acceptedThrough = serverState.optLong("acceptedThrough", curAccepted);
             long exportedThrough = serverState.optLong("exportedThrough", curExported);
@@ -1113,7 +1166,7 @@ public class LocalRepository {
             accUpd.put("updated_at", now);
             db.update("cloud_account_state", accUpd, "account_id = ?", new String[]{accountId});
 
-            if (oldStreamEpoch == newStreamEpoch && acceptedThrough > 0) {
+            if (oldStreamEpoch.equals(newStreamEpoch) && acceptedThrough > 0) {
                 ContentValues ackCv = new ContentValues();
                 ackCv.put("acknowledged", 1);
                 ackCv.putNull("payload_json");
@@ -1123,6 +1176,9 @@ public class LocalRepository {
             }
 
             long finalNextSeq = Math.max(acceptedThrough + 1, nextDeviceSeq);
+            if (!oldStreamEpoch.equals(newStreamEpoch) || oldAnalysisEpoch != newAnalysisEpoch) {
+                finalNextSeq = rebasePendingOutbox(db, accountId, newStreamEpoch, newAnalysisEpoch, acceptedThrough, now);
+            }
             ContentValues syncUpd = new ContentValues();
             syncUpd.put("stream_epoch", newStreamEpoch);
             syncUpd.put("analysis_epoch", newAnalysisEpoch);
@@ -1151,7 +1207,7 @@ public class LocalRepository {
         db.beginTransaction();
         try {
             ensureAccountV3State(db, accountId, System.currentTimeMillis());
-            long streamEpoch = 1;
+            String streamEpoch = "1";
             long analysisEpoch = 1;
             long acceptedThrough = 0;
             String inFlightId = null;
@@ -1160,7 +1216,7 @@ public class LocalRepository {
 
             try (Cursor s = db.rawQuery("SELECT stream_epoch, analysis_epoch, accepted_through, in_flight_request_id, in_flight_first_seq, in_flight_last_seq FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
                 if (s.moveToFirst()) {
-                    streamEpoch = s.getLong(0);
+                    streamEpoch = s.getString(0);
                     analysisEpoch = s.getLong(1);
                     acceptedThrough = s.getLong(2);
                     inFlightId = s.isNull(3) ? null : s.getString(3);
@@ -1196,6 +1252,9 @@ public class LocalRepository {
                     ev.put("deviceSeq", seq);
                     ev.put("recordKind", kind);
                     if ("open".equals(kind)) {
+                        ev.put("schemaVersion", "1.0.0");
+                        ev.put("streamEpoch", streamEpoch);
+                        ev.put("analysisEpoch", analysisEpoch);
                         ev.put("repoId", c.getString(3));
                         ev.put("occurredAt", c.getLong(4));
                         ev.put("source", c.isNull(5) ? "browse" : c.getString(5));
@@ -1254,10 +1313,11 @@ public class LocalRepository {
             long now = System.currentTimeMillis();
             ensureAccountV3State(db, accountId, now);
 
-            long curStream = 1, curAnalysis = 1, curAccepted = 0, curExported = 0, curProcessed = 0;
+            String curStream = "1";
+            long curAnalysis = 1, curAccepted = 0, curExported = 0, curProcessed = 0;
             try (Cursor s = db.rawQuery("SELECT stream_epoch, analysis_epoch, accepted_through, exported_through, processed_through FROM local_sync_state WHERE account_id = ?", new String[]{accountId})) {
                 if (s.moveToFirst()) {
-                    curStream = s.getLong(0);
+                    curStream = s.getString(0);
                     curAnalysis = s.getLong(1);
                     curAccepted = s.getLong(2);
                     curExported = s.getLong(3);
@@ -1265,8 +1325,12 @@ public class LocalRepository {
                 }
             }
 
-            long streamEpoch = ackPayload.optLong("streamEpoch", curStream);
+            String streamEpoch = ackPayload.optString("streamEpoch", curStream);
             long analysisEpoch = ackPayload.optLong("analysisEpoch", curAnalysis);
+            if (!streamEpoch.equals(curStream) || analysisEpoch != curAnalysis) {
+                db.setTransactionSuccessful();
+                return readCloudSyncState(accountId);
+            }
             long acceptedThrough = Math.max(curAccepted, ackPayload.optLong("acceptedThrough", 0));
             long exportedThrough = Math.max(curExported, ackPayload.optLong("exportedThrough", 0));
             long processedThrough = ackPayload.has("processedThrough")

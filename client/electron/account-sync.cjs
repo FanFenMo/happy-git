@@ -4,12 +4,13 @@
  */
 
 class AccountSyncService {
-  constructor({ database, browser, scheduler, pageExecutorFactory, routes }) {
+  constructor({ database, browser, scheduler, pageExecutorFactory, routes, cloudService = null }) {
     this.database = database
     this.browser = browser
     this.scheduler = scheduler
     this.pageExecutorFactory = pageExecutorFactory
     this.routes = routes
+    this.cloudService = cloudService
 
     this.activeTasks = new Map() // taskId -> { stage, scannedCount, acceptedCount, skippedPrivateCount, pageSeq, isEnded, error }
   }
@@ -170,6 +171,12 @@ class AccountSyncService {
             kind,
             generationId
           })
+
+          // 当本地集合完整收敛后，按完整性与版本号向云端同步集合快照（绝不将 Star 转为浏览事件）
+          if (this.cloudService) {
+            const cloudCollectionKind = kind === 'repos' ? 'owned' : 'stars'
+            this.cloudService.syncCollections(context, [cloudCollectionKind]).catch(() => {})
+          }
           break
         }
 

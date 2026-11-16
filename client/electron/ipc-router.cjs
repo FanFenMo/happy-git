@@ -1,12 +1,13 @@
 /**
  * client/electron/ipc-router.cjs
- * 安全 NativeBridge IPC 路由与操作分发 (依据 project.md 第四节)
+ * 安全 NativeBridge IPC 路由与操作分发 (依据 project.md 第四节及阶段二云端协同契约)
  */
 
 const { shell } = require('electron')
+const { CloudService } = require('./cloud-service.cjs')
 
 class IpcRouter {
-  constructor({ sessionManager, accountSyncService, starService, database, browser, scheduler, pageExecutorFactory, routes }) {
+  constructor({ sessionManager, accountSyncService, starService, cloudService = null, database, browser, scheduler, pageExecutorFactory, routes }) {
     this.sessionManager = sessionManager
     this.accountSyncService = accountSyncService
     this.starService = starService
@@ -15,17 +16,20 @@ class IpcRouter {
     this.scheduler = scheduler
     this.pageExecutorFactory = pageExecutorFactory
     this.routes = routes
+    this.cloudService = cloudService || new CloudService({ database })
   }
 
   async handleInvoke(event, { operation, payload = {}, contextId = null }) {
     const currentContext = this.sessionManager.getContext()
 
-    // 检查需验证的账号操作
     const personalOps = [
       'account.readSnapshot', 'account.sync', 'repositories.list',
       'stars.set', 'history.record', 'history.list', 'history.delete', 'history.clear',
       'account.savePreferences', 'account.forgetLocalData', 'recommendation.createSnapshot',
-      'recommendation.commit', 'recommendation.list', 'recommendation.feedback'
+      'recommendation.commit', 'recommendation.list', 'recommendation.feedback',
+      'cloud.auth.begin', 'cloud.auth.poll', 'cloud.session.restore', 'cloud.session.logout',
+      'cloud.sync.readState', 'cloud.sync.flush', 'cloud.preferences.save',
+      'cloud.analysis.reset', 'cloud.collections.sync'
     ]
 
     if (personalOps.includes(operation)) {
@@ -71,10 +75,20 @@ class IpcRouter {
         const session = await this.sessionManager.restoreSession()
         const mode = await this.database.callDatabase('readSetting', { key: 'mode' }) || 'unset'
         const shouldPromptLogin = mode === 'unset' && session.status === 'guest'
+        let cloudSync = null
+        if (session.status === 'authenticated' && session.accountId) {
+          try {
+            const restored = await this.cloudService.restoreSession(session)
+            cloudSync = restored.cloudSync || null
+          } catch (_) {
+            cloudSync = await this.database.callDatabase('readCloudSyncState', { accountId: session.accountId })
+          }
+        }
         return {
           session,
           mode,
-          shouldPromptLogin
+          shouldPromptLogin,
+          cloudSync
         }
       }
 
@@ -116,8 +130,11 @@ class IpcRouter {
       case 'stars.readState':
         return this.starService.readState(context, payload)
 
-      case 'stars.set':
-        return this.starService.set(context, payload.repository, payload.desiredStarred, payload.intentId || `star_${Date.now()}`)
+      case 'stars.set': {
+        const res = await this.starService.set(context, payload.repository, payload.desiredStarred, payload.intentId || `star_${Date.now()}`)
+        this.cloudService.syncCollections(context, ['stars']).catch(() => {})
+        return res
+      }
 
       case 'history.record': {
         const pref = await this.database.callDatabase('readAccountSnapshot', { accountId: context.accountId })
@@ -128,8 +145,11 @@ class IpcRouter {
           accountId: context.accountId,
           repository: payload.repository,
           source: payload.source || 'app',
-          viewedAt: Date.now()
+          viewedAt: payload.viewedAt || Date.now()
         })
+        if (item.countedVisit) {
+          this.cloudService.flushOutbox(context).catch(() => {})
+        }
         return { saved: true, item }
       }
 
@@ -143,20 +163,19 @@ class IpcRouter {
 
       case 'history.delete':
         await this.database.callDatabase('deleteHistory', { accountId: context.accountId, repoId: payload.repoId })
+        this.cloudService.flushOutbox(context).catch(() => {})
         return { deleted: true }
 
       case 'history.clear':
         await this.database.callDatabase('clearHistory', { accountId: context.accountId })
+        this.cloudService.flushOutbox(context).catch(() => {})
         return { cleared: true }
 
       case 'account.savePreferences':
-        await this.database.callDatabase('savePreferences', {
-          accountId: context.accountId,
-          preferences: payload
-        })
-        return { saved: true }
+        return this.cloudService.savePreferences(context, payload)
 
       case 'account.forgetLocalData':
+        await this.cloudService.logoutSession(context).catch(() => {})
         return this.sessionManager.forgetCurrentAccount()
 
       case 'discovery.refresh':
@@ -212,17 +231,50 @@ class IpcRouter {
         if (context.status === 'authenticated') {
           const pref = await this.database.callDatabase('readAccountSnapshot', { accountId: context.accountId })
           if (pref.preferences?.historyEnabled) {
-            await this.database.callDatabase('recordBrowse', {
+            const item = await this.database.callDatabase('recordBrowse', {
               accountId: context.accountId,
               repository: repo,
               source: payload.source || 'open',
               viewedAt: Date.now()
             })
             historySaved = true
+            if (item.countedVisit) {
+              this.cloudService.flushOutbox(context).catch(() => {})
+            }
           }
         }
         return { opened: true, historySaved }
       }
+
+      case 'cloud.auth.begin':
+        return this.cloudService.beginAuth(context, payload)
+
+      case 'cloud.auth.poll':
+        return this.cloudService.pollAuth(context, payload)
+
+      case 'cloud.auth.cancel':
+        return this.cloudService.cancelAuth(payload)
+
+      case 'cloud.session.restore':
+        return this.cloudService.restoreSession(context)
+
+      case 'cloud.session.logout':
+        return this.cloudService.logoutSession(context)
+
+      case 'cloud.sync.readState':
+        return this.database.callDatabase('readCloudSyncState', { accountId: context.accountId })
+
+      case 'cloud.sync.flush':
+        return this.cloudService.flushOutbox(context)
+
+      case 'cloud.preferences.save':
+        return this.cloudService.savePreferences(context, payload)
+
+      case 'cloud.analysis.reset':
+        return this.cloudService.resetAnalysis(context)
+
+      case 'cloud.collections.sync':
+        return this.cloudService.syncCollections(context, payload.collections || ['stars', 'owned'])
 
       default:
         throw new Error(`UNKNOWN_OPERATION: ${operation}`)

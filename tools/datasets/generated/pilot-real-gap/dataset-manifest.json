@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1.0.0",
+  "datasetVersion": "hg-pilot-real-20261103",
+  "scale": "pilot",
+  "catalogMode": "real",
+  "status": "blocked_missing_real_catalog",
+  "seed": 20261103,
+  "referenceTime": 1794096000000,
+  "windowDays": 90,
+  "taxonomyVersion": "hg-taxonomy-2026-11-v1",
+  "realCatalogGapReport": "real-catalog-gap-report.json",
+  "counts": {
+    "availableRealRepositories": 4,
+    "requiredRealRepositories": 240,
+    "missingRealRepositories": 236,
+    "realUserCollections": 0
+  }
+}

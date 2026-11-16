@@ -52,15 +52,13 @@
           </div>
         </div>
 
-        <!-- 隐私与数据存储 -->
-        <div class="p-4 rounded-2xl card-raised border border-[var(--color-border)] space-y-4">
-          <div class="text-xs font-semibold text-[var(--color-text-muted)]">隐私与本地存储</div>
-
-          <!-- 历史记录开关 -->
+        <!-- 1. 本地浏览历史 -->
+        <div class="p-4 rounded-2xl card-raised border border-[var(--color-border)] space-y-3">
+          <div class="text-xs font-semibold text-[var(--color-text-muted)]">1. 本地浏览历史</div>
           <div class="flex items-center justify-between gap-3">
             <div>
-              <div class="text-xs font-semibold text-[var(--color-text)]">记录本机浏览历史</div>
-              <div class="text-[11px] text-[var(--color-text-subtle)]">仅保存在当前设备 SQLite，可随时关闭或清空</div>
+              <div class="text-xs font-semibold text-[var(--color-text)]">记录并展示本机浏览历史</div>
+              <div class="text-[11px] text-[var(--color-text-subtle)]">控制当前设备 SQLite 是否保存仓库浏览记录与 30 秒有效访问计数</div>
             </div>
             <label class="relative inline-flex items-center cursor-pointer">
               <input
@@ -72,25 +70,122 @@
               <div class="w-9 h-5 bg-[var(--color-border)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--color-primary)]"></div>
             </label>
           </div>
+        </div>
 
-          <div class="border-t border-[var(--color-border)] pt-3 flex items-center justify-between">
+        <!-- 2. 云端兴趣分析与行为上传 -->
+        <div class="p-4 rounded-2xl card-raised border border-[var(--color-border)] space-y-3">
+          <div class="flex items-center justify-between">
+            <div class="text-xs font-semibold text-[var(--color-text-muted)]">2. 云端兴趣分析与行为上传</div>
+            <span
+              v-if="userStore.hasAccount"
+              class="text-[11px] font-mono px-2 py-0.5 rounded-full bg-[var(--color-surface)] text-[var(--color-text-subtle)]"
+            >
+              Epoch #{{ userStore.cloudSync.analysisEpoch || 1 }}
+            </span>
+          </div>
+
+          <div class="flex items-center justify-between gap-3">
             <div>
-              <div class="text-xs text-[var(--color-text)]">清空本机浏览历史</div>
-              <div class="text-[11px] text-[var(--color-text-subtle)]">清除当前账号在本机的全部访问快照</div>
+              <div class="text-xs font-semibold text-[var(--color-text)]">参与云端兴趣画像分析并上传行为</div>
+              <div class="text-[11px] text-[var(--color-text-subtle)]">控制是否将新有效浏览事件与完整 Star/自有仓库快照上传至服务端参与离线画像计算</div>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                :checked="userStore.preferences.analysisEnabled"
+                @change="toggleAnalysis"
+                class="sr-only peer"
+              />
+              <div class="w-9 h-5 bg-[var(--color-border)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--color-primary)]"></div>
+            </label>
+          </div>
+
+          <div v-if="userStore.hasAccount" class="border-t border-[var(--color-border)] pt-3 space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="text-[11px] text-[var(--color-text-subtle)]">
+                云端会话状态：
+                <span class="font-semibold text-[var(--color-text)]">
+                  {{
+                    userStore.cloudSync.cloudBound && userStore.cloudSync.accountMatched
+                      ? '已绑定同账号会话'
+                      : (userStore.cloudSync.cloudAccountId && !userStore.cloudSync.accountMatched
+                          ? '账号不一致（已阻止上传）'
+                          : '未绑定云端会话')
+                  }}
+                </span>
+              </div>
+              <div class="flex items-center gap-2">
+                <button
+                  v-if="userStore.cloudSync.cloudBound"
+                  @click="handleFlushCloud"
+                  :disabled="isFlushingCloud"
+                  class="px-2.5 py-1 rounded-lg btn-secondary text-[11px] cursor-pointer !min-h-0"
+                >
+                  {{ isFlushingCloud ? '上传中...' : '立即上传' }}
+                </button>
+                <button
+                  v-if="userStore.cloudSync.cloudBound"
+                  @click="handleUnbindCloud"
+                  class="px-2.5 py-1 rounded-lg btn-secondary text-[11px] cursor-pointer !min-h-0"
+                >
+                  解绑云端
+                </button>
+                <button
+                  v-else
+                  @click="handleBindCloud"
+                  :disabled="userStore.cloudAuthStage === 'authorizing'"
+                  class="px-2.5 py-1 rounded-lg btn-primary text-[11px] cursor-pointer !min-h-0"
+                >
+                  {{ userStore.cloudAuthStage === 'authorizing' ? '授权中...' : '绑定云端会话' }}
+                </button>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2 text-[11px] font-mono bg-[var(--color-surface)] p-2.5 rounded-xl">
+              <div>待上传队列 (pending): {{ userStore.cloudSync.pendingCount || 0 }}</div>
+              <div>上传已确认 (accepted): {{ userStore.cloudSync.acceptedThrough || 0 }}</div>
+              <div>已导出 HDFS (exported): {{ userStore.cloudSync.exportedThrough || 0 }}</div>
+              <div>画像已消费 (processed): {{ userStore.cloudSync.processedThrough || 0 }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. 数据清除范围 -->
+        <div class="p-4 rounded-2xl card-raised border border-[var(--color-border)] space-y-3">
+          <div class="text-xs font-semibold text-[var(--color-text-muted)]">3. 数据清除范围（本地与云端严格分离）</div>
+
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <div class="text-xs text-[var(--color-text)]">仅清空本地浏览历史</div>
+              <div class="text-[11px] text-[var(--color-text-subtle)]">删除本机 SQLite 浏览历史并将本机未上传事件转为 discard 墓碑，不重置云端历史画像周期</div>
             </div>
             <button
               @click="handleClearHistory"
               class="px-3 py-1.5 rounded-xl btn-secondary text-xs text-[var(--color-danger)] hover:border-[var(--color-danger)] cursor-pointer !min-h-0"
             >
-              清空
+              清空本地历史
+            </button>
+          </div>
+
+          <div v-if="userStore.hasAccount" class="border-t border-[var(--color-border)] pt-3 flex items-center justify-between gap-3">
+            <div>
+              <div class="text-xs text-[var(--color-text)]">清除云端分析数据并重置 analysisEpoch</div>
+              <div class="text-[11px] text-[var(--color-text-subtle)]">递增云端与本地 analysisEpoch 使旧周期云端事件与集合快照失效，同时保留本机浏览历史</div>
+            </div>
+            <button
+              @click="handleResetCloudAnalysis"
+              :disabled="isResettingAnalysis"
+              class="px-3 py-1.5 rounded-xl btn-secondary text-xs text-[var(--color-danger)] hover:border-[var(--color-danger)] cursor-pointer !min-h-0"
+            >
+              {{ isResettingAnalysis ? '重置中...' : '重置云端分析' }}
             </button>
           </div>
 
           <!-- 删除账号本地数据 -->
-          <div v-if="userStore.hasAccount" class="border-t border-[var(--color-border)] pt-3 flex items-center justify-between">
+          <div v-if="userStore.hasAccount" class="border-t border-[var(--color-border)] pt-3 flex items-center justify-between gap-3">
             <div>
-              <div class="text-xs text-[var(--color-danger)]">删除本账号本地数据</div>
-              <div class="text-[11px] text-[var(--color-text-subtle)]">删除本机数据库中该账号的所有缓存与历史</div>
+              <div class="text-xs text-[var(--color-danger)]">删除本账号本地数据并退出</div>
+              <div class="text-[11px] text-[var(--color-text-subtle)]">清除本机数据库中该账号的所有本地缓存、浏览历史与云端会话凭据</div>
             </div>
             <button
               @click="handleForgetAccount"
@@ -106,7 +201,7 @@
           <div class="text-xs font-semibold text-[var(--color-text-muted)] mb-1">关于应用</div>
           <div class="flex items-center justify-between text-xs">
             <span class="text-[var(--color-text-subtle)]">应用版本</span>
-            <span class="text-[var(--color-text)] font-mono">v1.0.0 (双端正式版)</span>
+            <span class="text-[var(--color-text)] font-mono">v1.1.0 (双端云协同版)</span>
           </div>
           <div class="flex items-center justify-between text-xs">
             <span class="text-[var(--color-text-subtle)]">平台支持</span>
@@ -114,7 +209,7 @@
           </div>
           <div class="flex items-center justify-between text-xs">
             <span class="text-[var(--color-text-subtle)]">存储引擎</span>
-            <span class="text-[var(--color-text)]">本地 SQLite (安全隔离)</span>
+            <span class="text-[var(--color-text)]">本地 SQLite v3 + 云端事件队列</span>
           </div>
         </div>
       </div>
@@ -156,6 +251,8 @@ const emit = defineEmits(['close', 'open-login'])
 const userStore = useUserStore()
 const historyStore = useHistoryStore()
 const isSyncing = ref(false)
+const isFlushingCloud = ref(false)
+const isResettingAnalysis = ref(false)
 const feedback = ref('')
 
 const openLogin = () => {
@@ -170,6 +267,13 @@ const toggleHistory = async (e) => {
   catch (error) { e.target.checked = !enabled; feedback.value = error.message }
 }
 
+const toggleAnalysis = async (e) => {
+  const enabled = e.target.checked
+  feedback.value = ''
+  try { await userStore.setAnalysisEnabled(enabled) }
+  catch (error) { e.target.checked = !enabled; feedback.value = error.message }
+}
+
 const handleManualSync = async () => {
   if (isSyncing.value) return
   isSyncing.value = true
@@ -180,9 +284,55 @@ const handleManualSync = async () => {
   }
 }
 
+const handleBindCloud = async () => {
+  feedback.value = ''
+  try {
+    await userStore.startCloudBind()
+  } catch (error) {
+    feedback.value = error.message
+  }
+}
+
+const handleUnbindCloud = async () => {
+  feedback.value = ''
+  try {
+    await userStore.unbindCloudSession()
+  } catch (error) {
+    feedback.value = error.message
+  }
+}
+
+const handleFlushCloud = async () => {
+  if (isFlushingCloud.value) return
+  isFlushingCloud.value = true
+  feedback.value = ''
+  try {
+    await userStore.flushCloudEvents()
+  } catch (error) {
+    feedback.value = error.message
+  } finally {
+    isFlushingCloud.value = false
+  }
+}
+
 const handleClearHistory = async () => {
-  if (window.confirm('仅删除本机当前账号的浏览历史？')) {
+  if (window.confirm('仅删除本机当前账号的浏览历史？（未确认的待上传浏览事件将转为 discard 墓碑，不重置云端分析周期）')) {
     await historyStore.clearAll()
+    await userStore.refreshCloudSyncState()
+  }
+}
+
+const handleResetCloudAnalysis = async () => {
+  if (window.confirm('确定清除云端分析数据并递增 analysisEpoch？（本机浏览历史将保留，旧周期云端事件不再参与画像计算）')) {
+    isResettingAnalysis.value = true
+    feedback.value = ''
+    try {
+      await userStore.resetCloudAnalysisData()
+    } catch (error) {
+      feedback.value = error.message
+    } finally {
+      isResettingAnalysis.value = false
+    }
   }
 }
 

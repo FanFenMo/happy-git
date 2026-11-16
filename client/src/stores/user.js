@@ -1,6 +1,6 @@
 /**
  * client/src/stores/user.js
- * 当前会话、账号资料与集合同步状态管理 (依据 project.md 第四节、第五节与第十一节)
+ * 当前会话、账号资料与集合同步状态管理 (依据 project.md 第四节、第五节与阶段二云端协同契约)
  */
 
 import { defineStore } from 'pinia'
@@ -22,6 +22,15 @@ import {
   setStar as apiSetStar,
   savePreferences as apiSavePreferences
 } from '../services/account'
+import {
+  beginCloudAuth,
+  pollCloudAuth,
+  cancelCloudAuth,
+  logoutCloudSession,
+  readCloudSyncState,
+  flushCloudOutbox,
+  resetCloudAnalysis
+} from '../services/cloud'
 import { useHistoryStore } from './history'
 import { nativeBridge } from '../platform'
 
@@ -42,7 +51,25 @@ const emptyPage = () => ({
 
 const emptyPreferences = () => ({
   historyEnabled: true,
+  analysisEnabled: true,
   manualTags: []
+})
+
+const emptyCloudSync = () => ({
+  cloudBound: false,
+  accountMatched: false,
+  cloudAccountId: null,
+  subjectId: null,
+  deviceId: null,
+  streamEpoch: 1,
+  analysisEpoch: 1,
+  acceptedThrough: 0,
+  exportedThrough: 0,
+  processedThrough: 0,
+  pendingCount: 0,
+  analysisEnabled: true,
+  lastSyncAt: null,
+  lastErrorCode: null
 })
 
 export const useUserStore = defineStore('user', {
@@ -62,6 +89,9 @@ export const useUserStore = defineStore('user', {
     authError: null,
     activeLoginTaskId: null,
     preferences: emptyPreferences(),
+    cloudSync: emptyCloudSync(),
+    cloudAuthStage: 'idle',
+    cloudChallengeId: null,
     repos: [],
     stars: [],
     interestRepos: [],
@@ -97,6 +127,9 @@ export const useUserStore = defineStore('user', {
       this.repos = []
       this.stars = []
       this.preferences = emptyPreferences()
+      this.cloudSync = emptyCloudSync()
+      this.cloudAuthStage = 'idle'
+      this.cloudChallengeId = null
       this.repoSync = emptySync()
       this.starSync = emptySync()
       this.repoPage = emptyPage()
@@ -115,6 +148,9 @@ export const useUserStore = defineStore('user', {
       try {
         const data = await initializeApplication()
         this.applySession(data.session)
+        if (data.cloudSync) {
+          this.cloudSync = { ...emptyCloudSync(), ...data.cloudSync }
+        }
         this.bootStatus = 'ready'
 
         if (this.hasAccount) {
@@ -137,7 +173,10 @@ export const useUserStore = defineStore('user', {
         if (epoch !== this.sessionEpoch) return
 
         if (snap.profile) this.session.profile = snap.profile
-        this.preferences = snap.preferences || emptyPreferences()
+        this.preferences = { ...emptyPreferences(), ...snap.preferences }
+        if (snap.cloudSync) {
+          this.cloudSync = { ...emptyCloudSync(), ...snap.cloudSync }
+        }
         this.repoSync = { ...emptySync(), ...snap.repoSync }
         this.starSync = { ...emptySync(), ...snap.starSync }
 
@@ -149,7 +188,6 @@ export const useUserStore = defineStore('user', {
 
         if (epoch !== this.sessionEpoch) return
 
-        // 若尚未同步过或同步不完整，触发低优先级同步
         if (this.session.status === 'authenticated' && (!this.repoSync.complete || !this.starSync.complete)) {
           this.refreshAccountData().catch(err => {
             if (epoch === this.sessionEpoch) this.authError = err.message
@@ -199,7 +237,6 @@ export const useUserStore = defineStore('user', {
         this.activeLoginTaskId = loginTaskId
         this.authStage = state || 'waiting'
 
-        // 轮询本地登录任务状态 (每 1000ms 一次，任务结束立即终止)
         this.pollLoginStatus(loginTaskId, sequence)
       } catch (error) {
         if (sequence === this.loginSequence) {
@@ -256,7 +293,7 @@ export const useUserStore = defineStore('user', {
             return
           }
 
-          this.authStage = task.state // 'waiting' or 'verifying'
+          this.authStage = task.state
         } catch (err) {
           if (active()) {
             this.authStage = 'idle'
@@ -306,7 +343,6 @@ export const useUserStore = defineStore('user', {
         const { taskId } = await apiSyncAccount(['profile', 'repos', 'stars'], force)
         this.activeSyncTaskId = taskId
 
-        // 轮询同步进度
         const poll = async () => {
           if (!this.activeSyncTaskId || this.activeSyncTaskId !== taskId) return
           try {
@@ -319,6 +355,7 @@ export const useUserStore = defineStore('user', {
               const snap = await readAccountSnapshot()
               this.repoSync = { ...emptySync(), ...snap.repoSync }
               this.starSync = { ...emptySync(), ...snap.starSync }
+              if (snap.cloudSync) this.cloudSync = { ...emptyCloudSync(), ...snap.cloudSync }
               if (snap.profile) this.session.profile = snap.profile
               return
             }
@@ -360,20 +397,109 @@ export const useUserStore = defineStore('user', {
     },
 
     async setHistoryEnabled(enabled) {
-      await apiSavePreferences({
+      const res = await apiSavePreferences({
         historyEnabled: enabled,
+        analysisEnabled: this.preferences.analysisEnabled,
         manualTags: this.preferences.manualTags
       })
       this.preferences.historyEnabled = enabled
+      if (res?.cloudSync) {
+        this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
+      }
+    },
+
+    async setAnalysisEnabled(enabled) {
+      const res = await apiSavePreferences({
+        historyEnabled: this.preferences.historyEnabled,
+        analysisEnabled: enabled,
+        manualTags: this.preferences.manualTags
+      })
+      this.preferences.analysisEnabled = enabled
+      if (res?.cloudSync) {
+        this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
+      }
     },
 
     async saveManualTags(tags) {
       await apiSavePreferences({
         historyEnabled: this.preferences.historyEnabled,
+        analysisEnabled: this.preferences.analysisEnabled,
         manualTags: tags
       })
       this.preferences.manualTags = tags
       return tags
+    },
+
+    async refreshCloudSyncState() {
+      if (!this.hasAccount) return null
+      const state = await readCloudSyncState()
+      if (state) {
+        this.cloudSync = { ...emptyCloudSync(), ...state }
+        this.preferences.analysisEnabled = Boolean(state.analysisEnabled)
+      }
+      return this.cloudSync
+    },
+
+    async startCloudBind() {
+      if (!this.hasAccount) throw new Error('请先登录本地 GitHub 账号')
+      this.cloudAuthStage = 'authorizing'
+      const { challengeId } = await beginCloudAuth(true)
+      this.cloudChallengeId = challengeId
+
+      const poll = async () => {
+        if (this.cloudChallengeId !== challengeId) return
+        try {
+          const res = await pollCloudAuth(challengeId)
+          if (res.state === 'authenticated') {
+            this.cloudAuthStage = 'idle'
+            this.cloudChallengeId = null
+            if (res.cloudSync) this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
+            return
+          }
+          if (res.state === 'account_mismatch' || res.state === 'failed') {
+            this.cloudAuthStage = 'idle'
+            this.cloudChallengeId = null
+            await this.refreshCloudSyncState()
+            throw new Error(res.error?.message || '云端账号绑定失败')
+          }
+          setTimeout(poll, 1500)
+        } catch (err) {
+          this.cloudAuthStage = 'idle'
+          this.cloudChallengeId = null
+          this.authError = err.message
+        }
+      }
+      setTimeout(poll, 1500)
+    },
+
+    async unbindCloudSession() {
+      if (this.cloudChallengeId) {
+        await cancelCloudAuth(this.cloudChallengeId).catch(() => {})
+        this.cloudChallengeId = null
+      }
+      this.cloudAuthStage = 'idle'
+      const res = await logoutCloudSession()
+      if (res?.cloudSync) {
+        this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
+      } else {
+        this.cloudSync = emptyCloudSync()
+      }
+    },
+
+    async flushCloudEvents() {
+      const res = await flushCloudOutbox()
+      if (res?.cloudSync) {
+        this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
+      }
+      return res
+    },
+
+    async resetCloudAnalysisData() {
+      const res = await resetCloudAnalysis()
+      if (res?.cloudSync) {
+        this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
+      }
+      return res
     }
   }
 })

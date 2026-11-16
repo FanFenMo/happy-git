@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "1.0.0",
+  "scale": "pilot",
+  "catalogMode": "synthetic_fixture",
+  "referenceTime": 1794096000000,
+  "readyForFormalRealExperiment": false,
+  "availableRealRepositoryCount": 4,
+  "requiredRealRepositoryCount": 240,
+  "missingRealRepositoryCount": 236,
+  "realUserCollectionCount": 0,
+  "realUserCollectionsAvailable": false,
+  "domainCoverage": {
+    "data_engineering": {
+      "available": 2,
+      "recommendedMinimum": 30,
+      "shortfall": 28
+    },
+    "web_frontend": {
+      "available": 1,
+      "recommendedMinimum": 30,
+      "shortfall": 29
+    },
+    "backend_service": {
+      "available": 1,
+      "recommendedMinimum": 30,
+      "shortfall": 29
+    },
+    "machine_learning": {
+      "available": 1,
+      "recommendedMinimum": 30,
+      "shortfall": 29
+    },
+    "devops_cloud": {
+      "available": 0,
+      "recommendedMinimum": 30,
+      "shortfall": 30
+    },
+    "mobile_client": {
+      "available": 0,
+      "recommendedMinimum": 30,
+      "shortfall": 30
+    },
+    "systems_programming": {
+      "available": 0,
+      "recommendedMinimum": 30,
+      "shortfall": 30
+    },
+    "security_crypto": {
+      "available": 0,
+      "recommendedMinimum": 30,
+      "shortfall": 30
+    }
+  },
+  "languageCounts": {
+    "Python": 0,
+    "TypeScript": 1,
+    "JavaScript": 0,
+    "Java": 3,
+    "Go": 0,
+    "Rust": 0,
+    "C++": 0,
+    "C#": 0,
+    "Kotlin": 0,
+    "Swift": 0
+  },
+  "popularityTierCounts": {
+    "high": 4,
+    "medium": 0,
+    "long_tail": 0
+  },
+  "handoffNote": "Real GitHub public repository catalog currently contains 4 verified repositories (target: 240). Do not duplicate or fabricate github_public READMEs; Member A should export collected public repositories to tools/datasets/sources/repositories-real.jsonl."
+}

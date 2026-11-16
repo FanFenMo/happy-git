@@ -25,6 +25,7 @@ public class HappyGitPlugin extends Plugin {
     private SessionManager sessionManager;
     private AccountSyncService accountSyncService;
     private StarService starService;
+    private CloudService cloudService;
 
     private final ExecutorService backgroundExecutor = Executors.newFixedThreadPool(4);
 
@@ -39,6 +40,7 @@ public class HappyGitPlugin extends Plugin {
         sessionManager = new SessionManager(getContext(), localRepository, webViewHost, scheduler, pageExecutor);
         accountSyncService = new AccountSyncService(localRepository, scheduler, pageExecutor);
         starService = new StarService(localRepository, scheduler, pageExecutor);
+        cloudService = new CloudService(getContext(), localRepository);
     }
 
     @PluginMethod
@@ -57,7 +59,7 @@ public class HappyGitPlugin extends Plugin {
                 dispatch(operation, payload, contextId, call);
             } catch (Exception e) {
                 e.printStackTrace();
-                String code = (e.getMessage() != null && e.getMessage().matches("(AUTH_|CONFIG_|SYNC_|SESSION_|STORAGE_|PAGE_|RATE_).*"))
+                String code = (e.getMessage() != null && e.getMessage().matches("(AUTH_|CLOUD_|CONFIG_|SYNC_|SESSION_|STORAGE_|PAGE_|RATE_|STREAM_|ANALYSIS_|SEQUENCE_|IDEMPOTENCY_|COLLECTION_).*"))
                         ? e.getMessage() : "INTERNAL_ERROR";
                 resolveFailure(call, code, e.getMessage() != null ? e.getMessage() : "原生插件内部错误");
             }
@@ -67,7 +69,6 @@ public class HappyGitPlugin extends Plugin {
     private void dispatch(String operation, JSObject payload, String contextId, PluginCall call) throws Exception {
         JSONObject currentContext = sessionManager.getSessionContext();
 
-        // 校验需要登录态的操作
         boolean isPersonal = isPersonalOp(operation);
         if (isPersonal) {
             if (contextId != null && !contextId.isEmpty()) {
@@ -88,10 +89,21 @@ public class HappyGitPlugin extends Plugin {
                 if (mode == null) mode = "unset";
                 boolean shouldPromptLogin = "unset".equals(mode) && "guest".equals(session.optString("status"));
 
+                JSONObject cloudSync = null;
+                if ("authenticated".equals(session.optString("status")) && session.optString("accountId", null) != null) {
+                    try {
+                        JSONObject restored = cloudService.restoreSession(session.getString("accountId"));
+                        cloudSync = restored.optJSONObject("cloudSync");
+                    } catch (Exception ignored) {
+                        cloudSync = localRepository.readCloudSyncState(session.optString("accountId"));
+                    }
+                }
+
                 JSObject data = new JSObject();
                 data.put("session", new JSObject(session.toString()));
                 data.put("mode", mode);
                 data.put("shouldPromptLogin", shouldPromptLogin);
+                data.put("cloudSync", cloudSync != null ? new JSObject(cloudSync.toString()) : JSONObject.NULL);
                 resolveSuccess(call, data);
                 break;
             }
@@ -188,6 +200,9 @@ public class HappyGitPlugin extends Plugin {
                 boolean desiredStarred = payload.getBoolean("desiredStarred");
                 String intentId = payload.getString("intentId", "star_" + System.currentTimeMillis());
                 JSONObject result = starService.set(currentContext, repo, desiredStarred, intentId);
+                backgroundExecutor.execute(() -> {
+                    try { cloudService.syncCollections(accountId); } catch (Exception ignored) {}
+                });
                 resolveSuccess(call, new JSObject(result.toString()));
                 break;
             }
@@ -204,6 +219,11 @@ public class HappyGitPlugin extends Plugin {
                     return;
                 }
                 JSONObject item = localRepository.recordBrowse(accountId, repo, source, System.currentTimeMillis());
+                if (item.optBoolean("countedVisit", false)) {
+                    backgroundExecutor.execute(() -> {
+                        try { cloudService.flushOutbox(accountId); } catch (Exception ignored) {}
+                    });
+                }
                 JSObject res = new JSObject();
                 res.put("saved", true);
                 res.put("item", new JSObject(item.toString()));
@@ -222,6 +242,9 @@ public class HappyGitPlugin extends Plugin {
 
             case "history.delete": {
                 localRepository.deleteHistory(accountId, payload.getString("repoId"));
+                backgroundExecutor.execute(() -> {
+                    try { cloudService.flushOutbox(accountId); } catch (Exception ignored) {}
+                });
                 JSObject res = new JSObject();
                 res.put("deleted", true);
                 resolveSuccess(call, res);
@@ -230,6 +253,9 @@ public class HappyGitPlugin extends Plugin {
 
             case "history.clear": {
                 localRepository.clearHistory(accountId);
+                backgroundExecutor.execute(() -> {
+                    try { cloudService.flushOutbox(accountId); } catch (Exception ignored) {}
+                });
                 JSObject res = new JSObject();
                 res.put("cleared", true);
                 resolveSuccess(call, res);
@@ -237,14 +263,13 @@ public class HappyGitPlugin extends Plugin {
             }
 
             case "account.savePreferences": {
-                localRepository.savePreferences(accountId, payload);
-                JSObject res = new JSObject();
-                res.put("saved", true);
-                resolveSuccess(call, res);
+                JSONObject res = cloudService.savePreferences(accountId, payload);
+                resolveSuccess(call, new JSObject(res.toString()));
                 break;
             }
 
             case "account.forgetLocalData": {
+                try { cloudService.logoutSession(accountId); } catch (Exception ignored) {}
                 JSONObject res = sessionManager.forgetCurrentAccount();
                 resolveSuccess(call, new JSObject(res.toString()));
                 break;
@@ -365,14 +390,79 @@ public class HappyGitPlugin extends Plugin {
                 if ("authenticated".equals(currentContext.optString("status"))) {
                     JSONObject pref = localRepository.readAccountSnapshot(accountId);
                     if (pref.getJSONObject("preferences").optBoolean("historyEnabled", true)) {
-                        localRepository.recordBrowse(accountId, repo, payload.optString("source", "open"), System.currentTimeMillis());
+                        JSONObject item = localRepository.recordBrowse(accountId, repo, payload.optString("source", "open"), System.currentTimeMillis());
                         historySaved = true;
+                        if (item.optBoolean("countedVisit", false)) {
+                            backgroundExecutor.execute(() -> {
+                                try { cloudService.flushOutbox(accountId); } catch (Exception ignored) {}
+                            });
+                        }
                     }
                 }
                 JSObject res = new JSObject();
                 res.put("opened", true);
                 res.put("historySaved", historySaved);
                 resolveSuccess(call, res);
+                break;
+            }
+
+            case "cloud.auth.begin": {
+                JSONObject res = cloudService.beginAuth(accountId, payload.optBoolean("openBrowser", true));
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
+            case "cloud.auth.poll": {
+                JSONObject res = cloudService.pollAuth(accountId, payload.getString("challengeId"));
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
+            case "cloud.auth.cancel": {
+                JSONObject res = cloudService.cancelAuth(payload.optString("challengeId", null));
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
+            case "cloud.session.restore": {
+                JSONObject res = cloudService.restoreSession(accountId);
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
+            case "cloud.session.logout": {
+                JSONObject res = cloudService.logoutSession(accountId);
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
+            case "cloud.sync.readState": {
+                JSONObject res = localRepository.readCloudSyncState(accountId);
+                resolveSuccess(call, res != null ? new JSObject(res.toString()) : new JSObject());
+                break;
+            }
+
+            case "cloud.sync.flush": {
+                JSONObject res = cloudService.flushOutbox(accountId);
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
+            case "cloud.preferences.save": {
+                JSONObject res = cloudService.savePreferences(accountId, payload);
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
+            case "cloud.analysis.reset": {
+                JSONObject res = cloudService.resetAnalysis(accountId);
+                resolveSuccess(call, new JSObject(res.toString()));
+                break;
+            }
+
+            case "cloud.collections.sync": {
+                JSONObject res = cloudService.syncCollections(accountId);
+                resolveSuccess(call, new JSObject(res.toString()));
                 break;
             }
 
@@ -398,6 +488,15 @@ public class HappyGitPlugin extends Plugin {
             case "recommendation.commit":
             case "recommendation.list":
             case "recommendation.feedback":
+            case "cloud.auth.begin":
+            case "cloud.auth.poll":
+            case "cloud.session.restore":
+            case "cloud.session.logout":
+            case "cloud.sync.readState":
+            case "cloud.sync.flush":
+            case "cloud.preferences.save":
+            case "cloud.analysis.reset":
+            case "cloud.collections.sync":
                 return true;
             default:
                 return false;

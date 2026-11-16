@@ -1,0 +1,163 @@
+{
+  "schemaVersion": "1.0.0",
+  "datasetVersion": "hg-pilot-synthetic_fixture-20261103",
+  "scale": "pilot",
+  "catalogMode": "synthetic_fixture",
+  "datasetKind": "synthetic_fixture_demo",
+  "status": "ready_for_format_and_pipeline_verification",
+  "seed": 20261103,
+  "referenceTime": 1794096000000,
+  "windowDays": 90,
+  "minSameRepoIntervalMs": 31000,
+  "taxonomyVersion": "hg-taxonomy-2026-11-v1",
+  "realUserCollectionsAvailable": false,
+  "realCatalogGapReport": "real-catalog-gap-report.json",
+  "counts": {
+    "repositories": 240,
+    "realRepositoriesIncluded": 4,
+    "syntheticFixtureRepositoriesIncluded": 236,
+    "subjects": 50,
+    "subjectsBySplit": {
+      "train": 40,
+      "validation": 5,
+      "test": 5
+    },
+    "collections": 100,
+    "events": 5000,
+    "targetSubjects": 50,
+    "targetEvents": 5000
+  },
+  "runtimeShards": {
+    "train": [
+      {
+        "path": "tools/datasets/generated/pilot-synthetic-fixture/runtime/train/part-00000.jsonl",
+        "relativePath": "runtime/train/part-00000.jsonl",
+        "recordCount": 4403,
+        "byteSize": 1949929,
+        "sha256": "a0060ddb53794a412b789ae6f9f0753d0f8880653d9d6588f8b0bec4c67b8ba8"
+      }
+    ],
+    "validation": [
+      {
+        "path": "tools/datasets/generated/pilot-synthetic-fixture/runtime/validation/part-00000.jsonl",
+        "relativePath": "runtime/validation/part-00000.jsonl",
+        "recordCount": 842,
+        "byteSize": 550648,
+        "sha256": "468a32fe33550675fb67db382164b91daa58b9ed70e545c37bcaaf90ac586437"
+      }
+    ],
+    "test": [
+      {
+        "path": "tools/datasets/generated/pilot-synthetic-fixture/runtime/test/part-00000.jsonl",
+        "relativePath": "runtime/test/part-00000.jsonl",
+        "recordCount": 625,
+        "byteSize": 464223,
+        "sha256": "af01cbbf217ee1a1288d79ac0da903e8d83dfb78be371d359685f20e9689f7c8"
+      }
+    ]
+  },
+  "files": [
+    {
+      "path": "canonical/repositories.jsonl",
+      "recordCount": 240,
+      "byteSize": 313604,
+      "sha256": "00b131a28cdb743bb38409f110c0621ae1b2b8d4750ffe6044c166cae73a7eb5"
+    },
+    {
+      "path": "canonical/subjects.jsonl",
+      "recordCount": 50,
+      "byteSize": 11715,
+      "sha256": "e0d9f080c5d1bc2e337e2c056a1fb9d3b61e1b8216fb4e144de7b74f373ae56b"
+    },
+    {
+      "path": "canonical/collections.jsonl",
+      "recordCount": 100,
+      "byteSize": 20161,
+      "sha256": "2ffb4f7a15cfcb5f7444d9914df23d4ac2b9d68ec44c66fa9985eb78e8b6bd5a"
+    },
+    {
+      "path": "canonical/events.jsonl",
+      "recordCount": 5000,
+      "byteSize": 1992112,
+      "sha256": "d5eefd382095ddc64640c335986d7b55c34acfa89eead9f71b104a1fa21d9e03"
+    },
+    {
+      "path": "splits/subjects.jsonl",
+      "recordCount": 50,
+      "byteSize": 4565,
+      "sha256": "70e2fadf95e9594cecebb55da5d87f922f509917f62901c0390766d499a603e8"
+    },
+    {
+      "path": "evaluation-only/generator-truth.jsonl",
+      "recordCount": 50,
+      "byteSize": 22087,
+      "sha256": "fbbea9fb30e285e6dff4c652b77df25e59f2c69ff3fd98c6bdffcf48d045cc9b"
+    },
+    {
+      "path": "evaluation-only/catalog-annotations.jsonl",
+      "recordCount": 240,
+      "byteSize": 74530,
+      "sha256": "a7ff8bd1fac69b83bdf7ece2b44236c5f148a14896a9e64d58085313390b7abd"
+    },
+    {
+      "path": "evaluation-only/control-cases.jsonl",
+      "recordCount": 10,
+      "byteSize": 3764,
+      "sha256": "2384d59fe6a4dfc63639205a5fed59c360826cd778aa4f1b47c1f5b906af959f"
+    },
+    {
+      "path": "evaluation-only/llm-reference-profiles.jsonl",
+      "recordCount": 0,
+      "byteSize": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evaluation-only/reference-runs.jsonl",
+      "recordCount": 0,
+      "byteSize": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "runtime/train/part-00000.jsonl",
+      "recordCount": 4403,
+      "byteSize": 1949929,
+      "sha256": "a0060ddb53794a412b789ae6f9f0753d0f8880653d9d6588f8b0bec4c67b8ba8"
+    },
+    {
+      "path": "runtime/validation/part-00000.jsonl",
+      "recordCount": 842,
+      "byteSize": 550648,
+      "sha256": "468a32fe33550675fb67db382164b91daa58b9ed70e545c37bcaaf90ac586437"
+    },
+    {
+      "path": "runtime/test/part-00000.jsonl",
+      "recordCount": 625,
+      "byteSize": 464223,
+      "sha256": "af01cbbf217ee1a1288d79ac0da903e8d83dfb78be371d359685f20e9689f7c8"
+    },
+    {
+      "path": "evidence-views/train.jsonl",
+      "recordCount": 40,
+      "byteSize": 1940652,
+      "sha256": "b9a892898a72aaa16eb6f12a2e5fcca83994ea13f1aa0e9bbc1ca53be252804f"
+    },
+    {
+      "path": "evidence-views/validation.jsonl",
+      "recordCount": 5,
+      "byteSize": 242662,
+      "sha256": "b0f7e11b1867ed879edc0d98fffa2e17def632eafd59ebe64046778a40974a73"
+    },
+    {
+      "path": "evidence-views/test.jsonl",
+      "recordCount": 5,
+      "byteSize": 181578,
+      "sha256": "4ab07e8f62c1d3a79614d95db63c90e1b30e5a9e136fd1817398d42aa86eca7c"
+    },
+    {
+      "path": "provenance.jsonl",
+      "recordCount": 3,
+      "byteSize": 792,
+      "sha256": "f2dd18d44c3e1f7eabc2777846291bc029d2fe393f6d7d2ceac01e92de2c46b9"
+    }
+  ]
+}

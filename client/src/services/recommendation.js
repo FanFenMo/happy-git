@@ -34,7 +34,7 @@ function getWorker() {
   return workerInstance
 }
 
-function runWorkerJob(purpose, inputId, inputVersions, payload) {
+function runWorkerJob(purpose, inputId, inputVersions, payload, contextId = nativeBridge.contextId) {
   return new Promise((resolve, reject) => {
     const worker = getWorker()
     const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)
@@ -43,13 +43,21 @@ function runWorkerJob(purpose, inputId, inputVersions, payload) {
     const request = createComputeRequest({
       jobId,
       inputId,
-      contextId: nativeBridge.contextId,
+      contextId,
       purpose,
       inputVersions,
       payload
     })
     worker.postMessage(request)
   })
+}
+
+function parseCommitResponse(commitRes) {
+  const committed = Boolean(commitRes?.ok && commitRes?.data?.ok !== false)
+  const error = !commitRes?.ok
+    ? (commitRes?.error?.code || commitRes?.error?.message || 'COMMIT_FAILED')
+    : (commitRes?.data?.ok === false ? (commitRes.data.error || commitRes.data.code || 'INPUT_CHANGED') : null)
+  return { committed, error }
 }
 
 export async function createSnapshot(purpose = 'ranking', reason = 'user_refresh') {
@@ -62,6 +70,7 @@ export async function createSnapshot(purpose = 'ranking', reason = 'user_refresh
 }
 
 export async function computeAndCommitProfile(snapshot) {
+  const invoke = nativeBridge.capture()
   const workerResult = await runWorkerJob(COMPUTE_PURPOSE.PROFILE, snapshot.inputId, snapshot.inputVersions, {
     accountId: snapshot.accountId,
     starred: snapshot.starred,
@@ -73,7 +82,6 @@ export async function computeAndCommitProfile(snapshot) {
     candidates: snapshot.candidates
   })
 
-  const invoke = nativeBridge.capture()
   const commitRes = await invoke(OPERATIONS.RECOMMENDATION_COMMIT, {
     inputId: snapshot.inputId,
     inputVersions: snapshot.inputVersions,
@@ -81,20 +89,24 @@ export async function computeAndCommitProfile(snapshot) {
     profile: workerResult.profile
   })
 
-  return { profile: workerResult.profile, committed: commitRes.ok }
+  const { committed, error } = parseCommitResponse(commitRes)
+  return { profile: workerResult.profile, committed, error }
 }
 
 export async function computeAndCommitRanking(snapshot, profile) {
+  const invoke = nativeBridge.capture()
   const workerResult = await runWorkerJob(COMPUTE_PURPOSE.RANKING, snapshot.inputId, snapshot.inputVersions, {
     accountId: snapshot.accountId,
     profile,
+    starred: snapshot.starred,
     candidates: snapshot.candidates,
     history: snapshot.history,
+    manualTags: snapshot.manualTags,
     hiddenRepoIds: snapshot.hiddenRepoIds,
+    historyEnabled: snapshot.historyEnabled,
     owned: snapshot.owned
   })
 
-  const invoke = nativeBridge.capture()
   const commitRes = await invoke(OPERATIONS.RECOMMENDATION_COMMIT, {
     inputId: snapshot.inputId,
     inputVersions: snapshot.inputVersions,
@@ -102,7 +114,8 @@ export async function computeAndCommitRanking(snapshot, profile) {
     batch: workerResult.batch
   })
 
-  return { batch: workerResult.batch, committed: commitRes.ok }
+  const { committed, error } = parseCommitResponse(commitRes)
+  return { batch: workerResult.batch, committed, error }
 }
 
 export async function listRecommendation(batchId = null, offset = 0, limit = 20) {

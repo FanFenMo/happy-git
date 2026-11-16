@@ -257,7 +257,10 @@ class IpcRouter {
     }
 
     if (mode === 'personalized') {
-      const queryPlan = payload.queryPlan || []
+      const rawPlan = payload.queryPlan
+      const queryPlan = Array.isArray(rawPlan)
+        ? rawPlan
+        : (Array.isArray(rawPlan?.queryPlan) ? rawPlan.queryPlan : [])
       const candidates = []
 
       for (const q of queryPlan.slice(0, 4)) {

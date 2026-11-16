@@ -267,6 +267,12 @@ public class HappyGitPlugin extends Plugin {
                     resolveSuccess(call, res);
                 } else if ("personalized".equals(mode)) {
                     JSONArray queryPlan = payload.optJSONArray("queryPlan");
+                    if (queryPlan == null) {
+                        JSONObject planObj = payload.optJSONObject("queryPlan");
+                        if (planObj != null) {
+                            queryPlan = planObj.optJSONArray("queryPlan");
+                        }
+                    }
                     JSONArray candidates = new JSONArray();
                     if (queryPlan != null) {
                         for (int i = 0; i < Math.min(queryPlan.length(), 4); i++) {

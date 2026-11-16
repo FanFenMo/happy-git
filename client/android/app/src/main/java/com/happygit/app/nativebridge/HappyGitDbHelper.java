@@ -100,7 +100,7 @@ public class HappyGitDbHelper extends SQLiteOpenHelper {
         createV2Tables(db);
     }
 
-    private void createV2Tables(SQLiteDatabase db) {
+    public void createV2Tables(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE IF NOT EXISTS account_revisions (" +
                 "account_id TEXT PRIMARY KEY NOT NULL, " +
                 "profile_revision INTEGER NOT NULL DEFAULT 0, " +
@@ -198,10 +198,21 @@ public class HappyGitDbHelper extends SQLiteOpenHelper {
                 "UNIQUE (batch_id, repo_id), " +
                 "FOREIGN KEY (batch_id) REFERENCES recommendation_batches(batch_id) ON DELETE CASCADE);");
 
+        db.execSQL("CREATE TABLE IF NOT EXISTS recommendation_snapshots (" +
+                "input_id TEXT PRIMARY KEY NOT NULL, " +
+                "account_id TEXT NOT NULL, " +
+                "purpose TEXT NOT NULL, " +
+                "input_versions_json TEXT NOT NULL, " +
+                "created_at INTEGER NOT NULL, " +
+                "consumed INTEGER NOT NULL DEFAULT 0, " +
+                "FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE);");
+
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_website_operations_account_state " +
                 "ON website_operations(account_id, state);");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_recommendation_batches_account_time " +
                 "ON recommendation_batches(account_id, created_at DESC);");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_recommendation_snapshots_account " +
+                "ON recommendation_snapshots(account_id, created_at DESC);");
     }
 
     @Override

@@ -23,10 +23,14 @@ export async function readTrendingCache() {
 }
 
 export async function refreshPersonalizedCandidates(queryPlan = []) {
+  const normalizedPlan = Array.isArray(queryPlan)
+    ? queryPlan
+    : (Array.isArray(queryPlan?.queryPlan) ? queryPlan.queryPlan : [])
+
   const invoke = nativeBridge.capture()
   const res = await invoke(OPERATIONS.DISCOVERY_REFRESH, {
     mode: 'personalized',
-    queryPlan
+    queryPlan: normalizedPlan
   })
   if (!res.ok) {
     throw new Error(res.error?.message || '刷新候选仓库失败')

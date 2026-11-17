@@ -7,6 +7,11 @@ import shlex
 import xml.etree.ElementTree as ET
 
 
+def write_text(path, value):
+    with path.open("w", encoding="utf-8", newline="\n") as output:
+        output.write(value)
+
+
 def xml(properties):
     root = ET.Element("configuration")
     for name, value in properties.items():
@@ -44,7 +49,9 @@ def render(inventory, destination):
     common = {"fs.defaultFS": "hdfs://happygit" if ha else "hdfs://" + names[0] + ":8020",
               "hadoop.tmp.dir": data + "/tmp", "ha.zookeeper.quorum": quorum}
     hdfs = {"dfs.replication": min(3, len(nodes)), "dfs.namenode.name.dir": "file://" + data + "/namenode",
-            "dfs.datanode.data.dir": "file://" + data + "/datanode", "dfs.namenode.datanode.registration.ip-hostname-check": False}
+            "dfs.datanode.data.dir": "file://" + data + "/datanode", "dfs.namenode.datanode.registration.ip-hostname-check": False,
+            "dfs.namenode.rpc-bind-host": "0.0.0.0", "dfs.namenode.http-bind-host": "0.0.0.0",
+            "dfs.client.use.datanode.hostname": True, "dfs.datanode.use.datanode.hostname": True}
     if ha:
         fencing = inventory.get("fencingMethods", "")
         if not fencing or "/bin/true" in fencing or "shell(true)" in fencing:
@@ -59,6 +66,10 @@ def render(inventory, destination):
             hdfs[f"dfs.namenode.rpc-address.happygit.nn{number}"] = host + ":8020"
             hdfs[f"dfs.namenode.http-address.happygit.nn{number}"] = host + ":9870"
     yarn = {"yarn.nodemanager.aux-services": "mapreduce_shuffle", "yarn.resourcemanager.recovery.enabled": True,
+            "yarn.resourcemanager.bind-host": "0.0.0.0", "yarn.nodemanager.bind-host": "0.0.0.0",
+            "yarn.application.classpath": ",".join([install + "/conf"] + [hadoop + "/share/hadoop/" + part for part in ("common/*", "common/lib/*", "hdfs/*", "hdfs/lib/*", "yarn/*", "yarn/lib/*")]),
+            "yarn.nodemanager.local-dirs": data + "/yarn/local", "yarn.nodemanager.log-dirs": data + "/yarn/logs",
+            "yarn.nodemanager.vmem-check-enabled": False,
             "yarn.resourcemanager.work-preserving-recovery.enabled": True, "yarn.resourcemanager.store.class": "org.apache.hadoop.yarn.server.resourcemanager.recovery.ZKRMStateStore",
             "hadoop.zk.address": quorum, "yarn.resourcemanager.zk-address": quorum,
             "yarn.log-aggregation-enable": True, "yarn.nodemanager.remote-app-log-dir": "/happygit/yarn-logs",
@@ -71,24 +82,34 @@ def render(inventory, destination):
             yarn[f"yarn.resourcemanager.hostname.rm{number}"] = host
     else:
         yarn["yarn.resourcemanager.hostname"] = names[0]
+        for service, port in (("address", 8032), ("scheduler.address", 8030), ("resource-tracker.address", 8031), ("admin.address", 8033), ("webapp.address", 8088)):
+            yarn["yarn.resourcemanager." + service] = names[0] + ":" + str(port)
+    container_env = f"JAVA_HOME={java},HADOOP_HOME={hadoop},HADOOP_MAPRED_HOME={hadoop}"
     mapred = {"mapreduce.framework.name": "yarn", "mapreduce.application.classpath": hadoop + "/share/hadoop/mapreduce/*," + hadoop + "/share/hadoop/mapreduce/lib/*",
-              "yarn.app.mapreduce.am.env": "HADOOP_MAPRED_HOME=" + hadoop,
-              "mapreduce.map.env": "HADOOP_MAPRED_HOME=" + hadoop, "mapreduce.reduce.env": "HADOOP_MAPRED_HOME=" + hadoop,
+              "yarn.app.mapreduce.am.env": container_env,
+              "mapreduce.map.env": container_env, "mapreduce.reduce.env": container_env,
               "mapreduce.map.memory.mb": 512, "mapreduce.reduce.memory.mb": 512,
               "mapreduce.map.java.opts": "-Xmx384m", "mapreduce.reduce.java.opts": "-Xmx384m",
               "yarn.app.mapreduce.am.resource.mb": 512, "yarn.app.mapreduce.am.command-opts": "-Xmx384m",
               "mapreduce.map.maxattempts": 4, "mapreduce.reduce.maxattempts": 4,
               "mapreduce.am.max-attempts": 4, "mapreduce.map.speculative": False, "mapreduce.reduce.speculative": False,
-              "mapreduce.jobhistory.address": names[0] + ":10020", "mapreduce.jobhistory.webapp.address": names[0] + ":19888"}
+              "mapreduce.jobhistory.address": names[0] + ":10020", "mapreduce.jobhistory.webapp.address": names[0] + ":19888",
+              "mapreduce.jobhistory.bind-host": "0.0.0.0", "mapreduce.shuffle.port": 13562,
+              "yarn.app.mapreduce.am.job.client.port-range": "51000-51099", "yarn.app.mapreduce.am.webapp.port-range": "51100-51199"}
+    capacity = {"yarn.scheduler.capacity.root.queues": "default", "yarn.scheduler.capacity.root.default.capacity": 100,
+                "yarn.scheduler.capacity.root.default.maximum-capacity": 100, "yarn.scheduler.capacity.maximum-am-resource-percent": 0.5}
     for index, node in enumerate(nodes):
         folder = destination / node["name"]
         folder.mkdir(parents=True, exist_ok=True)
-        node_yarn = dict(yarn, **{"yarn.nodemanager.hostname": node["name"], "yarn.nodemanager.resource.memory-mb": node.get("yarnMemoryMb", 2048), "yarn.nodemanager.resource.cpu-vcores": node.get("vcores", 2)})
+        node_yarn = dict(yarn, **{"yarn.nodemanager.hostname": node["name"], "yarn.nodemanager.address": node["name"] + ":8041",
+                               "yarn.nodemanager.localizer.address": node["name"] + ":8040", "yarn.nodemanager.webapp.address": node["name"] + ":8042",
+                               "yarn.nodemanager.resource.memory-mb": node.get("yarnMemoryMb", 2048), "yarn.nodemanager.resource.cpu-vcores": node.get("vcores", 2)})
         if ha and index < 2:
             node_yarn["yarn.resourcemanager.ha.id"] = f"rm{index + 1}"
-        for filename, props in (("core-site.xml", common), ("hdfs-site.xml", hdfs), ("yarn-site.xml", node_yarn), ("mapred-site.xml", mapred)):
-            (folder / filename).write_text(xml(props), encoding="utf-8")
-        (folder / "hadoop-env.sh").write_text(f'export JAVA_HOME={shlex.quote(java)}\nexport HADOOP_HEAPSIZE_MAX=384\nexport HADOOP_LOG_DIR={shlex.quote(data + "/logs")}\n', encoding="utf-8")
+        node_hdfs = dict(hdfs, **{"dfs.datanode.hostname": node["name"]})
+        for filename, props in (("core-site.xml", common), ("hdfs-site.xml", node_hdfs), ("yarn-site.xml", node_yarn), ("mapred-site.xml", mapred), ("capacity-scheduler.xml", capacity)):
+            write_text(folder / filename, xml(props))
+        write_text(folder / "hadoop-env.sh", f'export JAVA_HOME={shlex.quote(java)}\nexport HADOOP_HEAPSIZE_MAX=384\nexport HADOOP_LOG_DIR={shlex.quote(data + "/logs")}\n')
         roles = ["datanode", "nodemanager", "collector", "console"]
         if (ha and index < 2) or (not ha and index == 0):
             roles += ["namenode", "resourcemanager"]
@@ -100,14 +121,14 @@ def render(inventory, destination):
                 roles += ["journalnode"]
         if index == 0:
             roles += ["historyserver"]
-        (folder / "roles.json").write_text(json.dumps({"mode": mode, "roles": roles, "node": node}, indent=2), encoding="utf-8")
+        write_text(folder / "roles.json", json.dumps({"mode": mode, "roles": roles, "node": node}, indent=2))
         zk = ["tickTime=2000", f"dataDir={data}/zookeeper", "clientPort=2181", "admin.enableServer=false", "initLimit=10", "syncLimit=5", "autopurge.snapRetainCount=3", "autopurge.purgeInterval=1", "4lw.commands.whitelist=ruok,srvr,mntr"]
         if ha:
             zk += [f"server.{i+1}={host}:2888:3888" for i, host in enumerate(witnesses)]
-        (folder / "zoo.cfg").write_text("\n".join(zk) + "\n", encoding="utf-8")
-        (folder / "myid").write_text(str(index + 1) + "\n", encoding="utf-8")
+        write_text(folder / "zoo.cfg", "\n".join(zk) + "\n")
+        write_text(folder / "myid", str(index + 1) + "\n")
         env = f'JAVA_HOME={java}\nHADOOP_HOME={hadoop}\nHADOOP_CONF_DIR={install}/conf\nHG_DATA_ROOT=/happygit/data\nHG_ZK_CONNECT={quorum}\nHG_CLUSTER_MODE={mode}\nHG_CLUSTER_NODE_COUNT={len(nodes)}\n'
-        (folder / "platform.env.example").write_text(env + "# Copy to platform.env (0600), then set shared HG_ZK_AUTH=user:password\n# HG_ADMIN_TOKEN=<random string, at least 24 chars>\n# GITHUB_TOKEN=<optional public collector credential>\n", encoding="utf-8")
+        write_text(folder / "platform.env.example", env + "# Copy to platform.env (0600), then set shared HG_ZK_AUTH=user:password\n# HG_ADMIN_TOKEN=<random string, at least 24 chars>\n# GITHUB_TOKEN=<this operator's GitHub token>\n# HG_GITHUB_RATE_SCOPE=<GitHub login; same account must use the same scope>\n")
         for role in roles:
             if role == "collector":
                 command = f"{install}/bin/data-platform worker --id {node['name']}"
@@ -118,12 +139,14 @@ def render(inventory, destination):
             else:
                 executable = "hdfs" if role in ("namenode", "datanode", "journalnode", "zkfc") else "mapred" if role == "historyserver" else "yarn"
                 command = f"{hadoop}/bin/{executable} {role}"
-            unit = f"[Unit]\nDescription=HappyGit {role}\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=simple\nUser={user}\nEnvironmentFile={install}/conf/platform.env\nWorkingDirectory={data}\nExecStart={command}\nRestart=on-failure\nRestartSec=5\nLimitNOFILE=65536\n[Install]\nWantedBy=multi-user.target\n"
-            (folder / f"happygit-{role}.service").write_text(unit, encoding="utf-8")
+            restart = "always" if role == "collector" else "on-failure"
+            unit = f"[Unit]\nDescription=HappyGit {role}\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=simple\nUser={user}\nEnvironmentFile={install}/conf/platform.env\nWorkingDirectory={data}\nExecStart={command}\nRestart={restart}\nRestartSec=5\nLimitNOFILE=65536\n[Install]\nWantedBy=multi-user.target\n"
+            write_text(folder / f"happygit-{role}.service", unit)
+    write_text(destination / "hosts.entries", "".join(f"{node['address']} {node['name']}\n" for node in nodes))
     summary = {"clusterName": inventory.get("clusterName", "happygit"), "mode": mode, "nodes": nodes,
                "quorumHosts": witnesses, "controlPlaneAutomaticFailover": ha, "replication": min(3, len(nodes)),
                "requirements": ["majority of quorum hosts online", "reachable data replicas", "remaining YARN capacity", "working NameNode fencing", "resolvable hostnames and synchronized clocks"]}
-    (destination / "cluster-plan.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_text(destination / "cluster-plan.json", json.dumps(summary, ensure_ascii=False, indent=2))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

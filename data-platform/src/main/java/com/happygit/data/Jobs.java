@@ -62,7 +62,7 @@ public final class Jobs {
                 if(first!=null) { if(!first.equals(v)) throw new IOException("Conflicting event identity"); c.getCounter(Count.DUPLICATE).increment(1); }
                 else first=v; }
             long end=c.getConfiguration().getLong("hg.referenceTime",0), at=first.path("effectiveAt").asLong(first.path("occurredAt").asLong());
-            boolean valid=at>end-90L*86400000 && at<=end && !first.path("recordKind").asText("open").equals("discard") && !Json.text(first,"repoId").isEmpty();
+            boolean valid=at>end-90L*86400000 && at<=end && at>c.getConfiguration().getLong("hg.eventStart",Long.MIN_VALUE) && at<=c.getConfiguration().getLong("hg.eventEnd",Long.MAX_VALUE) && !first.path("recordKind").asText("open").equals("discard") && !Json.text(first,"repoId").isEmpty();
             if(valid) { first.put("effectiveAt",at); emit(c,first); } else c.getCounter(Count.IGNORED).increment(1);
         }
     }
@@ -142,11 +142,11 @@ public final class Jobs {
                     else if(Arrays.asList("PushEvent","IssuesEvent","PullRequestEvent").contains(source)){activities++;lastActivity=Math.max(lastActivity,at);}
                     hidden|=v.path("hidden").asBoolean();}}
             long now=c.getConfiguration().getLong("hg.referenceTime",0);
-            double browse=opens==0?0:Math.min(1+Math.log(opens),3)*Math.pow(2,-Math.max(0,now-last)/86400000.0/30);
+            double browse=opens==0?0:Math.min(1+Math.log(opens),3)*Math.pow(2,-Math.max(0,now-last)/86400000.0/c.getConfiguration().getDouble("hg.browseHalfLifeDays",30));
             double activity=activities==0?0:.5*Math.min(Math.log1p(activities),2)*Math.pow(2,-Math.max(0,now-lastActivity)/86400000.0/30);
             String[] parts=key.toString().split("\t",2);
             emit(c,Json.object().put("kind","evidence").put("subjectId",parts[0]).put("repoId",parts[1]).put("opens",opens).put("owned",owned).put("hidden",hidden)
-                    .put("weight",hidden?0:browse+activity+(star?3:0)+(owned?1.5:0)));
+                    .put("weight",hidden?0:browse+activity+(star?c.getConfiguration().getDouble("hg.starWeight",3):0)+(owned?c.getConfiguration().getDouble("hg.ownedWeight",1.5):0)));
         }
     }
     public static class JoinMap extends Reader {
@@ -197,7 +197,7 @@ public final class Jobs {
                 for(String topic:known){double share=weight/known.size();topics.merge(topic,share,Double::sum);evidence.computeIfAbsent(topic,t->new Vectors.TopK(5)).offer(Json.object().put("repoId",Json.text(v,"repoId")).put("score",share));}
             }
             if(seed==null)throw new IOException("Every processed subject requires an explicit seed");
-            Set<String> manual=new TreeSet<>();for(JsonNode tag:seed.path("manualTags"))if(dictionary.path("topic").has(tag.asText()))manual.add(tag.asText());
+            Set<String> manual=new TreeSet<>();if(!c.getConfiguration().getBoolean("hg.omitManualTags",false))for(JsonNode tag:seed.path("manualTags"))if(dictionary.path("topic").has(tag.asText()))manual.add(tag.asText());
             for(String tag:manual){sum[dictionary.path("topic").path(tag).asInt()]+=4/Math.sqrt(manual.size());topics.merge(tag,4.0/manual.size(),Double::sum);}
             ObjectNode result=Json.object().put("kind","profile").put("subjectId",Json.text(seed,"subjectId")).put("evidenceCount",count).put("browseEventCount",opens).put("missingFeatureEventCount",missing);
             result.set("vector",Vectors.normalize(sum,512));result.set("languages",Vectors.distribution(languages));result.set("topics",Vectors.distribution(topics));result.set("ownedRepoIds",owned);result.set("usedRepoIds",used);

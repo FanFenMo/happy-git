@@ -11,7 +11,7 @@ import java.util.*;
 public final class Main {
     private static final Set<String> TYPES=new HashSet<>(Arrays.asList("repository","collection","import","process"));
     public static void main(String[] args) throws Exception {
-        if(args.length==0){System.out.println("HappyGit data: worker | enqueue | plan | plan-control | export-catalog | archive-cloud | import | process | pipeline | status | serve");return;}
+        if(args.length==0){System.out.println("HappyGit data: worker | enqueue | plan | plan-control | export-catalog | archive-cloud | import | process | pipeline | learning-prepare | learning-submit | learning-train | learning-infer-file | learning-model | learning-schedule | learning-batch | status | serve");return;}
         Map<String,String> options=new LinkedHashMap<>();for(int i=1;i<args.length;i+=2){if(!args[i].startsWith("--")||i+1>=args.length)throw new IllegalArgumentException("Expected --key value");options.put(args[i].substring(2),args[i+1]);}
         Configuration conf=new Configuration();String config=System.getenv("HADOOP_CONF_DIR");
         if(config!=null)for(String file:Arrays.asList("core-site.xml","hdfs-site.xml","yarn-site.xml","mapred-site.xml"))conf.addResource(new Path(config,file));
@@ -21,9 +21,33 @@ public final class Main {
             ObjectNode manifest=Json.parse(Files.readString(java.nio.file.Path.of(required(options,"manifest"))));
             System.out.println(new Pipeline(conf).run(manifest,required(options,"output")));return;
         }
+        if(args[0].equals("learning-prepare")){
+            System.out.println(LearningDataset.prepare(conf,java.nio.file.Path.of(required(options,"dataset")),namespace,new Path(required(options,"output")),Boolean.parseBoolean(options.getOrDefault("include-cloud","false"))?new CloudArchiveClient():null));return;
+        }
+        if(args[0].equals("learning-train")){
+            ObjectNode request=Json.parse(Files.readString(java.nio.file.Path.of(required(options,"file"))));
+            System.out.println(LearningRunner.train(conf,request,required(options,"output"),(phase,detail)->System.err.println(Json.object().put("phase",phase).put("at",System.currentTimeMillis()))));return;
+        }
+        if(args[0].equals("learning-infer-file")){
+            ObjectNode request=Json.parse(Files.readString(java.nio.file.Path.of(required(options,"file"))));
+            System.out.println(new LearningPipeline(conf).infer((ObjectNode)request.path("manifest"),(ObjectNode)request.path("model"),required(options,"output")));return;
+        }
+        if(args[0].equals("learning-model")){
+            String action=options.getOrDefault("action","status");CloudArchiveClient cloud=new CloudArchiveClient();
+            if(action.equals("status"))System.out.println(cloud.status());
+            else if(Arrays.asList("publish","rollback").contains(action))System.out.println(cloud.control(action,Json.parse(Files.readString(java.nio.file.Path.of(required(options,"file"))))));
+            else if(action.equals("requeue"))System.out.println(cloud.control("requeue",Json.object()));
+            else throw new IllegalArgumentException("Use status, publish, rollback, or requeue");return;
+        }
         String connect=options.getOrDefault("zk",System.getenv().getOrDefault("HG_ZK_CONNECT","127.0.0.1:2181"));
         try(TaskStore store=new TaskStore(connect,System.getenv().getOrDefault("HG_ZK_ROOT","/happygit"),12000,System.getenv("HG_ZK_AUTH"))){
             switch(args[0]){
+                case "learning-submit":System.out.println(Json.object().put("taskId",LearningRunner.submit(store,Json.parse(Files.readString(java.nio.file.Path.of(required(options,"file")))))));break;
+                case "learning-schedule":System.out.println(LearningRunner.schedule(store));break;
+                case "learning-batch":{
+                    ObjectNode configBody=Json.parse(Files.readString(java.nio.file.Path.of(required(options,"file"))));
+                    System.out.println(LearningRunner.batch(store,conf,root,configBody));break;
+                }
                 case "plan":System.out.println(CollectionPlan.create(store,Json.parse(Files.readString(java.nio.file.Path.of(required(options,"file"))))));break;
                 case "plan-control":System.out.println(store.controlPlan(required(options,"id"),required(options,"action"),Integer.parseInt(options.getOrDefault("extra-budget","0"))));break;
                 case "export-catalog":System.out.println(new CatalogSnapshot(store,conf).export(namespace,java.nio.file.Path.of(required(options,"output"))));break;
@@ -51,7 +75,7 @@ public final class Main {
                     ArrayNode files=manifest.putArray("files");Map<String,ObjectNode> collections=new TreeMap<>();
                     for(ObjectNode task:store.committed(namespace)){
                         if(task.path("type").asText().equals("cloud-export"))throw new IllegalArgumentException("Cloud exports require scope-aware snapshot assembly before processing (next portrait iteration)");
-                        if(Arrays.asList("process","discovery").contains(task.path("type").asText()))continue;
+                        if(!Arrays.asList("import","repository","collection").contains(task.path("type").asText()))continue;
                         if(task.path("type").asText().equals("collection")){
                             if(!task.path("result").path("collectionComplete").asBoolean())continue;
                             String key=task.path("target").asText().toLowerCase(Locale.ROOT)+"\n"+task.path("input").path("subjectId").asText()+"\n"+task.path("input").path("collectionKind").asText();ObjectNode old=collections.get(key);
@@ -84,7 +108,14 @@ public final class Main {
                 try{
                     String type=task.path("type").asText();ObjectNode result;
                     GitHubCollector collector=new GitHubCollector(System.getenv("GITHUB_TOKEN"),store,cache,task.path("input").path("planId").asText(),task.path("id").asText());
-                    if(type.equals("process")){
+                    if(type.equals("learning-train")){
+                        String destination=root+"/learning/"+task.path("namespace").asText()+"/training/"+task.path("id").asText()+"/"+task.path("token").asText();
+                        result=LearningRunner.train(conf,(ObjectNode)task.path("input"),destination,(phase,detail)->{
+                            ObjectNode summary=detail.deepCopy();summary.remove(Arrays.asList("projection","scopes","cloudInputs","splits","jobs","centers"));store.progress(task,phase,summary);
+                        });
+                    }
+                    else if(type.equals("learning-infer"))result=LearningRunner.infer(conf,task,root+"/learning/production/inference/"+task.path("id").asText()+"/"+task.path("token").asText());
+                    else if(type.equals("process")){
                         ObjectNode descriptor=(ObjectNode)task.path("input");
                         ObjectNode frozen=HdfsFiles.readJsonLines(conf,new Path(descriptor.path("path").asText())).get(0);
                         if(!Json.sha256((frozen.toString()+"\n").getBytes(StandardCharsets.UTF_8)).equals(descriptor.path("sha256").asText()))throw new IllegalArgumentException("Manifest digest mismatch");
@@ -114,6 +145,9 @@ public final class Main {
                     String message=failure.getClass().getSimpleName()+": "+String.valueOf(failure.getMessage());
                     System.err.println(Json.object().put("taskId",task.path("id").asText()).put("error",message));
                     try{store.retry(task,message,retry,permanent);}catch(org.apache.zookeeper.KeeperException.NoNodeException | IllegalStateException lost){/* new owner/session decides disposition */}
+                    if(task.path("type").asText().equals("learning-infer")&&(permanent||task.path("attempt").asInt()>=8)){
+                        new CloudArchiveClient().control("queue",Json.object().put("inputId",task.path("input").path("input").path("inputId").asText()).put("modelVersion",task.path("input").path("model").path("modelVersion").asText()).put("taskId",task.path("id").asText()).put("state","failed").put("error",message));
+                    }
                 }
                 if(options.getOrDefault("once","false").equals("true"))return;
             }

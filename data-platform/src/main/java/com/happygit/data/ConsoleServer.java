@@ -63,6 +63,17 @@ public final class ConsoleServer {
                     plans.add(summary);
                 }
                 send(exchange,200,result);
+            }else if(exchange.getRequestMethod().equals("GET")&&path.equals("/api/platform/learning/status")){
+                send(exchange,200,new CloudArchiveClient().status());
+            }else if(exchange.getRequestMethod().equals("GET")&&path.equals("/api/platform/learning/projection")){
+                Map<String,String> query=new HashMap<>();for(String pair:exchange.getRequestURI().getRawQuery().split("&")){String[] parts=pair.split("=",2);query.put(parts[0],URLDecoder.decode(parts[1],StandardCharsets.UTF_8));}
+                send(exchange,200,new CloudArchiveClient().request("GET","/api/v2/internal/learning/projection?namespace="+Json.requireId(query.get("namespace"))+"&version="+Json.requireId(query.get("version")),null));
+            }else if(exchange.getRequestMethod().equals("POST")&&path.equals("/api/platform/learning/train")){
+                send(exchange,202,Json.object().put("taskId",LearningRunner.submit(store,body(exchange))));
+            }else if(exchange.getRequestMethod().equals("POST")&&path.equals("/api/platform/learning/schedule")){
+                send(exchange,202,LearningRunner.schedule(store));
+            }else if(exchange.getRequestMethod().equals("POST")&&path.matches("/api/platform/learning/(publish|rollback|requeue)")){
+                send(exchange,200,new CloudArchiveClient().control(path.substring(path.lastIndexOf('/')+1),body(exchange)));
             }else if(exchange.getRequestMethod().equals("POST")&&path.equals("/api/platform/plans")){
                 send(exchange,202,CollectionPlan.create(store,body(exchange)));
             }else if(exchange.getRequestMethod().equals("POST")&&path.matches("/api/platform/plans/[A-Za-z0-9_.-]+/(pause|resume)")){

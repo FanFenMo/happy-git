@@ -16,6 +16,9 @@ public final class Pipeline {
     private final Configuration configuration;
     public Pipeline(Configuration configuration) { this.configuration=configuration; }
     public ObjectNode run(ObjectNode manifest,String destination) throws Exception {
+        return run(manifest,destination,null,true);
+    }
+    public ObjectNode run(ObjectNode manifest,String destination,Path savedSpace,boolean recall) throws Exception {
         Configuration conf=new Configuration(configuration);
         conf.setLong("hg.referenceTime",manifest.path("referenceTime").asLong());
         conf.setBoolean("hg.synthetic",manifest.path("datasetKind").asText().equals("synthetic"));
@@ -41,9 +44,11 @@ public final class Pipeline {
         conf.setLong("hg.documentCount",catalog);
         Path j02=stage(conf,root,"J02-events",Jobs.EventMap.class,Jobs.EventReduce.class,raw,false,stages);
         Path j03=stage(conf,root,"J03-terms",Jobs.TermsMap.class,Jobs.IdentityReduce.class,Collections.singletonList(j01),false,stages);
-        Path j04=stage(conf,root,"J04-df",Jobs.DfMap.class,Jobs.DfReduce.class,Collections.singletonList(j03),false,stages);
-        Path j05=stage(conf,root,"J05-feature-space",Jobs.SpaceMap.class,Jobs.SpaceReduce.class,Collections.singletonList(j04),false,stages);
-        conf.set("hg.space",new Path(j05,"part-r-00000").toString());
+        if(savedSpace==null){
+            Path j04=stage(conf,root,"J04-df",Jobs.DfMap.class,Jobs.DfReduce.class,Collections.singletonList(j03),false,stages);
+            Path j05=stage(conf,root,"J05-feature-space",Jobs.SpaceMap.class,Jobs.SpaceReduce.class,Collections.singletonList(j04),false,stages);
+            conf.set("hg.space",new Path(j05,"part-r-00000").toString());
+        }else conf.set("hg.space",savedSpace.toString());
         List<ObjectNode> dictionary=HdfsFiles.readJsonLines(conf,new Path(conf.get("hg.space")));
         result.put("featureSpaceVersion",Json.sha256((dictionary.get(0).toString()+"\n").getBytes(StandardCharsets.UTF_8)));
         Path j06=stage(conf,root,"J06-vectors",Jobs.VectorMap.class,Jobs.IdentityReduce.class,Collections.singletonList(j03),false,stages);
@@ -51,8 +56,9 @@ public final class Pipeline {
         // The evidence mapper reads normalized events only, so raw event rows are excluded below.
         Path collections=new Path(root,"collection-input.jsonl");
         try(FSDataOutputStream out=fs.create(collections,false)){
-            for(Path p:raw)for(ObjectNode item:HdfsFiles.readJsonLines(conf,p))
-                if(item.path("kind").asText().equals("collection"))out.write((item.toString()+"\n").getBytes(StandardCharsets.UTF_8));
+            for(Path p:raw)HdfsFiles.forEachJsonLine(conf,p,item->{
+                if(item.path("kind").asText().equals("collection")&&item.path("observedAt").asLong()<=conf.getLong("hg.collectionEnd",Long.MAX_VALUE)&&!conf.getBoolean("hg.omitCollections",false))out.write((item.toString()+"\n").getBytes(StandardCharsets.UTF_8));
+            });
             out.hsync();
         }
         Path j07=stage(conf,root,"J07-evidence",Jobs.EvidenceMap.class,Jobs.EvidenceReduce.class,Arrays.asList(j02,collections),false,stages);
@@ -60,11 +66,14 @@ public final class Pipeline {
         List<Path> profileInput=new ArrayList<>(raw);profileInput.add(j08);
         Path j09=stage(conf,root,"J09-profiles",Jobs.ProfileMap.class,Jobs.ProfileReduce.class,profileInput,true,stages);
         Path j10=stage(conf,root,"J10-cohorts",Jobs.GroupMap.class,Jobs.GroupReduce.class,Collections.singletonList(j09),false,stages);
-        conf.set("hg.profiles",j09.toString());
-        Path j11=stage(conf,root,"J11-candidates",Jobs.RecallMap.class,Jobs.RecallReduce.class,Collections.singletonList(j06),false,stages);
+        Path j11=null;
+        if(recall){conf.set("hg.profiles",j09.toString());
+            j11=stage(conf,root,"J11-candidates",Jobs.RecallMap.class,Jobs.RecallReduce.class,Collections.singletonList(j06),false,stages);}
         Path j12=stage(conf,root,"J12-public",Jobs.PopularMap.class,Jobs.PopularReduce.class,Collections.singletonList(j06),false,stages);
-        ObjectNode outputs=result.putObject("outputs");outputs.put("repositories",j06.toString()).put("profiles",j09.toString()).put("cohorts",j10.toString()).put("candidates",j11.toString()).put("publicRanking",j12.toString()).put("featureSpace",conf.get("hg.space"));
-        result.put("repositoryCount",catalog).put("profileCount",stages.get(8).path("outputRecords").asLong()).put("completedAt",System.currentTimeMillis());
+        ObjectNode outputs=result.putObject("outputs");outputs.put("repositories",j06.toString()).put("profiles",j09.toString()).put("cohorts",j10.toString()).put("publicRanking",j12.toString()).put("featureSpace",conf.get("hg.space"));
+        if(j11!=null)outputs.put("candidates",j11.toString());
+        long profileCount=0;for(JsonNode stage:stages)if(stage.path("stage").asText().equals("J09-profiles"))profileCount=stage.path("outputRecords").asLong();
+        result.put("repositoryCount",catalog).put("profileCount",profileCount).put("completedAt",System.currentTimeMillis());
         Path resultFile=new Path(root,"result-manifest.json");
         try(FSDataOutputStream out=fs.create(resultFile,false)){out.write(Json.bytes(result));out.hsync();}
         return Json.object().put("path",fs.makeQualified(resultFile).toString()).put("sha256",Json.sha256(Json.bytes(result)))
@@ -72,11 +81,11 @@ public final class Pipeline {
                 .put("datasetKind",result.path("datasetKind").asText());
     }
     @SuppressWarnings("rawtypes")
-    private Path stage(Configuration conf,Path root,String name,Class<? extends Mapper> mapper,Class<? extends Reducer> reducer,List<Path> inputs,boolean grouped,ArrayNode stages) throws Exception {
+    static Path stage(Configuration conf,Path root,String name,Class<? extends Mapper> mapper,Class<? extends Reducer> reducer,List<Path> inputs,boolean grouped,ArrayNode stages) throws Exception {
         Job job=Job.getInstance(new Configuration(conf),"happygit-"+root.getName()+"-"+name);
         job.setJarByClass(Pipeline.class);job.setMapperClass(mapper);job.setReducerClass(reducer);
         job.setMapOutputKeyClass(Text.class);job.setMapOutputValueClass(Text.class);job.setOutputKeyClass(NullWritable.class);job.setOutputValueClass(Text.class);
-        job.setNumReduceTasks(name.startsWith("J05")?1:conf.getInt("hg.reducers",2));
+        job.setNumReduceTasks(name.startsWith("J05")||name.startsWith("L01")?1:conf.getInt("hg.reducers",2));
         if(grouped){job.setPartitionerClass(Jobs.PrefixPartition.class);job.setGroupingComparatorClass(Jobs.PrefixGroup.class);}
         for(Path input:inputs)FileInputFormat.addInputPath(job,input);
         FileInputFormat.setMaxInputSplitSize(job,32L*1024*1024);

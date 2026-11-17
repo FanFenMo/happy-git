@@ -1,0 +1,12 @@
+[Unit]
+Description=Prepare and queue a bounded HappyGit training batch
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=happygit
+Group=happygit
+EnvironmentFile=/opt/happygit/conf/platform.env
+WorkingDirectory=/opt/happygit
+ExecStart=/opt/happygit/bin/data-platform learning-batch --file /opt/happygit/conf/learning-batch.json
+NoNewPrivileges=true

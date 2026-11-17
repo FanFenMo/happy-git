@@ -1,0 +1,10 @@
+[Unit]
+Description=Check HappyGit training interval and new evidence quota
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=15min
+Unit=happygit-learning-batch.service
+
+[Install]
+WantedBy=timers.target

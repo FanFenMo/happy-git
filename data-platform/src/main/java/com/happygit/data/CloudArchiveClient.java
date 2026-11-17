@@ -17,6 +17,11 @@ final class CloudArchiveClient {
         if(!base.getScheme().equals("https")&&!(base.getScheme().equals("http")&&Arrays.asList("127.0.0.1","localhost","[::1]").contains(base.getHost())))throw new IllegalArgumentException("Cloud bridge requires HTTPS except loopback");
     }
     ObjectNode prepare()throws Exception{return request("POST","/api/v2/internal/exports/prepare",Json.object());}
+    ObjectNode inputs(String after,long through)throws Exception{return inputs(after,through,false);}
+    ObjectNode inputs(String after,long through,boolean pending)throws Exception{return request("GET","/api/v2/internal/learning/inputs?limit=100&after="+(after.isEmpty()?"":Json.requireId(after))+"&through="+through+"&pendingOnly="+pending,null);}
+    ObjectNode active(String namespace)throws Exception{return request("GET","/api/v2/internal/learning/active?namespace="+Json.requireId(namespace),null);}
+    ObjectNode status()throws Exception{return request("GET","/api/v2/internal/learning/status",null);}
+    ObjectNode control(String action,ObjectNode input)throws Exception{return request("POST","/api/v2/internal/learning/"+action,input);}
     ObjectNode load(String id)throws Exception{return request("GET","/api/v2/internal/exports/"+Json.requireId(id),null);}
     ObjectNode archive(ObjectNode task,HdfsFiles files)throws Exception{
         String id=task.path("target").asText();ObjectNode frozen=load(id);
@@ -28,11 +33,11 @@ final class CloudArchiveClient {
         result=(ObjectNode)committed.path("archive");result.put("exportId",id).put("subjectId",frozen.path("subjectId").asText()).put("analysisEpoch",frozen.path("analysisEpoch").asLong());
         result.set("ranges",frozen.path("ranges"));return result;
     }
-    private ObjectNode request(String method,String path,ObjectNode body)throws Exception{
+    ObjectNode request(String method,String path,ObjectNode body)throws Exception{
         HttpRequest.Builder request=HttpRequest.newBuilder(base.resolve(path)).timeout(Duration.ofSeconds(45)).header("Authorization","Bearer "+token).header("Accept","application/json");
         if(body==null)request.GET();else request.header("Content-Type","application/json").method(method,HttpRequest.BodyPublishers.ofByteArray(Json.bytes(body)));
         HttpResponse<String> response=http.send(request.build(),HttpResponse.BodyHandlers.ofString());
-        if(response.statusCode()==409||response.statusCode()==404)throw new IllegalArgumentException("Cloud export scope unavailable: HTTP "+response.statusCode());
+        if(response.statusCode()==409||response.statusCode()==404){ObjectNode error=Json.parse(response.body());throw new IllegalArgumentException("Cloud learning/input conflict: "+error.path("code").asText()+" HTTP "+response.statusCode());}
         if(response.statusCode()!=200)throw new java.io.IOException("Cloud export API HTTP "+response.statusCode());
         return Json.parse(response.body());
     }

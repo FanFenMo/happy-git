@@ -100,6 +100,11 @@ public final class TaskStore implements AutoCloseable {
             throw new IllegalStateException("Task ownership changed");
         return stat;
     }
+    public void progress(ObjectNode claim,String phase,ObjectNode detail) throws Exception {
+        String path=root+"/tasks/"+claim.path("id").asText();Stat stat=owned(claim,path);
+        ObjectNode update=claim.deepCopy().put("phase",phase).put("progressAt",System.currentTimeMillis());update.set("progress",detail);
+        zk.setData(path,Json.bytes(update),stat.getVersion());claim.put("phase",phase).set("progress",detail);
+    }
     public void finish(ObjectNode claim, ObjectNode result) throws Exception {
         String path = root + "/tasks/" + claim.path("id").asText();
         Stat stat = owned(claim, path);

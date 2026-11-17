@@ -1,0 +1,18 @@
+{
+  "namespace": "production",
+  "datasetManifest": "/var/lib/happygit/datasets/current/dataset-manifest.json",
+  "includeCloud": true,
+  "trainEveryHours": 24,
+  "minNewEvents": 100,
+  "training": {
+    "seed": 20261103,
+    "maxIterations": 12,
+    "tolerance": 0.00001,
+    "centerCounts": [4, 8],
+    "directionBlends": [0, 0.25, 0.5],
+    "behaviors": [
+      {"browseHalfLifeDays": 30, "starWeight": 3, "ownedWeight": 1.5},
+      {"browseHalfLifeDays": 60, "starWeight": 2, "ownedWeight": 1.5}
+    ]
+  }
+}

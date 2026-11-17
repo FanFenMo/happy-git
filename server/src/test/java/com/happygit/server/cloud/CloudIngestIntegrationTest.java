@@ -39,13 +39,14 @@ class CloudIngestIntegrationTest {
     }
     @Test void deviceEventsCollectionsAndExportShareOneDurableContract() throws Exception {
         var source=new DriverManagerDataSource(System.getenv("HG_TEST_MYSQL_URL"),"root","");
-        new ResourceDatabasePopulator(new ClassPathResource("db/migration/V1__cloud_identity_and_ingest.sql")).execute(source);
+        new ResourceDatabasePopulator(new ClassPathResource("db/migration/V1__cloud_identity_and_ingest.sql"),new ClassPathResource("db/migration/V2__portrait_learning_loop.sql")).execute(source);
         var db=new JdbcTemplate(source);
         var manager=new DataSourceTransactionManager(source);
         var auth=new CloudAuthService(db,manager,"test-client","test-secret","http://localhost/callback");
         var ingest=transactional(new CloudIngestService(db,auth),manager);
         var exports=transactional(new CloudExportService(db),manager);
-        mvc=MockMvcBuilders.standaloneSetup(new CloudController(auth,ingest,exports,ADMIN)).build();
+        var learning=transactional(new CloudLearningService(db,auth),manager);
+        mvc=MockMvcBuilders.standaloneSetup(new CloudController(auth,ingest,exports,learning,ADMIN)).build();
         String subject=UUID.randomUUID().toString();
         long now=System.currentTimeMillis();
         db.update("INSERT INTO cloud_users(subject_id,github_id,login,preferences_json,created_at) VALUES(?,?,?,'{\"manualTags\":[],\"hiddenRepoIds\":[]}',?)",subject,"1001","fixture",now);
@@ -92,7 +93,37 @@ class CloudIngestIntegrationTest {
                 .contentType("application/json").content(descriptor.toString())).andExpect(status().isOk());
         assertEquals(2,db.queryForObject("SELECT exported_through FROM cloud_streams WHERE stream_epoch=?",Integer.class,stream));
         assertEquals(0,db.queryForObject("SELECT processed_through FROM cloud_streams WHERE stream_epoch=?",Integer.class,stream));
+        assertEquals("pending",request(get("/api/v2/me/portrait"),200).path("state").asText());
+        // This test supplies registry descriptors; Hadoop artifact verification is exercised by LearningLoopIntegrationTest.
+        ObjectNode model=object().put("namespace","production").put("modelVersion","fixture-model-1").put("catalogMode","real_github_public")
+                .put("artifactPath","hdfs://fixture/model.json").put("artifactDigest","a".repeat(64)).put("featureSpaceVersion","b".repeat(64))
+                .put("catalogSnapshotId","c".repeat(64)).put("inputDigest","d".repeat(64)).put("codeDigest","e".repeat(64));
+        model.putObject("projection").put("dimension",8192);
+        model.putObject("validation").put("passed",true).put("selectedOn","validation").put("users",1);
+        model.putArray("scopes").addObject().put("subjectId",subject).put("analysisEpoch",2).put("revision",4);
+        learning.register(model);
+        learning.activate(object().put("namespace","production").put("modelVersion","fixture-model-1").put("expectedRevision",0).put("reason","integration fixture"),false);
+        JsonNode input=learning.inputs("",System.currentTimeMillis(),100,false).path("items").get(0);
+        ObjectNode portrait=object().put("subjectId",subject).put("analysisEpoch",2).put("inputId",input.path("inputId").asText())
+                .put("generationId","fixture-generation-1").put("modelVersion","fixture-model-1").put("featureSpaceVersion","b".repeat(64))
+                .put("catalogSnapshotId","c".repeat(64)).put("referenceTime",input.path("referenceTime").asLong()).put("inputDigest","f".repeat(64)).put("generatedAt",System.currentTimeMillis());
+        portrait.set("processedThrough",input.path("processedThrough"));portrait.putObject("searchPlan").putArray("queries");
+        ObjectNode vector=portrait.putObject("profile").putObject("vector").put("dimension",8192);vector.putArray("indices").add(0);vector.putArray("values").add(1);
+        learning.stage(portrait);
+        assertEquals(0,db.queryForObject("SELECT processed_through FROM cloud_streams WHERE stream_epoch=?",Integer.class,stream));
+        learning.publish("fixture-generation-1");
+        assertEquals(2,db.queryForObject("SELECT processed_through FROM cloud_streams WHERE stream_epoch=?",Integer.class,stream));
+        assertEquals("current",request(get("/api/v2/me/portrait"),200).path("state").asText());
+        ObjectNode second=model.deepCopy().put("modelVersion","fixture-model-2").put("artifactDigest","1".repeat(64));learning.register(second);
+        learning.activate(object().put("namespace","production").put("modelVersion","fixture-model-2").put("expectedRevision",1).put("reason","new fixture model"),false);
+        assertEquals("stale",request(get("/api/v2/me/portrait"),200).path("state").asText());
+        assertEquals("fixture-model-1",request(get("/api/v2/me/portrait"),200).path("modelVersion").asText());
+        assertEquals("MODEL_CHANGED",assertThrows(CloudProblem.class,()->learning.publish("fixture-generation-1")).code);
+        learning.activate(object().put("namespace","production").put("modelVersion","fixture-model-1").put("expectedRevision",2).put("reason","rollback fixture"),true);
         request(post("/api/v2/me/analysis/reset").content("{\"operationId\":\"reset-1\",\"expectedRevision\":4}"),200);
+        assertEquals("pending",request(get("/api/v2/me/portrait"),200).path("state").asText());
+        assertEquals(0,db.queryForObject("SELECT COUNT(*) FROM learning_generations WHERE payload_json IS NOT NULL",Integer.class));
+        assertEquals("STALE_ANALYSIS_EPOCH",assertThrows(CloudProblem.class,()->learning.activate(object().put("namespace","production").put("modelVersion","fixture-model-2").put("expectedRevision",3).put("reason","must reject expired input"),false)).code);
         assertEquals(0,db.queryForObject("SELECT COUNT(*) FROM cloud_events WHERE payload_json IS NOT NULL",Integer.class));
         JsonNode next=request(post("/api/v2/devices/register").content("{\"installationId\":\"fixture-installation\"}"),200);
         assertNotEquals(stream,next.path("streamEpoch").asText());

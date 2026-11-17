@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule portraits from committed cloud archives
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+Unit=happygit-portrait-schedule.service
+
+[Install]
+WantedBy=timers.target

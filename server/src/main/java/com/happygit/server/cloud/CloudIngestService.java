@@ -99,6 +99,7 @@ public class CloudIngestService {
             accepted=seq;
         }
         db.update("UPDATE cloud_streams SET accepted_through=? WHERE stream_epoch=?",accepted,streamId);
+        if(accepted>value(stream,"accepted_through"))CloudLearningService.requestInference(db,subject,epoch);
         if (previous.isEmpty()) db.update("INSERT INTO cloud_batches VALUES(?,?,?)",subject,request,batchHash);
         stream.put("accepted_through",accepted); ObjectNode result = ack(stream); result.set("timeAdjustments",adjustments); return result;
     }
@@ -126,6 +127,7 @@ public class CloudIngestService {
         snapshot.set("repoIds",members); long revision = value(user,"revision")+1; snapshot.put("revision",revision);
         db.update("INSERT INTO cloud_collections VALUES(?,?,?,?,?,?,?)",subject,epoch,kind,revision,body.path("complete").asBoolean(),snapshot.toString(),System.currentTimeMillis());
         db.update("UPDATE cloud_users SET revision=? WHERE subject_id=?",revision,subject);
+        CloudLearningService.requestInference(db,subject,epoch);
         ObjectNode response = object().put("revision",revision).put("analysisEpoch",epoch).put("complete",body.path("complete").asBoolean()).put("activated",body.path("complete").asBoolean());
         return remember(subject,operation,digest,response);
     }
@@ -145,8 +147,13 @@ public class CloudIngestService {
             db.update("UPDATE cloud_events SET payload_json=NULL WHERE subject_id=?",subject);
             db.update("DELETE FROM cloud_collections WHERE subject_id=?",subject);
             db.update("UPDATE cloud_exports SET state='invalidated',records_json=NULL WHERE subject_id=?",subject);
+            db.update("DELETE FROM learning_current WHERE subject_id=?",subject);
+            db.update("UPDATE learning_generations SET state='invalidated',payload_json=NULL WHERE subject_id=?",subject);
+            db.update("DELETE FROM learning_inputs WHERE subject_id=?",subject);
+            db.update("DELETE FROM learning_inference_queue WHERE subject_id=?",subject);
         }
         db.update("UPDATE cloud_users SET revision=?,analysis_epoch=?,analysis_enabled=?,preferences_json=? WHERE subject_id=?",revision,epoch,enabled,prefs.toString(),subject);
+        if(enabled)CloudLearningService.requestInference(db,subject,epoch);
         user.put("revision",revision);user.put("analysis_epoch",epoch);user.put("analysis_enabled",enabled);user.put("preferences_json",prefs.toString());
         return remember(subject,operation,digest,settings(user));
     }

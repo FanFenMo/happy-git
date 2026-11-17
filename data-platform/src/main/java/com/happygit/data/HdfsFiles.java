@@ -36,16 +36,20 @@ public final class HdfsFiles {
                 .put("sha256", hash.toString()).put("committedAt", System.currentTimeMillis());
     }
     public static List<ObjectNode> readJsonLines(Configuration conf, Path directory) throws Exception {
-        FileSystem fs = directory.getFileSystem(conf);
         List<ObjectNode> result = new ArrayList<>();
+        forEachJsonLine(conf,directory,result::add);
+        return result;
+    }
+    @FunctionalInterface public interface RowConsumer { void accept(ObjectNode row) throws Exception; }
+    public static void forEachJsonLine(Configuration conf, Path directory, RowConsumer consumer) throws Exception {
+        FileSystem fs = directory.getFileSystem(conf);
         List<Path> files = new ArrayList<>();
         if (fs.isFile(directory)) files.add(directory);
         else for (FileStatus file : fs.listStatus(directory))
             if (file.isFile() && !file.getPath().getName().startsWith("_") && !file.getPath().getName().startsWith(".")) files.add(file.getPath());
         files.sort(Comparator.comparing(Path::toString));
         for (Path file : files) try (BufferedReader reader = new BufferedReader(new InputStreamReader(fs.open(file), StandardCharsets.UTF_8))) {
-            for (String line; (line = reader.readLine()) != null;) if (!line.isBlank()) result.add(Json.parse(line));
+            for (String line; (line = reader.readLine()) != null;) if (!line.isBlank()) consumer.accept(Json.parse(line));
         }
-        return result;
     }
 }

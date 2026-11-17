@@ -53,7 +53,7 @@ def package(args):
     include = ["data-platform/bin/data-platform", "data-platform/bin/data-platform-zookeeper",
                "deploy/ubuntu/install-release.sh", "deploy/ubuntu/activate-release.sh",
                "tools/server_release.py", "tools/ubuntu_cluster.py", "tools/collect_model_run.py",
-               "docs/implementation/集群模型交付与验收.md", "deploy/ubuntu/model-export.example.json"]
+               "docs/implementation/集群模型交付与验收.md", "docs/implementation/第三轮服务端开发交接.md", "deploy/ubuntu/model-export.example.json"]
     for relative in include:
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)

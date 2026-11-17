@@ -16,6 +16,8 @@ final class ModelExport {
         Configuration conf=new Configuration(configuration);Path root=new Path(destination);FileSystem fs=root.getFileSystem(conf);
         if(fs.exists(root)||Files.exists(local))throw new IllegalArgumentException("Use new Hadoop and local export directories");
         ObjectNode dataset=LearningFiles.verified(conf,(ObjectNode)protocol.path("dataset"));
+        CloudArchiveClient cloud=dataset.path("scopes").isEmpty()?null:new CloudArchiveClient();
+        if(cloud!=null)cloud.control("check-scopes",Json.object().set("scopes",dataset.path("scopes")));
         String split=protocol.path("split").asText("test"),mode=protocol.path("mode").asText("both");
         if(!Arrays.asList("train","validation","test").contains(split)||!Arrays.asList("baseline","learned","both").contains(mode))throw new IllegalArgumentException("Unknown split or export mode");
         if(protocol.has("referenceTime")&&protocol.path("referenceTime").asLong()!=dataset.path("referenceTime").asLong())throw new IllegalArgumentException("Export referenceTime must match the frozen dataset");
@@ -31,7 +33,7 @@ final class ModelExport {
                 .put("catalogSnapshotId",artifact.path("catalogSnapshotId").asText()).put("featureSpaceVersion",artifact.path("featureSpaceVersion").asText())
                 .put("modelVersion",artifact.path("modelVersion").asText()).put("codeDigest",LearningFiles.codeDigest()).put("framework",conf.get("mapreduce.framework.name","local"))
                 .put("userBlocks",blocks).put("startedAt",started).put("testUsedForFit",false).put("vectorDimension",Vectors.DIMENSION);
-        report.set("sourceCounts",dataset.path("counts"));report.set("requestedSubjects",Json.MAPPER.valueToTree(requested));report.set("model",model);
+        report.set("datasetCounts",dataset.path("counts"));report.putObject("selectedEvidenceCounts");report.set("requestedSubjects",Json.MAPPER.valueToTree(requested));report.set("model",model);
         report.putObject("predictionCounts");report.put("repositoryMaxCoordinates",256).put("profileMaxCoordinates",512);
         ObjectNode outputFiles=report.putObject("files");ArrayNode blockRecords=report.putArray("blocks");
         Map<String,BufferedWriter> writers=new TreeMap<>();Set<String> found=new TreeSet<>();
@@ -47,6 +49,7 @@ final class ModelExport {
                             String subject=Json.requireId(row.path("subjectId").asText());
                             if((!requested.isEmpty()&&!requested.contains(subject))||Integer.parseInt(Json.sha256(subject.getBytes(StandardCharsets.UTF_8)).substring(0,6),16)%blocks!=bucket)return;
                             out.write((row.toString()+"\n").getBytes(StandardCharsets.UTF_8));records[0]++;
+                            ObjectNode counts=(ObjectNode)report.path("selectedEvidenceCounts");String count=row.path("sourceKind").asText("unspecified")+"_"+row.path("kind").asText();counts.put(count,counts.path(count).asLong()+1);
                             if(row.path("kind").asText().equals("subject")&&found.add(subject))subjects[0]++;
                         });
                     }
@@ -76,6 +79,7 @@ final class ModelExport {
                 blockRecord.put("state","completed");
             }
             if(!requested.isEmpty()&&!found.equals(requested))throw new IllegalArgumentException("Requested users are absent from the selected split: "+difference(requested,found));
+            if(cloud!=null)cloud.control("check-scopes",Json.object().set("scopes",dataset.path("scopes")));
             report.put("exportedSubjects",found.size()).put("state","completed");
         } catch(Exception failure) {
             report.put("state",failure instanceof RunGuard.Cancelled?"cancelled":"failed").put("error",failure.getClass().getSimpleName()+": "+failure.getMessage());throw failure;

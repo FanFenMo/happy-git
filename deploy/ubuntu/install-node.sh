@@ -23,11 +23,11 @@ data_root="$(sed -n 's/^WorkingDirectory=//p' "$node_config/happygit-collector.s
 id "$service_user" >/dev/null 2>&1 || useradd --system --home-dir "$data_root" --shell /bin/bash "$service_user"
 install -d -m 0755 "$install_root" "$install_root/bin" "$install_root/conf" "$install_root/runtime"
 install -d -o "$service_user" -g "$service_user" -m 0750 "$data_root"
-for child in namenode datanode journal zookeeper tmp logs; do install -d -o "$service_user" -g "$service_user" -m 0750 "$data_root/$child"; done
+for child in namenode datanode journal zookeeper tmp logs yarn; do install -d -o "$service_user" -g "$service_user" -m 0750 "$data_root/$child"; done
 install -m 0644 "$platform_jar" "$install_root/happygit-data-platform.jar"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 install -m 0755 "$repo_root/data-platform/bin/data-platform" "$repo_root/data-platform/bin/data-platform-zookeeper" "$install_root/bin/"
-for file in core-site.xml hdfs-site.xml yarn-site.xml mapred-site.xml hadoop-env.sh zoo.cfg; do install -m 0644 "$node_config/$file" "$install_root/conf/$file"; done
+for file in core-site.xml hdfs-site.xml yarn-site.xml mapred-site.xml capacity-scheduler.xml hadoop-env.sh zoo.cfg; do install -m 0644 "$node_config/$file" "$install_root/conf/$file"; done
 if [[ ! -e "$install_root/runtime/hadoop" ]]; then ln -s "$hadoop_runtime" "$install_root/runtime/hadoop"; fi
 if [[ ! -e "$install_root/runtime/java" ]]; then ln -s "$java_runtime" "$install_root/runtime/java"; fi
 if [[ ! -e "$install_root/conf/platform.env" ]]; then install -m 0640 -g "$service_user" "$node_config/platform.env.example" "$install_root/conf/platform.env"; fi

@@ -695,7 +695,7 @@ public class CloudService {
         return localRepository.readCloudCohorts("default");
     }
 
-    public JSONObject refreshCohorts(String accountId) {
+    public JSONObject refreshCohorts(String accountId) throws Exception {
         JSONObject out = new JSONObject();
         String token = (accountId != null && !accountId.isEmpty()) ? getValidAccessToken(accountId) : null;
         try {

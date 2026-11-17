@@ -590,6 +590,11 @@ public class CloudService {
             throw new IllegalStateException("FEATURE_SPACE_DIGEST_MISMATCH");
         }
         JSONObject parsed = new JSONObject(trimmed);
+        JSONObject dictionary = parsed.optJSONObject("dictionary");
+        if (dictionary != null) {
+            java.util.Iterator<String> keys = dictionary.keys();
+            while (keys.hasNext()) { String key = keys.next(); parsed.put(key, dictionary.get(key)); }
+        }
         parsed.put("featureSpaceVersion", featureSpaceVersion);
         return parsed;
     }
@@ -628,6 +633,8 @@ public class CloudService {
         }
         try {
             JSONObject portrait = requestJson("/api/v2/me/portrait", "GET", token, null);
+            JSONObject progress = portrait.optJSONObject("processedThrough");
+            if (progress != null) portrait.put("processedThrough", progress.optLong(state.optString("streamEpoch", ""), 0));
             if (portrait.has("analysisEpoch") && !portrait.isNull("analysisEpoch")
                     && portrait.optLong("analysisEpoch") != state.optLong("analysisEpoch", 1)) {
                 out.put("refreshed", false);
@@ -639,7 +646,7 @@ public class CloudService {
             String cachedFsVer = cached != null ? cached.optString("featureSpaceVersion", "") : "";
             String fsVer = portrait.optString("featureSpaceVersion", "");
             JSONObject featureSpace = portrait.optJSONObject("featureSpace");
-            if (featureSpace == null && !fsVer.isEmpty() && !fsVer.equals(cachedFsVer)) {
+            if (featureSpace == null && !fsVer.isEmpty() && (!fsVer.equals(cachedFsVer) || cached == null || cached.optJSONObject("featureSpace") == null)) {
                 try {
                     featureSpace = fetchVerifiedFeatureSpace(token, fsVer);
                 } catch (Exception fsErr) {

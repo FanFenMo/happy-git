@@ -94,29 +94,48 @@ class CloudIngestIntegrationTest {
         assertEquals(2,db.queryForObject("SELECT exported_through FROM cloud_streams WHERE stream_epoch=?",Integer.class,stream));
         assertEquals(0,db.queryForObject("SELECT processed_through FROM cloud_streams WHERE stream_epoch=?",Integer.class,stream));
         assertEquals("pending",request(get("/api/v2/me/portrait"),200).path("state").asText());
-        // This test supplies registry descriptors; Hadoop artifact verification is exercised by LearningLoopIntegrationTest.
+        // This test supplies registry descriptors; LearningLoopIntegrationTest exercises real Hadoop artifacts.
         ObjectNode model=object().put("namespace","production").put("modelVersion","fixture-model-1").put("catalogMode","real_github_public")
                 .put("artifactPath","hdfs://fixture/model.json").put("artifactDigest","a".repeat(64)).put("featureSpaceVersion","b".repeat(64))
                 .put("catalogSnapshotId","c".repeat(64)).put("inputDigest","d".repeat(64)).put("codeDigest","e".repeat(64));
-        model.putObject("projection").put("dimension",8192);
+        ObjectNode projection=model.putObject("projection").put("format","happygit-sparse-8192-v1");
+        ObjectNode dictionary=projection.putObject("dictionary").put("dimension",8192);
+        dictionary.putObject("language").put("Java",0);dictionary.putObject("topic").put("database",128);dictionary.putObject("text");
+        String featureVersion=hash(projection.toString());model.put("featureSpaceVersion",featureVersion);
         model.putObject("validation").put("passed",true).put("selectedOn","validation").put("users",1);
         model.putArray("scopes").addObject().put("subjectId",subject).put("analysisEpoch",2).put("revision",4);
         learning.register(model);
+        assertEquals("FEATURE_SPACE_DIGEST_MISMATCH",assertThrows(CloudProblem.class,()->learning.register(model.deepCopy().put("featureSpaceVersion","b".repeat(64)))).code);
+        assertEquals(projection,request(get("/api/v2/feature-spaces/"+featureVersion),200));
         learning.activate(object().put("namespace","production").put("modelVersion","fixture-model-1").put("expectedRevision",0).put("reason","integration fixture"),false);
         JsonNode input=learning.inputs("",System.currentTimeMillis(),100,false).path("items").get(0);
         ObjectNode portrait=object().put("subjectId",subject).put("analysisEpoch",2).put("inputId",input.path("inputId").asText())
-                .put("generationId","fixture-generation-1").put("modelVersion","fixture-model-1").put("featureSpaceVersion","b".repeat(64))
+                .put("generationId","fixture-generation-1").put("modelVersion","fixture-model-1").put("featureSpaceVersion",featureVersion)
                 .put("catalogSnapshotId","c".repeat(64)).put("referenceTime",input.path("referenceTime").asLong()).put("inputDigest","f".repeat(64)).put("generatedAt",System.currentTimeMillis());
-        portrait.set("processedThrough",input.path("processedThrough"));portrait.putObject("searchPlan").putArray("queries");
+        portrait.set("processedThrough",input.path("processedThrough"));
+        portrait.putObject("searchPlan").putArray("queries").addObject().put("language","Java").put("sort","updated").putArray("topics").add("database");
         ObjectNode vector=portrait.putObject("profile").putObject("vector").put("dimension",8192);vector.putArray("indices").add(0);vector.putArray("values").add(1);
+        ((ObjectNode)portrait.path("profile")).putObject("languages").put("Java",1);
+        ((ObjectNode)portrait.path("profile")).putObject("topics").put("database",1);
         learning.stage(portrait);
         assertEquals(0,db.queryForObject("SELECT processed_through FROM cloud_streams WHERE stream_epoch=?",Integer.class,stream));
         learning.publish("fixture-generation-1");
         assertEquals(2,db.queryForObject("SELECT processed_through FROM cloud_streams WHERE stream_epoch=?",Integer.class,stream));
-        assertEquals("current",request(get("/api/v2/me/portrait"),200).path("state").asText());
+        JsonNode published=request(get("/api/v2/me/portrait"),200),plan=request(get("/api/v2/me/search-plan"),200),cohorts=request(get("/api/v2/cohorts"),200);
+        assertEquals("current",published.path("state").asText());assertEquals("ready",published.path("status").asText());
+        assertEquals(2,published.path("processedThrough").path(stream).asInt());assertEquals("Java",plan.path("queries").get(0).path("language").asText());
+        assertEquals(published.path("generationId"),plan.path("generationId"));assertEquals(1,cohorts.path("cohorts").get(0).path("memberCount").asInt());
+        assertTrue(cohorts.path("cohorts").get(0).path("suppressed").asBoolean());
+        String contractOutput=System.getenv("HG_TEST_CONTRACT_OUTPUT");
+        if(contractOutput!=null) {
+            ObjectNode contract=object().put("streamEpoch",stream);contract.set("portrait",published);contract.set("searchPlan",plan);contract.set("cohorts",cohorts);
+            contract.set("featureSpace",request(get("/api/v2/feature-spaces/"+featureVersion),200));
+            java.nio.file.Files.writeString(java.nio.file.Path.of(contractOutput),contract.toString());
+        }
         ObjectNode second=model.deepCopy().put("modelVersion","fixture-model-2").put("artifactDigest","1".repeat(64));learning.register(second);
         learning.activate(object().put("namespace","production").put("modelVersion","fixture-model-2").put("expectedRevision",1).put("reason","new fixture model"),false);
         assertEquals("stale",request(get("/api/v2/me/portrait"),200).path("state").asText());
+        assertEquals("stale",request(get("/api/v2/me/portrait"),200).path("status").asText());
         assertEquals("fixture-model-1",request(get("/api/v2/me/portrait"),200).path("modelVersion").asText());
         assertEquals("MODEL_CHANGED",assertThrows(CloudProblem.class,()->learning.publish("fixture-generation-1")).code);
         learning.activate(object().put("namespace","production").put("modelVersion","fixture-model-1").put("expectedRevision",2).put("reason","rollback fixture"),true);

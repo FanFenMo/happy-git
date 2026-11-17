@@ -105,6 +105,11 @@ public final class LearningJobs {
     public static class InferMap extends Jobs.Reader {
         private ObjectNode artifact;
         protected void setup(Context c) throws IOException {super.setup(c);try{artifact=LearningFiles.read(c.getConfiguration(),c.getConfiguration().get("hg.artifact"));}catch(Exception e){throw new IOException(e);}}
-        protected void accept(ObjectNode row,Context c) throws IOException,InterruptedException {send(c,Json.text(row,"subjectId"),Portraits.infer(row,artifact));}
+        protected void accept(ObjectNode row,Context c) throws IOException,InterruptedException {
+            ObjectNode profile=Portraits.infer(row,artifact);
+            for(String field:Arrays.asList("modelVersion","featureSpaceVersion","catalogSnapshotId"))profile.set(field,artifact.path(field));
+            profile.put("status",profile.path("evidenceState").asText().equals("no_evidence")?"empty":"ready");
+            profile.set("evidenceRepos",profile.path("usedRepoIds"));send(c,Json.text(row,"subjectId"),profile);
+        }
     }
 }

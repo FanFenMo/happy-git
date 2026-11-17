@@ -10,7 +10,8 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class LearningLoopIntegrationTest {
-    @TempDir java.nio.file.Path directory;
+    @TempDir java.nio.file.Path temporaryDirectory;
+    private java.nio.file.Path directory;
 
     private ObjectNode writeRows(Configuration conf,java.nio.file.Path file,List<ObjectNode> rows) throws Exception {
         Files.createDirectories(file.getParent());StringBuilder content=new StringBuilder();
@@ -21,6 +22,8 @@ class LearningLoopIntegrationTest {
         return Json.object().put("kind","event").put("subjectId",subject).put("eventId",id).put("repoId",repo).put("occurredAt",at).put("source","browse").put("sourceKind","synthetic_llm");
     }
     @Test void frozenTrainingInferenceAndNativeFeedbackProduceTraceableModelVersions() throws Exception {
+        String retainedDirectory=System.getenv("HG_TEST_LEARNING_DIRECTORY");
+        directory=retainedDirectory==null?temporaryDirectory:Files.createDirectories(java.nio.file.Path.of(retainedDirectory));
         Configuration conf=new Configuration();conf.set("fs.defaultFS","file:///");conf.set("mapreduce.framework.name","local");conf.setInt("hg.reducers",1);
         long now=System.currentTimeMillis();List<ObjectNode> repositories=new ArrayList<>(),subjects=new ArrayList<>(),events=new ArrayList<>(),splits=new ArrayList<>();
         for(int i=0;i<2;i++) {
@@ -52,6 +55,7 @@ class LearningLoopIntegrationTest {
         ObjectNode dataset=LearningFiles.verified(conf,first),inference=pipeline.infer(LearningDataset.pipelineManifest(dataset,"test"),model,directory.resolve("inference-1").toUri().toString());
         List<ObjectNode> profiles=HdfsFiles.readJsonLines(conf,new Path(inference.path("profiles").asText()));
         assertEquals(1,profiles.size());assertEquals("test-rust",profiles.get(0).path("subjectId").asText());assertFalse(profiles.get(0).path("directions").isEmpty());
+        assertEquals(model.path("modelVersion"),profiles.get(0).path("modelVersion"));
         assertEquals(immutableDigest,LearningFiles.describe(conf,new Path(model.path("artifactPath").asText())).path("sha256").asText());
         String nativeEvents=System.getenv("HG_TEST_CLIENT_EVENTS");
         List<ObjectNode> feedback=nativeEvents==null?Collections.singletonList(event("train-java","new-browse","123",now-1000)):HdfsFiles.readJsonLines(conf,new Path(java.nio.file.Path.of(nativeEvents).toUri()));
@@ -68,6 +72,7 @@ class LearningLoopIntegrationTest {
         splitFile=writeRows(conf,input.resolve("splits/subjects.jsonl"),splits);splitFile.put("path","splits/subjects.jsonl");files.add(splitFile);Files.writeString(sourceFile,source.toString());
         ObjectNode second=LearningDataset.prepare(conf,sourceFile,"experiment-integration",new Path(directory.resolve("snapshot-2").toUri()),null);request.set("dataset",second);
         ObjectNode next=pipeline.train(request,directory.resolve("model-2").toUri().toString(),(phase,detail)->{});
+        assertNotEquals(artifact.path("centers"),pipeline.load(next).path("centers"));
         assertNotEquals(model.path("modelVersion"),next.path("modelVersion"));assertNotEquals(model.path("artifactDigest"),next.path("artifactDigest"));
         assertNotEquals(model.path("datasetVersion"),next.path("datasetVersion"));assertEquals(model.path("featureSpaceVersion"),next.path("featureSpaceVersion"));
         ObjectNode inferred=pipeline.infer(LearningDataset.pipelineManifest(LearningFiles.verified(conf,second),"test"),next,directory.resolve("inference-2").toUri().toString());

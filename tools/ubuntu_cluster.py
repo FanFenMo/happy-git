@@ -40,6 +40,16 @@ def render(inventory, destination):
         raise ValueError("Use dedicated absolute install and data directories")
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,30}", user):
         raise ValueError("Invalid service user")
+    api = inventory.get("api")
+    if api and (api["node"] not in names or not 1024 <= api.get("port", 8080) <= 65535):
+        raise ValueError("API node and port must belong to this inventory")
+    if api and (not isinstance(api.get("heapMb", 512), int) or not 128 <= api.get("heapMb", 512) <= 65536):
+        raise ValueError("Provide an API heap budget in MiB")
+    if api and not re.fullmatch(r"/[A-Za-z0-9/_.+-]+", api.get("envFile", "/etc/happygit/cloud.env")):
+        raise ValueError("Use an absolute private API environment path")
+    coordinator = inventory.get("learningCoordinator", names[0])
+    if coordinator not in names:
+        raise ValueError("Learning coordinator must belong to the inventory")
     ha = len(nodes) >= 3
     mode = "ha-quorum" if ha else "two-host-limited"
     witnesses = names[:3] if ha else names[:1]
@@ -128,7 +138,7 @@ def render(inventory, destination):
         write_text(folder / "zoo.cfg", "\n".join(zk) + "\n")
         write_text(folder / "myid", str(index + 1) + "\n")
         env = f'JAVA_HOME={java}\nHADOOP_HOME={hadoop}\nHADOOP_CONF_DIR={install}/conf\nHG_DATA_ROOT=/happygit/data\nHG_ZK_CONNECT={quorum}\nHG_CLUSTER_MODE={mode}\nHG_CLUSTER_NODE_COUNT={len(nodes)}\n'
-        write_text(folder / "platform.env.example", env + "# Copy to platform.env (0600), then set shared HG_ZK_AUTH=user:password\n# HG_ADMIN_TOKEN=<random string, at least 24 chars>\n# GITHUB_TOKEN=<this operator's GitHub token>\n# HG_GITHUB_RATE_SCOPE=<GitHub login; same account must use the same scope>\n")
+        write_text(folder / "platform.env.example", env + "# Copy to platform.env (0600), then set shared HG_ZK_AUTH=user:password\n# HG_ADMIN_TOKEN=<random string, at least 24 chars>\n# GITHUB_TOKEN=<this operator's GitHub token>\n# HG_GITHUB_RATE_SCOPE=<GitHub login; same account must use the same scope>\n# HG_CLOUD_API_URL=<business API address reachable by this worker>\n# HG_CLOUD_ADMIN_TOKEN=<same service token as the business API>\n")
         for role in roles:
             if role == "collector":
                 command = f"{install}/bin/data-platform worker --id {node['name']}"
@@ -140,12 +150,28 @@ def render(inventory, destination):
                 executable = "hdfs" if role in ("namenode", "datanode", "journalnode", "zkfc") else "mapred" if role == "historyserver" else "yarn"
                 command = f"{hadoop}/bin/{executable} {role}"
             restart = "always" if role == "collector" else "on-failure"
-            unit = f"[Unit]\nDescription=HappyGit {role}\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=simple\nUser={user}\nEnvironmentFile={install}/conf/platform.env\nWorkingDirectory={data}\nExecStart={command}\nRestart={restart}\nRestartSec=5\nLimitNOFILE=65536\n[Install]\nWantedBy=multi-user.target\n"
+            unit = f"[Unit]\nDescription=HappyGit {role}\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=simple\nUser={user}\nEnvironmentFile={install}/conf/platform.env\nEnvironmentFile=-{install}/conf/release.env\nWorkingDirectory={data}\nExecStart={command}\nRestart={restart}\nRestartSec=5\nLimitNOFILE=65536\n[Install]\nWantedBy=multi-user.target\n"
             write_text(folder / f"happygit-{role}.service", unit)
+        if node["name"] == coordinator:
+            for name, command, interval in (("cloud-archive", "archive-cloud --namespace production", "1min"), ("portrait-schedule", "learning-schedule", "1min"), ("learning-batch", "learning-batch --file " + install + "/conf/learning-batch.json", "15min")):
+                unit = f"[Unit]\nDescription=HappyGit {name}\nAfter=network-online.target\n[Service]\nType=oneshot\nUser={user}\nEnvironmentFile={install}/conf/platform.env\nEnvironmentFile=-{install}/conf/release.env\nWorkingDirectory={data}\nExecStart={install}/bin/data-platform {command}\nNoNewPrivileges=true\n"
+                write_text(folder / f"happygit-{name}.service", unit)
+                write_text(folder / f"happygit-{name}.timer", f"[Unit]\nDescription=Schedule HappyGit {name}\n[Timer]\nOnBootSec=2min\nOnUnitInactiveSec={interval}\nUnit=happygit-{name}.service\n[Install]\nWantedBy=timers.target\n")
+            batch = {"namespace": "production", "datasetManifest": data + "/datasets/current/dataset-manifest.json", "includeCloud": True, "trainEveryHours": 24, "minNewEvents": 100, "training": {"seed": 20261103, "maxIterations": 12, "centerCounts": [4, 8], "directionBlends": [0, 0.25, 0.5]}}
+            write_text(folder / "learning-batch.example.json", json.dumps(batch, ensure_ascii=False, indent=2) + "\n")
+        if api and node["name"] == api["node"]:
+            api_env = api.get("envFile", "/etc/happygit/cloud.env")
+            write_text(folder / "happygit-api.service", f"[Unit]\nDescription=HappyGit business API\nAfter=network-online.target\nWants=network-online.target\n[Service]\nUser={user}\nEnvironmentFile={api_env}\nEnvironmentFile=-{install}/conf/release.env\nWorkingDirectory={data}\nExecStart={install}/runtime/java17/bin/java -Xmx{api.get('heapMb', 512)}m -jar {install}/current/artifacts/happygit-server.jar\nRestart=on-failure\nRestartSec=5\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\n[Install]\nWantedBy=multi-user.target\n")
+            write_text(folder / "cloud.env.example", f"SPRING_PROFILES_ACTIVE=cloud\nSERVER_PORT={api.get('port', 8080)}\nHG_MYSQL_URL=jdbc:mysql://127.0.0.1:3306/happygit?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC\nHG_MYSQL_USER=happygit\nHG_MYSQL_PASSWORD=\nHG_CLOUD_ADMIN_TOKEN=\nGITHUB_CLIENT_ID=\nGITHUB_CLIENT_SECRET=\nGITHUB_CLOUD_CALLBACK_URL=https://your-domain/api/v2/auth/github/callback\nGITHUB_CALLBACK_URL=https://your-domain/api/auth/github/callback\n")
+        roles_document = {"mode": mode, "roles": roles, "node": node, "installRoot": install, "dataRoot": data, "serviceUser": user,
+                          "learningCoordinator": node["name"] == coordinator, "api": api if api and node["name"] == api["node"] else None,
+                          "units": sorted(path.name for path in folder.glob("happygit-*.service")), "timers": sorted(path.name for path in folder.glob("happygit-*.timer"))}
+        write_text(folder / "roles.json", json.dumps(roles_document, ensure_ascii=False, indent=2) + "\n")
     write_text(destination / "hosts.entries", "".join(f"{node['address']} {node['name']}\n" for node in nodes))
     summary = {"clusterName": inventory.get("clusterName", "happygit"), "mode": mode, "nodes": nodes,
                "quorumHosts": witnesses, "controlPlaneAutomaticFailover": ha, "replication": min(3, len(nodes)),
-               "requirements": ["majority of quorum hosts online", "reachable data replicas", "remaining YARN capacity", "working NameNode fencing", "resolvable hostnames and synchronized clocks"]}
+               "api": api, "learningCoordinator": coordinator, "installRoot": install, "dataRoot": data, "serviceUser": user,
+               "acceptance": "not_run", "requirements": ["reachable data replicas", "remaining YARN capacity", "resolvable hostnames and synchronized clocks"] + (["majority of quorum hosts online", "working NameNode fencing"] if ha else ["single control host remains a failure point"])}
     write_text(destination / "cluster-plan.json", json.dumps(summary, ensure_ascii=False, indent=2))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

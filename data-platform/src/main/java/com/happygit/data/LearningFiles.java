@@ -34,9 +34,10 @@ final class LearningFiles {
     }
     static String codeDigest() throws Exception {
         MessageDigest digest=MessageDigest.getInstance("SHA-256");
-        for(Class<?> type:new Class<?>[]{Pipeline.class,Jobs.class,Vectors.class,LearningPipeline.class,LearningJobs.class,Portraits.class,LearningDataset.class}) {
+        for(Class<?> type:new Class<?>[]{Pipeline.class,Jobs.class,Vectors.class,LearningPipeline.class,LearningJobs.class,Portraits.class,LearningDataset.class,LearningFiles.class,ModelExport.class,RunJournal.class,RunGuard.class}) {
             try(InputStream in=type.getResourceAsStream(type.getSimpleName()+".class")){digest.update(in.readAllBytes());}
-            for(Class<?> nested:type.getDeclaredClasses())try(InputStream in=nested.getResourceAsStream(nested.getSimpleName().equals(type.getSimpleName())?type.getSimpleName()+".class":nested.getName().substring(nested.getName().lastIndexOf('.')+1)+".class")){digest.update(in.readAllBytes());}
+            Class<?>[] classes=type.getDeclaredClasses();java.util.Arrays.sort(classes,java.util.Comparator.comparing(Class::getName));
+            for(Class<?> nested:classes)try(InputStream in=nested.getResourceAsStream(nested.getName().substring(nested.getName().lastIndexOf('.')+1)+".class")){digest.update(in.readAllBytes());}
         }
         StringBuilder hash=new StringBuilder();for(byte b:digest.digest())hash.append(String.format("%02x",b&255));return hash.toString();
     }

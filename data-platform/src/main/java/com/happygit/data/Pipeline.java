@@ -23,6 +23,7 @@ public final class Pipeline {
         conf.setLong("hg.referenceTime",manifest.path("referenceTime").asLong());
         conf.setBoolean("hg.synthetic",manifest.path("datasetKind").asText().equals("synthetic"));
         Path root=new Path(destination);FileSystem fs=root.getFileSystem(conf);
+        RunJournal.use(conf,root);
         if(fs.exists(root))throw new IOException("Run output exists; use a new attempt path");
         fs.mkdirs(root);
         try(FSDataOutputStream out=fs.create(new Path(root,"input-manifest.json"),false)){out.write(Json.bytes(manifest));out.hsync();}
@@ -90,13 +91,26 @@ public final class Pipeline {
         for(Path input:inputs)FileInputFormat.addInputPath(job,input);
         FileInputFormat.setMaxInputSplitSize(job,32L*1024*1024);
         Path output=new Path(root,name);FileOutputFormat.setOutputPath(job,output);
-        long started=System.currentTimeMillis();
-        if(!job.waitForCompletion(true))throw new IOException("MapReduce stage failed: "+name+" job="+job.getJobID());
+        long started=System.currentTimeMillis();RunGuard.check(conf);
+        ObjectNode receipt=null;Exception failure=null;boolean succeeded=false;
+        try {
+            job.submit();receipt=RunJournal.submitted(conf,job,name,output,started);RunGuard.progress(conf,receipt);
+            if(conf.get("hg.runGuard")!=null)while(!job.isComplete()){RunGuard.check(conf);Thread.sleep(1000);}
+            RunGuard.check(conf);succeeded=job.waitForCompletion(true);
+            if(!succeeded)throw new IOException("MapReduce stage failed: "+name+" job="+job.getJobID());
+        } catch(Exception error) {
+            failure=error;
+            try{if(job.getJobID()!=null&&!job.isComplete())job.killJob();}catch(Exception killError){error.addSuppressed(killError);}
+            throw error;
+        } finally {
+            try{if(receipt!=null)RunJournal.finished(conf,receipt,succeeded,failure);}catch(Exception recordError){if(failure!=null)failure.addSuppressed(recordError);else throw recordError;}
+        }
         ObjectNode record=stages.addObject().put("stage",name).put("jobId",job.getJobID().toString()).put("startedAt",started).put("finishedAt",System.currentTimeMillis())
                 .put("inputRecords",job.getCounters().findCounter(Jobs.Count.INPUT).getValue()).put("outputRecords",job.getCounters().findCounter(Jobs.Count.OUTPUT).getValue())
                 .put("ignored",job.getCounters().findCounter(Jobs.Count.IGNORED).getValue()).put("duplicates",job.getCounters().findCounter(Jobs.Count.DUPLICATE).getValue())
                 .put("dotProducts",job.getCounters().findCounter(Jobs.Count.DOT_PRODUCTS).getValue()).put("missingFeatureEvents",job.getCounters().findCounter(Jobs.Count.MISSING_FEATURE).getValue());
         record.put("mapTasks",job.getCounters().findCounter(JobCounter.TOTAL_LAUNCHED_MAPS).getValue()).put("reduceTasks",job.getCounters().findCounter(JobCounter.TOTAL_LAUNCHED_REDUCES).getValue());
+        record.put("framework",receipt.path("framework").asText());if(receipt.has("applicationId"))record.set("applicationId",receipt.path("applicationId"));
         Path checkpoint=new Path(root,name+".json");try(FSDataOutputStream out=root.getFileSystem(conf).create(checkpoint,false)){out.write(Json.bytes(record));out.hsync();}
         return output;
     }

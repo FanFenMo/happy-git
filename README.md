@@ -2,6 +2,8 @@
 
 基于开发者画像的开源项目推荐与类短视频卡片流展示系统，结合 Hadoop MapReduce 离线计算与在线实时推荐服务。
 
+服务端第三轮的版本部署、固定模型导出、实际 YARN 作业证据与恢复交接见[集群模型交付与集中验收](docs/implementation/集群模型交付与验收.md)。本轮功能分支先完成实现与编译，进入 develop 后集中验收。
+
 新架构的实施依据见[第一版函数级设计文档](docs/design/v1/README.md)，包含服务端、Hadoop 计算、客户端和统一契约；它承接 `docs/sdd/` 中的四份 SDD，明确区分现有代码与待实现能力。
 
 2026-11-03 的[完成情况清单](docs/roadmap/2026-11-03-完成情况清单.md)保留实施前基线；随后按用户要求执行了数据采集、Hadoop 处理、Ubuntu 部署适配和双端 UI 改造。当前实现入口为[数据平台](data-platform/README.md)，本轮实际结果见[验收记录](docs/validation/2026-11-03-data-platform.md)，主机准备见[Ubuntu 部署](deploy/ubuntu/README.md)。[下一代迭代方案](docs/roadmap/2026-11-03-下一代应用迭代方案.md)中其余应用会话、授权上传和在线发布等能力仍待后续实施。

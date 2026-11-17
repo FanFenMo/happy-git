@@ -1,6 +1,8 @@
 # HappyGit 数据采集与 Hadoop 处理
 
-本模块实现公开项目/README/公开集合采集、HDFS 不可变归档、ZooKeeper 任务领取与版本隔离、12 阶段 Java MapReduce 以及管理端和客户端目录的新界面。本轮增加有预算的批量采集计划、条件请求缓存、关联项目补抓、冻结目录导出，以及对 Spring MySQL 接收服务的云端归档桥接；部署及实现状态见[接入交接](../docs/implementation/服务端数据接入交接.md)。正式 Hadoop 画像发布和客户端接入仍按后续轮次实现。
+第三轮新增 learning-export 固定版本结果导出、learning-task 指定任务取消接续与实际作业回执，协议和运行交付见[集群模型交付与集中验收](../docs/implementation/集群模型交付与验收.md)。
+
+本模块实现公开项目/README/公开集合采集、HDFS 不可变归档、ZooKeeper 任务领取与版本隔离、12 阶段 Java MapReduce、模型训练推断和管理工作台。采集与云端归档基础见[接入交接](../docs/implementation/服务端数据接入交接.md)，画像接口与模型换版见[画像训练与回流交接](../docs/implementation/画像训练与回流交接.md)，实际集群部署与正式运行按第三轮集中验收。
 
 ## 运行边界
 

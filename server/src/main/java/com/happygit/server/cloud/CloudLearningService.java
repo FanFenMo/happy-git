@@ -139,9 +139,9 @@ public class CloudLearningService {
         if(matches.isEmpty())return object().put("state","superseded");
         var frozen=matches.get(0);String subject=(String)frozen.get("subject_id");
         JsonNode input=parse((String)frozen.get("summary_json"));String state=body.path("state").asText();
-        if(!Set.of("scheduled","failed").contains(state))throw error(400,"INVALID_STATE","需要 scheduled 或 failed");
+        if(!Set.of("scheduled","failed","cancelled").contains(state))throw error(400,"INVALID_STATE","需要 scheduled、failed 或 cancelled");
         String message=body.path("error").asText("");if(message.length()>512)message=message.substring(0,512);
-        int changed=db.update("UPDATE learning_inference_queue SET state=?,task_id=?,error_message=? WHERE subject_id=? AND analysis_epoch=? AND request_revision=? AND model_version=? AND state<>'succeeded'"+(state.equals("scheduled")?" AND state='queued'":""),
+        int changed=db.update("UPDATE learning_inference_queue SET state=?,task_id=?,error_message=? WHERE subject_id=? AND analysis_epoch=? AND request_revision=? AND model_version=? AND state<>'succeeded'"+(state.equals("scheduled")?" AND state IN ('queued','failed','cancelled')":""),
                 state,id(body,"taskId"),message,subject,frozen.get("analysis_epoch"),input.path("requestRevision").asLong(),id(body,"modelVersion"));
         return object().put("state",changed==1?state:"superseded");
     }
@@ -175,6 +175,8 @@ public class CloudLearningService {
         String subject=(String)row.get("subject_id");var current=user(subject,value(row,"analysis_epoch"));
         var input=db.queryForMap("SELECT * FROM learning_inputs WHERE input_id=?",row.get("input_id"));
         ObjectNode summary=(ObjectNode)parse((String)input.get("summary_json"));
+        var queue=db.queryForList("SELECT state,request_revision FROM learning_inference_queue WHERE subject_id=? FOR UPDATE",subject);
+        if(!queue.isEmpty()&&queue.get(0).get("state").equals("cancelled")&&value(queue.get(0),"request_revision")==summary.path("requestRevision").asLong())throw error(409,"INFERENCE_CANCELLED","本次推断已取消");
         if(!Objects.equals(pointer.get("model_version"),row.get("model_version")))throw error(409,"MODEL_CHANGED","当前模型已更换，请重新推断");
         if(value(current,"revision")!=value(input,"input_revision"))throw error(409,"INPUT_CHANGED","集合或反馈已更新");
         var old=db.queryForList("SELECT g.* FROM learning_current c JOIN learning_generations g ON c.generation_id=g.generation_id WHERE c.subject_id=?",subject);
@@ -249,6 +251,8 @@ public class CloudLearningService {
     }
     public ObjectNode status() {
         ObjectNode result=object();result.set("active",active("production"));
+        result.putObject("runtime").put("releaseId",System.getenv().getOrDefault("HG_RELEASE_ID","unversioned")).put("sourceCommit",System.getenv().getOrDefault("HG_SOURCE_COMMIT","unknown"))
+                .put("nodeConfigSha256",System.getenv().getOrDefault("HG_NODE_CONFIG_SHA256","unknown")).put("javaVersion",System.getProperty("java.version"));
         ArrayNode models=result.putArray("models");
         for(var row:db.queryForList("SELECT * FROM learning_models ORDER BY created_at DESC LIMIT 100")) {
             ObjectNode item=(ObjectNode)parse((String)row.get("descriptor_json"));item.remove("projection");item.put("state",(String)row.get("state"));models.add(item);

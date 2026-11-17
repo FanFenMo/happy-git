@@ -48,6 +48,8 @@ public final class ConsoleServer {
             if(exchange.getRequestMethod().equals("GET")&&path.equals("/api/platform/status")){
                 List<ObjectNode> tasks=store.list();ObjectNode result=Json.object().put("observedAt",System.currentTimeMillis()).put("storageRoot",root)
                         .put("coordination","ZooKeeper").put("workerSessionExpired",store.expired()).put("deploymentMode",System.getenv().getOrDefault("HG_CLUSTER_MODE","local-development"));
+                result.putObject("runtime").put("releaseId",System.getenv().getOrDefault("HG_RELEASE_ID","unversioned")).put("sourceCommit",System.getenv().getOrDefault("HG_SOURCE_COMMIT","unknown"))
+                        .put("nodeConfigSha256",System.getenv().getOrDefault("HG_NODE_CONFIG_SHA256","unknown"));
                 result.set("workers",Json.MAPPER.valueToTree(store.workers()));result.set("tasks",Json.MAPPER.valueToTree(tasks));
                 ObjectNode rates=result.putObject("rateLimits");for(String scope:Arrays.asList("core","search")){ObjectNode observation=store.observation("github-rate-"+scope);if(observation!=null)rates.set(scope,observation);}
                 ArrayNode plans=result.putArray("plans");
@@ -72,6 +74,9 @@ public final class ConsoleServer {
                 send(exchange,202,Json.object().put("taskId",LearningRunner.submit(store,body(exchange))));
             }else if(exchange.getRequestMethod().equals("POST")&&path.equals("/api/platform/learning/schedule")){
                 send(exchange,202,LearningRunner.schedule(store));
+            }else if(exchange.getRequestMethod().equals("POST")&&path.matches("/api/platform/learning/tasks/[a-f0-9]{64}/(cancel|retry)")){
+                String[] segments=path.split("/");ObjectNode request=body(exchange);
+                send(exchange,200,LearningRunner.controlTask(store,Json.requireId(request.path("namespace").asText()),segments[5],segments[6],request.path("expectedAttempt").asInt(-1),request.path("reason").asText()));
             }else if(exchange.getRequestMethod().equals("POST")&&path.matches("/api/platform/learning/(publish|rollback|requeue)")){
                 send(exchange,200,new CloudArchiveClient().control(path.substring(path.lastIndexOf('/')+1),body(exchange)));
             }else if(exchange.getRequestMethod().equals("POST")&&path.equals("/api/platform/plans")){

@@ -4,5 +4,7 @@ set -euo pipefail
 : "${JAVA_HOME:?Set JAVA_HOME}"
 : "${HADOOP_CONF_DIR:?Set HADOOP_CONF_DIR}"
 platform_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-platform_jar="${HG_PLATFORM_JAR:-$platform_dir/happygit-data-platform.jar}"
+default_jar="$platform_dir/happygit-data-platform.jar"
+if [[ -f "$platform_dir/current/artifacts/happygit-data-platform.jar" ]]; then default_jar="$platform_dir/current/artifacts/happygit-data-platform.jar"; fi
+platform_jar="${HG_PLATFORM_JAR:-$default_jar}"
 exec "$JAVA_HOME/bin/java" "-Xmx${HG_ZK_HEAP:-128m}" -cp "$platform_jar:$($HADOOP_HOME/bin/hadoop classpath --glob)" org.apache.zookeeper.server.quorum.QuorumPeerMain "$HADOOP_CONF_DIR/zoo.cfg"

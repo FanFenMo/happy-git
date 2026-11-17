@@ -843,7 +843,7 @@ class CloudService {
       throw Object.assign(new Error('特征空间摘要与 featureSpaceVersion 不一致'), { code: 'FEATURE_SPACE_DIGEST_MISMATCH' })
     }
     const parsed = JSON.parse(trimmed)
-    return { ...parsed, featureSpaceVersion }
+    return { ...parsed, ...(parsed.dictionary || {}), featureSpaceVersion }
   }
 
   async readPortrait(context) {
@@ -870,13 +870,16 @@ class CloudService {
 
     try {
       const portrait = await this.requestJson('/api/v2/me/portrait', { token })
+      if (portrait.processedThrough && typeof portrait.processedThrough === 'object') {
+        portrait.processedThrough = Number(portrait.processedThrough[state.streamEpoch] || 0)
+      }
       if (portrait?.analysisEpoch != null && Number(portrait.analysisEpoch) !== Number(state.analysisEpoch)) {
         // 旧授权范围的结果不进入当前缓存
         return { refreshed: false, reason: 'STALE_ANALYSIS_EPOCH', cloudPortrait: await this.readPortrait(context) }
       }
       const cached = await this.readPortrait(context)
       let featureSpace = portrait.featureSpace || null
-      if (!featureSpace && portrait.featureSpaceVersion && portrait.featureSpaceVersion !== cached?.featureSpaceVersion) {
+      if (!featureSpace && portrait.featureSpaceVersion && (portrait.featureSpaceVersion !== cached?.featureSpaceVersion || !cached?.featureSpace)) {
         try {
           featureSpace = await this.fetchVerifiedFeatureSpace(token, portrait.featureSpaceVersion)
         } catch (err) {

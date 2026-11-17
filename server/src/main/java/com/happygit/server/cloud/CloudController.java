@@ -39,6 +39,7 @@ public class CloudController {
     @GetMapping("/me/search-plan") public Object search(@RequestHeader(value="Authorization",required=false) String token) { return learning.portrait(token,true); }
     @GetMapping("/cohorts") public Object cohorts(@RequestHeader(value="Authorization",required=false) String token) { auth.session(token);return learning.cohorts(); }
     @GetMapping("/models/{version}/projection") public Object projection(@RequestHeader(value="Authorization",required=false) String token,@PathVariable String version) { auth.session(token);return learning.projection(version); }
+    @GetMapping("/feature-spaces/{version}") public Object featureSpace(@RequestHeader(value="Authorization",required=false) String token,@PathVariable String version) { auth.session(token);return learning.featureSpace(version); }
     @GetMapping("/internal/learning/status") public Object learningStatus(@RequestHeader(value="Authorization",required=false) String token) { admin(token);return learning.status(); }
     @GetMapping("/internal/learning/active") public Object activeModel(@RequestHeader(value="Authorization",required=false) String token,@RequestParam(defaultValue="production") String namespace) { admin(token);return learning.active(namespace); }
     @GetMapping("/internal/learning/projection") public Object operatorProjection(@RequestHeader(value="Authorization",required=false) String token,@RequestParam String namespace,@RequestParam String version) { admin(token);return learning.projection(namespace,version); }

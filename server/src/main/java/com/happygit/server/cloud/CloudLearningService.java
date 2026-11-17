@@ -51,6 +51,8 @@ public class CloudLearningService {
             throw error(409,"EXPERIMENT_ONLY","合成项目制品只能发布到实验命名空间");
         for(String field:List.of("artifactDigest","featureSpaceVersion","catalogSnapshotId","inputDigest","codeDigest"))
             if(!body.path(field).asText().matches("[a-f0-9]{64}"))throw error(400,"INVALID_DIGEST",field);
+        if(!body.path("projection").isObject()||!hash(body.path("projection").toString()).equals(body.path("featureSpaceVersion").asText()))
+            throw error(400,"FEATURE_SPACE_DIGEST_MISMATCH","投影制品与特征空间摘要不一致");
         if(!body.path("artifactPath").asText().startsWith("hdfs://")&&!namespace.startsWith("experiment-"))
             throw error(400,"INVALID_ARTIFACT","生产模型需要闭合的 HDFS 制品");
         if(!body.path("validation").path("passed").asBoolean()||body.path("validation").path("users").asLong()<1
@@ -59,7 +61,7 @@ public class CloudLearningService {
         scopes(body);
         var old=db.queryForList("SELECT descriptor_json FROM learning_models WHERE namespace=? AND model_version=?",namespace,version);
         if(!old.isEmpty()) {
-            if(!canonical(parse((String)old.get(0).get("descriptor_json"))).equals(canonical(body)))
+            if(!canonical(parse((String)old.get(0).get("descriptor_json"))).toString().equals(canonical(body).toString()))
                 throw error(409,"IDENTITY_CONFLICT","模型版本对应不同制品");
             return descriptor(namespace,version);
         }
@@ -154,7 +156,7 @@ public class CloudLearningService {
         var input=frozen.get(0);user(subject,value(input,"analysis_epoch"));
         ObjectNode summary=(ObjectNode)parse((String)input.get("summary_json"));
         if(number(body,"analysisEpoch",1)!=value(input,"analysis_epoch")||number(body,"referenceTime",1)!=value(input,"reference_time")
-                ||!body.path("processedThrough").equals(summary.path("processedThrough"))||!body.path("inputDigest").asText().matches("[a-f0-9]{64}"))
+                ||!canonical(body.path("processedThrough")).toString().equals(canonical(summary.path("processedThrough")).toString())||!body.path("inputDigest").asText().matches("[a-f0-9]{64}"))
             throw error(409,"INPUT_MISMATCH","画像范围与冻结输入不一致");
         ObjectNode model=descriptor("production",id(body,"modelVersion"));
         for(String field:List.of("featureSpaceVersion","catalogSnapshotId"))
@@ -163,7 +165,7 @@ public class CloudLearningService {
             throw error(400,"INVALID_RESULT","需要画像和最多四条搜索方向");
         var old=db.queryForList("SELECT payload_json FROM learning_generations WHERE generation_id=?",generation);
         if(!old.isEmpty()) {
-            if(!canonical(parse((String)old.get(0).get("payload_json"))).equals(canonical(body)))throw error(409,"IDENTITY_CONFLICT","画像代号对应不同结果");
+            if(!canonical(parse((String)old.get(0).get("payload_json"))).toString().equals(canonical(body).toString()))throw error(409,"IDENTITY_CONFLICT","画像代号对应不同结果");
         } else db.update("INSERT INTO learning_generations VALUES(?,?,?,?,?,?,?,'staged',?,?)",generation,subject,value(input,"analysis_epoch"),body.path("modelVersion").asText(),inputId,body.path("inputDigest").asText(),value(input,"reference_time"),body.toString(),System.currentTimeMillis());
         return object().put("generationId",generation).put("state","staged");
     }
@@ -196,15 +198,19 @@ public class CloudLearningService {
         var session=auth.session(authorization);String subject=(String)session.get("subject_id");
         var current=db.queryForMap("SELECT * FROM cloud_users WHERE subject_id=? FOR UPDATE",subject);
         ObjectNode response=object().put("subjectId",subject).put("analysisEpoch",value(current,"analysis_epoch"));
-        if(!enabled(current))return response.put("state","disabled");
+        if(!enabled(current))return response.put("state","disabled").put("status","analysis_disabled");
         var rows=db.queryForList("SELECT g.*,i.input_revision FROM learning_current c JOIN learning_generations g ON g.generation_id=c.generation_id JOIN learning_inputs i ON i.input_id=g.input_id WHERE c.subject_id=? AND g.analysis_epoch=? AND g.state='published'",subject,current.get("analysis_epoch"));
-        if(rows.isEmpty())return response.put("state","pending");
+        if(rows.isEmpty())return response.put("state","pending").put("status","pending");
         var row=rows.get(0);ObjectNode payload=(ObjectNode)parse((String)row.get("payload_json"));
         String active=active("production").path("model").path("modelVersion").asText();
         long pending=db.queryForObject("SELECT COUNT(*) FROM cloud_streams WHERE subject_id=? AND analysis_epoch=? AND accepted_through>processed_through",Long.class,subject,current.get("analysis_epoch"));
         boolean stale=!row.get("model_version").equals(active)||value(row,"input_revision")!=value(current,"revision")||pending>0;
-        payload.put("state",stale?"stale":payload.path("profile").path("vector").path("indices").isEmpty()?"no_evidence":"current");
-        if(search)payload.remove("profile");return payload;
+        boolean empty=payload.path("profile").path("vector").path("indices").isEmpty();
+        payload.put("state",stale?"stale":empty?"no_evidence":"current").put("status",stale?"stale":empty?"empty":"ready");
+        if(!search)return payload;
+        ObjectNode plan=payload.path("searchPlan").isObject()?((ObjectNode)payload.path("searchPlan")).deepCopy():object();
+        for(String field:List.of("subjectId","analysisEpoch","state","status","generationId","modelVersion","featureSpaceVersion","catalogSnapshotId","referenceTime","generatedAt","processedThrough"))plan.set(field,payload.path(field));
+        return plan;
     }
     public ObjectNode projection(String version) {
         return projection("production",version);
@@ -214,16 +220,28 @@ public class CloudLearningService {
         response.put("modelVersion",version).put("featureSpaceVersion",model.path("featureSpaceVersion").asText());
         response.set("projection",model.path("projection"));return response;
     }
+    public ObjectNode featureSpace(String version) {
+        var rows=db.queryForList("SELECT descriptor_json FROM learning_models WHERE namespace='production' AND JSON_UNQUOTE(JSON_EXTRACT(descriptor_json,'$.featureSpaceVersion'))=? ORDER BY created_at DESC LIMIT 1",version);
+        if(rows.isEmpty())throw error(404,"FEATURE_SPACE_NOT_FOUND","特征空间不存在");
+        return (ObjectNode)parse((String)rows.get(0).get("descriptor_json")).path("projection");
+    }
     public ObjectNode cohorts() {
         // Reaggregate only currently authorized results; removed scopes never remain in cached totals.
-        TreeMap<String,Double> languages=new TreeMap<>(),topics=new TreeMap<>();long count=0;
-        for(var row:db.queryForList("SELECT g.payload_json FROM learning_current c JOIN learning_generations g ON g.generation_id=c.generation_id JOIN cloud_users u ON u.subject_id=c.subject_id JOIN learning_active a ON a.namespace='production' AND a.model_version=g.model_version WHERE u.analysis_enabled=TRUE AND u.analysis_epoch=g.analysis_epoch AND g.state='published'")) {
-            JsonNode profile=parse((String)row.get("payload_json")).path("profile");count++;
+        TreeMap<String,Double> languages=new TreeMap<>(),topics=new TreeMap<>();long count=0,generatedAt=0,referenceTime=0;
+        ArrayNode generations=JSON.createArrayNode();
+        for(var row:db.queryForList("SELECT g.payload_json FROM learning_current c JOIN learning_generations g ON g.generation_id=c.generation_id JOIN cloud_users u ON u.subject_id=c.subject_id JOIN learning_active a ON a.namespace='production' AND a.model_version=g.model_version WHERE u.analysis_enabled=TRUE AND u.analysis_epoch=g.analysis_epoch AND g.state='published' ORDER BY c.subject_id")) {
+            JsonNode payload=parse((String)row.get("payload_json")),profile=payload.path("profile");count++;
+            generations.add(payload.path("generationId").asText());generatedAt=Math.max(generatedAt,payload.path("generatedAt").asLong());referenceTime=Math.max(referenceTime,payload.path("referenceTime").asLong());
             profile.path("languages").fields().forEachRemaining(e->languages.merge(e.getKey(),e.getValue().asDouble(),Double::sum));
             profile.path("topics").fields().forEachRemaining(e->topics.merge(e.getKey(),e.getValue().asDouble(),Double::sum));
         }
         ObjectNode response=object().put("memberCount",count).put("suppressed",count<10).put("computedAt",System.currentTimeMillis()).put("source","published_authorized_portraits");
-        if(count>=10){response.set("languages",distribution(languages));response.set("topics",distribution(topics));}return response;
+        if(count>=10){response.set("languages",distribution(languages));response.set("topics",distribution(topics));}
+        response.put("modelVersion",active("production").path("model").path("modelVersion").asText()).put("generationId","cohorts-"+hash(generations.toString()).substring(0,24))
+                .put("sourceKind","real_production").put("totalSubjects",count).put("referenceTime",referenceTime).put("generatedAt",generatedAt);
+        ObjectNode cohort=response.putArray("cohorts").addObject().put("cohortId","published-users").put("label","已发布画像用户").put("memberCount",count).put("suppressed",count<10);
+        cohort.set("languages",count>=10?response.path("languages"):object());cohort.set("topics",count>=10?response.path("topics"):object());
+        return response;
     }
     private ObjectNode distribution(Map<String,Double> values) {
         ObjectNode result=object();double total=values.values().stream().mapToDouble(Double::doubleValue).sum();

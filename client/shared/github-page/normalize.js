@@ -40,6 +40,74 @@ export function parseTimestamp(dateVal) {
   return Number.isNaN(t) ? null : t
 }
 
+const INSTALL_COMMAND_PATTERNS = [
+  /\b(?:npm\s+(?:install|i)|pnpm\s+add|yarn\s+add|bun\s+add)\s+[a-z0-9@/_.-]+/i,
+  /\b(?:pip|pip3|uv\s+pip)\s+install\s+[a-z0-9_.\-[\]]+/i,
+  /\bcargo\s+(?:add|install)\s+[a-z0-9_-]+/i,
+  /\bgo\s+(?:get|install)\s+[a-z0-9./_@-]+/i,
+  /\bdocker\s+(?:run|pull|compose\s+up)\b[^\n\r]{0,80}/i,
+  /\b(?:mvn\s+clean|gradle\s+build|cmake\s+-B|make\s+install)\b[^\n\r]{0,60}/i,
+  /\bgit\s+clone\s+https?:\/\/[^\s\n\r]+/i
+]
+
+export function extractRepositoryEvidenceCues(raw = {}) {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      purposeCue: null,
+      purposeSource: 'missing',
+      installCue: null,
+      installSource: 'missing'
+    }
+  }
+
+  let purposeCue = raw.purposeCue || null
+  let purposeSource = raw.purposeSource || 'missing'
+
+  const desc = typeof raw.description === 'string' ? raw.description.trim() : ''
+  const readme = typeof raw.readmeText === 'string' ? raw.readmeText.trim() : ''
+  const topics = Array.isArray(raw.topics) ? raw.topics.map(t => String(t).trim()).filter(Boolean) : []
+
+  if (!purposeCue) {
+    if (desc) {
+      const firstSentence = desc.split(/(?<=[。！？.!?])\s+/)[0].trim()
+      purposeCue = (firstSentence || desc).slice(0, 140)
+      purposeSource = 'description'
+    } else if (readme) {
+      const lines = readme
+        .split(/\r?\n/)
+        .map(l => l.replace(/^#+\s*/, '').trim())
+        .filter(l => l.length >= 8 && !l.startsWith('![') && !l.startsWith('[!['))
+      if (lines.length > 0) {
+        purposeCue = lines[0].slice(0, 140)
+        purposeSource = 'readme'
+      }
+    } else if (topics.length > 0) {
+      purposeCue = `聚焦 ${topics.slice(0, 4).join(' / ')} 方向`
+      purposeSource = 'topics'
+    }
+  }
+
+  let installCue = raw.installCue || null
+  let installSource = raw.installSource || 'missing'
+  if (!installCue && readme) {
+    for (const pattern of INSTALL_COMMAND_PATTERNS) {
+      const match = readme.match(pattern)
+      if (match && match[0]) {
+        installCue = match[0].trim().slice(0, 100)
+        installSource = 'readme'
+        break
+      }
+    }
+  }
+
+  return {
+    purposeCue,
+    purposeSource,
+    installCue,
+    installSource
+  }
+}
+
 export function normalizeProfile(raw, fetchedAt = Date.now()) {
   if (!raw) return null
   const login = raw.login ? String(raw.login).trim() : null
@@ -115,6 +183,18 @@ export function normalizeRepository(raw, source = 'detail', fetchedAt = Date.now
     visibility = 'public'
   }
 
+  const updatedAt = parseTimestamp(raw.updatedAt || raw.updated_at || raw.pushedAt || raw.pushed_at)
+  const pushedAt = parseTimestamp(raw.pushedAt || raw.pushed_at || raw.updatedAt || raw.updated_at)
+  const readmeText = raw.readmeText ? String(raw.readmeText).slice(0, 10000) : null
+  const topics = Array.isArray(raw.topics) ? raw.topics.map(t => String(t).trim()).filter(Boolean) : []
+  const description = raw.description ? String(raw.description).trim() : null
+  const cues = extractRepositoryEvidenceCues({
+    ...raw,
+    description,
+    readmeText,
+    topics
+  })
+
   return {
     repoId: raw.repoId ? String(raw.repoId) : (raw.id ? String(raw.id) : null),
     canonicalKey,
@@ -122,11 +202,16 @@ export function normalizeRepository(raw, source = 'detail', fetchedAt = Date.now
     name: name || canonicalKey.split('/')[1] || '',
     fullName,
     htmlUrl: raw.htmlUrl || raw.html_url || `https://github.com/${fullName}`,
-    description: raw.description ? String(raw.description).trim() : null,
+    description,
     primaryLanguage: raw.primaryLanguage || raw.language || null,
-    topics: Array.isArray(raw.topics) ? raw.topics.map(t => String(t).trim()).filter(Boolean) : [],
+    topics,
     starCount: starCount.count,
     forkCount: forkCount.count,
+    attentionSignal: {
+      count: starCount.count,
+      precision: starCount.precision,
+      label: '关注度'
+    },
     countPrecision: {
       starCount: starCount.precision,
       forkCount: forkCount.precision
@@ -135,10 +220,15 @@ export function normalizeRepository(raw, source = 'detail', fetchedAt = Date.now
     isFork: typeof raw.isFork === 'boolean' ? raw.isFork : (typeof raw.fork === 'boolean' ? raw.fork : null),
     isArchived: typeof raw.isArchived === 'boolean' ? raw.isArchived : (typeof raw.archived === 'boolean' ? raw.archived : null),
     licenseSpdx,
-    updatedAt: parseTimestamp(raw.updatedAt || raw.updated_at),
+    updatedAt,
+    pushedAt,
     createdAt: parseTimestamp(raw.createdAt || raw.created_at),
     starredAt: parseTimestamp(raw.starredAt || raw.starred_at),
-    readmeText: raw.readmeText ? String(raw.readmeText).slice(0, 10000) : null,
+    readmeText,
+    purposeCue: cues.purposeCue,
+    purposeSource: cues.purposeSource,
+    installCue: cues.installCue,
+    installSource: cues.installSource,
     fetchedAt,
     source
   }

@@ -93,18 +93,35 @@ export async function computeAndCommitProfile(snapshot) {
   return { profile: workerResult.profile, committed, error }
 }
 
-export async function computeAndCommitRanking(snapshot, profile) {
+export async function computeAndCommitRanking(snapshot, profile, options = {}) {
   const invoke = nativeBridge.capture()
+  const cloudPortrait = options.cloudPortrait !== undefined ? options.cloudPortrait : (snapshot.cloudPortrait || null)
+  const featureSpace = options.featureSpace !== undefined ? options.featureSpace : (snapshot.featureSpace || null)
+  const unprocessedEvents = Array.isArray(options.unprocessedEvents)
+    ? options.unprocessedEvents
+    : (Array.isArray(snapshot.unprocessedEvents) ? snapshot.unprocessedEvents : [])
+  const processedThrough = Number(
+    options.processedThrough ??
+    snapshot.processedThrough ??
+    cloudPortrait?.processedThrough ??
+    0
+  )
+
   const workerResult = await runWorkerJob(COMPUTE_PURPOSE.RANKING, snapshot.inputId, snapshot.inputVersions, {
     accountId: snapshot.accountId,
     profile,
+    cloudPortrait,
+    featureSpace,
+    unprocessedEvents,
+    processedThrough,
     starred: snapshot.starred,
     candidates: snapshot.candidates,
     history: snapshot.history,
     manualTags: snapshot.manualTags,
     hiddenRepoIds: snapshot.hiddenRepoIds,
     historyEnabled: snapshot.historyEnabled,
-    owned: snapshot.owned
+    owned: snapshot.owned,
+    batchId: options.batchId
   })
 
   const commitRes = await invoke(OPERATIONS.RECOMMENDATION_COMMIT, {
@@ -127,15 +144,27 @@ export async function listRecommendation(batchId = null, offset = 0, limit = 20)
   return res.data
 }
 
-export async function recordFeedback(repoId, kind = 'hide', eventId = null) {
+export async function recordFeedback(repoId, kind = 'hide', eventId = null, options = {}) {
   const invoke = nativeBridge.capture()
+  const hidden = typeof options?.hidden === 'boolean' ? options.hidden : (kind === 'hide')
   const res = await invoke(OPERATIONS.RECOMMENDATION_FEEDBACK, {
-    repoId,
-    kind,
+    repoId: String(repoId),
+    kind: hidden ? 'hide' : 'unhide',
+    hidden,
     eventId: eventId || `fb_${Date.now()}`
   })
   if (!res.ok) {
     throw new Error(res.error?.message || '记录反馈失败')
   }
   return res.data
+}
+
+export async function listHiddenRecommendations() {
+  const invoke = nativeBridge.capture()
+  const res = await invoke(OPERATIONS.RECOMMENDATION_LIST_HIDDEN)
+  if (!res.ok) {
+    throw new Error(res.error?.message || '读取已隐藏推荐列表失败')
+  }
+  if (Array.isArray(res.data)) return res.data
+  return Array.isArray(res.data?.items) ? res.data.items : []
 }

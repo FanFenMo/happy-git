@@ -95,3 +95,48 @@ export async function syncCloudCollections(collections = ['stars', 'owned']) {
   }
   return res.data
 }
+
+export async function readCloudPortrait() {
+  const invoke = nativeBridge.capture()
+  const res = await invoke(OPERATIONS.CLOUD_PORTRAIT_READ)
+  if (!res.ok) {
+    return null
+  }
+  return res.data
+}
+
+export async function refreshCloudPortrait() {
+  const invoke = nativeBridge.capture()
+  const res = await invoke(OPERATIONS.CLOUD_PORTRAIT_REFRESH)
+  if (!res.ok) {
+    throw new Error(res.error?.message || '获取云端个人画像失败')
+  }
+  return res.data
+}
+
+export async function readCloudSearchPlan() {
+  const invoke = nativeBridge.capture()
+  const res = await invoke(OPERATIONS.CLOUD_SEARCH_PLAN_READ)
+  if (!res.ok) {
+    return null
+  }
+  return res.data
+}
+
+export async function readCloudCohorts() {
+  const invoke = nativeBridge.capture()
+  const res = await invoke(OPERATIONS.CLOUD_COHORTS_READ)
+  if (!res.ok || !res.data || !Array.isArray(res.data.cohorts)) {
+    return null
+  }
+  return res.data
+}
+
+export async function refreshCloudCohorts() {
+  const invoke = nativeBridge.capture()
+  const res = await invoke(OPERATIONS.CLOUD_COHORTS_REFRESH)
+  if (!res.ok) {
+    throw new Error(res.error?.message || '获取群体技术分布失败')
+  }
+  return res.data
+}

@@ -22,6 +22,15 @@ export const CLOUD_SESSION_STATUS = {
   ERROR: 'error'
 }
 
+export const CLOUD_PORTRAIT_STATUS = {
+  READY: 'ready',
+  PENDING: 'pending',
+  STALE: 'stale',
+  EMPTY: 'empty',
+  ANALYSIS_DISABLED: 'analysis_disabled',
+  UNBOUND: 'unbound'
+}
+
 export const ERROR_CODES = {
   AUTH_REQUIRED: 'AUTH_REQUIRED',
   SESSION_CHANGED: 'SESSION_CHANGED',
@@ -68,6 +77,7 @@ export const OPERATIONS = {
   RECOMMENDATION_COMMIT: 'recommendation.commit',
   RECOMMENDATION_LIST: 'recommendation.list',
   RECOMMENDATION_FEEDBACK: 'recommendation.feedback',
+  RECOMMENDATION_LIST_HIDDEN: 'recommendation.listHidden',
   REPOSITORY_OPEN: 'repository.open',
   // 第一轮新增：云端应用会话、按次事件上传与兴趣分析控制契约
   CLOUD_AUTH_BEGIN: 'cloud.auth.begin',
@@ -79,15 +89,24 @@ export const OPERATIONS = {
   CLOUD_SYNC_FLUSH: 'cloud.sync.flush',
   CLOUD_PREFERENCES_SAVE: 'cloud.preferences.save',
   CLOUD_ANALYSIS_RESET: 'cloud.analysis.reset',
-  CLOUD_COLLECTIONS_SYNC: 'cloud.collections.sync'
+  CLOUD_COLLECTIONS_SYNC: 'cloud.collections.sync',
+  // 第二轮新增：云端画像、搜索方向与群体分析读取与缓存契约
+  CLOUD_PORTRAIT_READ: 'cloud.portrait.read',
+  CLOUD_PORTRAIT_REFRESH: 'cloud.portrait.refresh',
+  CLOUD_SEARCH_PLAN_READ: 'cloud.searchPlan.read',
+  CLOUD_COHORTS_READ: 'cloud.cohorts.read',
+  CLOUD_COHORTS_REFRESH: 'cloud.cohorts.refresh'
 }
 
 export const MODEL_VERSION = 'content-v1'
+export const SERVER_BASELINE_MODEL_VERSION = 'mr-content-v2-data1'
 export const PARSER_VERSION = 'content-v1'
 export const EVENT_SCHEMA_VERSION = '1.0.0'
 export const BROWSE_DEDUP_WINDOW_MS = 30000
 export const OUTBOX_MAX_BATCH_SIZE = 500
 export const OUTBOX_MAX_BATCH_BYTES = 1048576
+export const SEARCH_MAX_QUERIES_PER_ROUND = 4
+export const SEARCH_MAX_PAGES_PER_ROUND = 8
 
 export function createSuccessResult(data, contextId = '') {
   return { ok: true, data, contextId }

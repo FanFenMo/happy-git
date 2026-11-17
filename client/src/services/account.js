@@ -261,10 +261,12 @@ export async function saveInterestPreferences(manualInput) {
   const snapRes = await invoke('account.readSnapshot')
   if (!snapRes.ok) throw new Error(snapRes.error?.message || '读取账号偏好失败')
   const historyEnabled = Boolean(snapRes.data?.preferences?.historyEnabled)
+  const analysisEnabled = snapRes.data?.preferences?.analysisEnabled !== false
 
   const res = await invoke('account.savePreferences', {
     manualTags,
-    historyEnabled
+    historyEnabled,
+    analysisEnabled
   })
 
   if (!res.ok) {

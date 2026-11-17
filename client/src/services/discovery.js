@@ -22,7 +22,7 @@ export async function readTrendingCache() {
   return res.data
 }
 
-export async function refreshPersonalizedCandidates(queryPlan = []) {
+export async function refreshPersonalizedCandidates(queryPlan = [], options = {}) {
   const normalizedPlan = Array.isArray(queryPlan)
     ? queryPlan
     : (Array.isArray(queryPlan?.queryPlan) ? queryPlan.queryPlan : [])
@@ -30,7 +30,8 @@ export async function refreshPersonalizedCandidates(queryPlan = []) {
   const invoke = nativeBridge.capture()
   const res = await invoke(OPERATIONS.DISCOVERY_REFRESH, {
     mode: 'personalized',
-    queryPlan: normalizedPlan
+    queryPlan: normalizedPlan,
+    round: options.round || 1
   })
   if (!res.ok) {
     throw new Error(res.error?.message || '刷新候选仓库失败')

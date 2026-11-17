@@ -1,7 +1,227 @@
 /**
  * shared/recommendation/features.js
- * 项目特征抽取、技术分词、词表拟合与向量构建 (依据 project.md 第九节)
+ * 项目特征抽取、技术分词、词表拟合与服务端 8192 维特征空间同构投影
+ * (依据 project.md 第九节、接口与模型契约及 data-platform Vectors.java)
  */
+
+import { extractRepositoryEvidenceCues } from '../github-page/normalize.js'
+
+export const SERVER_VECTOR_DIMENSION = 8192
+
+const SERVER_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'to', 'of', 'for', 'in', 'is', 'with', 'this', 'that'
+])
+
+const SERVER_TOKEN_REGEX = /c\+\+|c#|\.net|node\.js|[a-z0-9]+|[\u4e00-\u9fff]{2,}/g
+
+/**
+ * 与 data-platform Vectors.tokens(text) 完全同构的 NFKC + 中文双字 Bigram 分词器
+ */
+export function tokenizeTechnicalNfkcBigram(text) {
+  if (!text || typeof text !== 'string') return []
+  const clean = text.normalize('NFKC').toLowerCase()
+  const result = []
+  const matches = clean.match(SERVER_TOKEN_REGEX) || []
+  for (const term of matches) {
+    if (/^[\u4e00-\u9fff]+$/.test(term)) {
+      for (let i = 0; i + 1 < term.length; i++) {
+        result.push(term.slice(i, i + 2))
+      }
+    } else if (!SERVER_STOPWORDS.has(term)) {
+      result.push(term)
+    }
+  }
+  return result
+}
+
+/**
+ * 统计仓库词频（与 Vectors.terms 完全一致：name/description/topics 权重 2，readme 前 8000 码点权重 1）
+ */
+export function countRepositoryServerTerms(repository = {}) {
+  const counts = new Map()
+  const addCount = (str, weight) => {
+    for (const term of tokenizeTechnicalNfkcBigram(str || '')) {
+      counts.set(term, (counts.get(term) || 0) + weight)
+    }
+  }
+  addCount(repository.name || '', 2)
+  addCount(repository.description || '', 2)
+  for (const topic of (Array.isArray(repository.topics) ? repository.topics : [])) {
+    addCount(String(topic || ''), 2)
+  }
+  const rawReadme = typeof repository.readmeText === 'string' ? repository.readmeText : ''
+  const clippedReadme = Array.from(rawReadme).slice(0, 8000).join('')
+  addCount(clippedReadme, 1)
+  return counts
+}
+
+/**
+ * 将密集累加数组归一化为稀疏向量 { dimension: 8192, indices: number[], values: number[] }
+ * 与 Vectors.normalize(sum, limit) 严格同构
+ */
+export function normalizeDenseToSparse(sum, limit = 256) {
+  const coordinates = []
+  for (let i = 0; i < sum.length; i++) {
+    const val = sum[i]
+    if (Number.isFinite(val) && val > 0) {
+      coordinates.push(i)
+    }
+  }
+  coordinates.sort((a, b) => {
+    const diff = sum[b] - sum[a]
+    if (Math.abs(diff) > 1e-15) return diff > 0 ? 1 : -1
+    return a - b
+  })
+  const selected = coordinates.length > limit ? coordinates.slice(0, limit) : coordinates
+  selected.sort((a, b) => a - b)
+
+  let squared = 0
+  for (const idx of selected) {
+    squared += sum[idx] * sum[idx]
+  }
+  const indices = []
+  const values = []
+  if (squared > 0) {
+    const norm = Math.sqrt(squared)
+    for (const idx of selected) {
+      indices.push(idx)
+      values.push(sum[idx] / norm)
+    }
+  }
+  return {
+    dimension: SERVER_VECTOR_DIMENSION,
+    indices,
+    values
+  }
+}
+
+export function addSparseVector(sum, sparseVector, weight = 1.0) {
+  if (!sparseVector || typeof sparseVector !== 'object') return
+  const indices = Array.isArray(sparseVector.indices) ? sparseVector.indices : []
+  const values = Array.isArray(sparseVector.values) ? sparseVector.values : []
+  if (indices.length !== values.length) return
+  for (let p = 0; p < indices.length; p++) {
+    const idx = Number(indices[p])
+    const val = Number(values[p])
+    if (Number.isInteger(idx) && idx >= 0 && idx < sum.length && Number.isFinite(val) && val > 0) {
+      sum[idx] += weight * val
+    }
+  }
+}
+
+/**
+ * 稀疏向量点积（与 Vectors.dot 完全同构）
+ */
+export function sparseDotProduct(a, b) {
+  if (!a || !b || !Array.isArray(a.indices) || !Array.isArray(b.indices)) return null
+  if (a.indices.length === 0 || b.indices.length === 0) return 0
+  let i = 0
+  let j = 0
+  let sum = 0
+  while (i < a.indices.length && j < b.indices.length) {
+    const x = a.indices[i]
+    const y = b.indices[j]
+    if (x === y) {
+      sum += (a.values[i] || 0) * (b.values[j] || 0)
+      i++
+      j++
+    } else if (x < y) {
+      i++
+    } else {
+      j++
+    }
+  }
+  return Math.max(0, Math.min(1, sum))
+}
+
+/**
+ * 使用服务端已发布 featureSpace 对任意仓库（含训练目录外新搜索项目）进行兼容投影。
+ * 未知语言、未知 topic 和未知词项保持真实缺失，绝不编造向量坐标。
+ */
+export function projectRepositoryToFeatureSpace(repository, featureSpace) {
+  if (!repository || !featureSpace || typeof featureSpace !== 'object') {
+    return null
+  }
+  const sum = new Float64Array(SERVER_VECTOR_DIMENSION)
+  const langMap = featureSpace.language || {}
+  const topicMap = featureSpace.topic || {}
+  const textMap = featureSpace.text || {}
+
+  const primaryLanguage = repository.primaryLanguage || null
+  let knownLanguage = false
+  let unknownLanguage = null
+  if (primaryLanguage && primaryLanguage !== '未标注') {
+    const langIdx = langMap[primaryLanguage]
+    if (Number.isInteger(langIdx) && langIdx >= 0 && langIdx < SERVER_VECTOR_DIMENSION) {
+      sum[langIdx] = Math.sqrt(0.20)
+      knownLanguage = true
+    } else {
+      unknownLanguage = primaryLanguage
+    }
+  }
+
+  const topicWeights = new Map()
+  const knownTopics = []
+  const unknownTopics = []
+  for (const rawTopic of (Array.isArray(repository.topics) ? repository.topics : [])) {
+    const topic = String(rawTopic || '').trim()
+    if (!topic) continue
+    const topicIdx = topicMap[topic] ?? topicMap[topic.toLowerCase()]
+    if (Number.isInteger(topicIdx) && topicIdx >= 0 && topicIdx < SERVER_VECTOR_DIMENSION) {
+      topicWeights.set(topicIdx, 1.0)
+      knownTopics.push(topic.toLowerCase())
+    } else {
+      unknownTopics.push(topic.toLowerCase())
+    }
+  }
+
+  const termCounts = repository.counts && typeof repository.counts === 'object'
+    ? new Map(Object.entries(repository.counts).map(([k, v]) => [k, Number(v)]))
+    : countRepositoryServerTerms(repository)
+
+  const textWeights = new Map()
+  let knownTermCount = 0
+  let unknownTermCount = 0
+  for (const [term, count] of termCounts.entries()) {
+    if (!Number.isFinite(count) || count <= 0) continue
+    const entry = textMap[term]
+    if (entry && typeof entry === 'object' && Number.isInteger(entry.index) && Number.isFinite(entry.idf)) {
+      textWeights.set(entry.index, (1 + Math.log(count)) * entry.idf)
+      knownTermCount++
+    } else {
+      unknownTermCount++
+    }
+  }
+
+  const applyBlock = (blockMap, scale) => {
+    let normSq = 0
+    for (const v of blockMap.values()) normSq += v * v
+    const norm = Math.sqrt(normSq)
+    if (norm > 0) {
+      for (const [idx, val] of blockMap.entries()) {
+        sum[idx] = (scale * val) / norm
+      }
+    }
+  }
+
+  applyBlock(topicWeights, Math.sqrt(0.30))
+  applyBlock(textWeights, Math.sqrt(0.50))
+
+  const sparseVector = normalizeDenseToSparse(sum, 256)
+  return {
+    sparseVector,
+    featureSpaceVersion: featureSpace.featureSpaceVersion || featureSpace.version || null,
+    modelVersion: featureSpace.modelVersion || null,
+    knownLanguage,
+    knownTopics,
+    knownTermCount,
+    missingFeatures: {
+      unknownLanguage,
+      unknownTopics,
+      unknownTermCount
+    }
+  }
+}
 
 // 预定义常见技术专有名词保留表（避免被拆散，例如 C++, C#, .NET）
 const PRESERVED_TECH_TERMS = [
@@ -83,7 +303,7 @@ export function buildVocabulary(repositories = [], maxTerms = 5000) {
   }
 }
 
-export function extractRepositoryFeatures(repository, vocabulary) {
+export function extractRepositoryFeatures(repository, vocabulary, featureSpace = null) {
   if (!repository || typeof repository !== 'object') {
     return {
       repoId: null,
@@ -94,6 +314,7 @@ export function extractRepositoryFeatures(repository, vocabulary) {
       primaryLanguage: null,
       topics: [],
       vector: {},
+      sparseVector: null,
       vocabularyVersion: vocabulary?.version || 'vocab-v1',
       starCount: null,
       forkCount: null,
@@ -101,6 +322,7 @@ export function extractRepositoryFeatures(repository, vocabulary) {
     }
   }
 
+  const effectiveFeatureSpace = featureSpace || (vocabulary?.kind === 'feature_space' ? vocabulary : null)
   const idfMap = vocabulary?.idfMap || {}
 
   // 1. 词项权重统计: desc/topic 记 2，name 记 2，README 记 1
@@ -144,6 +366,30 @@ export function extractRepositoryFeatures(repository, vocabulary) {
   const owner = repository.owner || (fullName && fullName.includes('/') ? fullName.split('/')[0] : null)
   const name = repository.name || (fullName && fullName.includes('/') ? fullName.split('/')[1] : null)
   const canonicalKey = repository.canonicalKey || (fullName ? fullName.toLowerCase() : null)
+  const topics = Array.isArray(repository.topics) ? [...repository.topics] : []
+  const description = repository.description ?? null
+  const readmeText = repository.readmeText ?? null
+  const cues = extractRepositoryEvidenceCues({ ...repository, description, readmeText, topics })
+
+  let sparseVector = repository.sparseVector || (repository.vector?.indices ? repository.vector : null)
+  let projectionMeta = repository.projectionMeta || null
+  if (effectiveFeatureSpace) {
+    const projected = projectRepositoryToFeatureSpace(
+      { ...repository, primaryLanguage: repository.primaryLanguage || null, topics, description, readmeText, name },
+      effectiveFeatureSpace
+    )
+    if (projected) {
+      sparseVector = projected.sparseVector
+      projectionMeta = {
+        featureSpaceVersion: projected.featureSpaceVersion,
+        modelVersion: projected.modelVersion,
+        knownLanguage: projected.knownLanguage,
+        knownTopics: projected.knownTopics,
+        knownTermCount: projected.knownTermCount,
+        missingFeatures: projected.missingFeatures
+      }
+    }
+  }
 
   return {
     ...repository,
@@ -153,14 +399,26 @@ export function extractRepositoryFeatures(repository, vocabulary) {
     name,
     fullName,
     htmlUrl: repository.htmlUrl || (fullName ? `https://github.com/${fullName}` : null),
-    description: repository.description ?? null,
-    readmeText: repository.readmeText ?? null,
+    description,
+    readmeText,
     primaryLanguage: repository.primaryLanguage || null,
-    topics: Array.isArray(repository.topics) ? [...repository.topics] : [],
-    vector,
+    topics,
+    vector: Object.keys(vector).length > 0 ? vector : (repository.vector && !repository.vector.indices ? repository.vector : {}),
+    sparseVector,
+    projectionMeta,
     vocabularyVersion: vocabulary?.version || 'vocab-v1',
     starCount: repository.starCount ?? null,
     forkCount: repository.forkCount ?? null,
-    updatedAt: repository.updatedAt ?? null
+    updatedAt: repository.updatedAt ?? null,
+    pushedAt: repository.pushedAt ?? repository.updatedAt ?? null,
+    purposeCue: repository.purposeCue ?? cues.purposeCue,
+    purposeSource: repository.purposeSource ?? cues.purposeSource,
+    installCue: repository.installCue ?? cues.installCue,
+    installSource: repository.installSource ?? cues.installSource,
+    attentionSignal: repository.attentionSignal || {
+      count: repository.starCount ?? null,
+      precision: repository.countPrecision?.starCount || 'exact',
+      label: '关注度'
+    }
   }
 }

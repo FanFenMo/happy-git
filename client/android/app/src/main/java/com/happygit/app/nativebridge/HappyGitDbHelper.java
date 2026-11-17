@@ -12,7 +12,7 @@ import java.util.UUID;
 public class HappyGitDbHelper extends SQLiteOpenHelper {
 
     private static final String DATABASE_NAME = "happygit.db";
-    private static final int DATABASE_VERSION = 3;
+    private static final int DATABASE_VERSION = 4;
 
     public HappyGitDbHelper(Context context) {
         super(context, DATABASE_NAME, null, DATABASE_VERSION);
@@ -313,6 +313,38 @@ public class HappyGitDbHelper extends SQLiteOpenHelper {
                 "updated_at INTEGER NOT NULL, " +
                 "error_code TEXT, " +
                 "FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE);");
+
+        db.execSQL("CREATE TABLE IF NOT EXISTS cloud_portraits (" +
+                "account_id TEXT PRIMARY KEY NOT NULL, " +
+                "subject_id TEXT, " +
+                "analysis_epoch INTEGER NOT NULL DEFAULT 1, " +
+                "status TEXT NOT NULL DEFAULT 'pending', " +
+                "model_version TEXT, " +
+                "feature_space_version TEXT, " +
+                "catalog_snapshot_id TEXT, " +
+                "generation_id TEXT, " +
+                "reference_time INTEGER, " +
+                "generated_at INTEGER, " +
+                "processed_through INTEGER NOT NULL DEFAULT 0, " +
+                "input_digest TEXT, " +
+                "input_versions_json TEXT, " +
+                "coverage_json TEXT, " +
+                "portrait_json TEXT, " +
+                "search_plan_json TEXT, " +
+                "feature_space_json TEXT, " +
+                "is_fixture INTEGER NOT NULL DEFAULT 0, " +
+                "fetched_at INTEGER NOT NULL, " +
+                "FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE);");
+
+        db.execSQL("CREATE TABLE IF NOT EXISTS cloud_cohorts_cache (" +
+                "cache_key TEXT PRIMARY KEY NOT NULL, " +
+                "model_version TEXT, " +
+                "generation_id TEXT, " +
+                "source_kind TEXT, " +
+                "reference_time INTEGER, " +
+                "generated_at INTEGER, " +
+                "cohorts_json TEXT NOT NULL, " +
+                "fetched_at INTEGER NOT NULL);");
     }
 
     @Override
@@ -322,6 +354,9 @@ public class HappyGitDbHelper extends SQLiteOpenHelper {
         }
         if (oldVersion < 3) {
             upgradeToVersion3(db);
+        }
+        if (oldVersion < 4) {
+            createV3Tables(db);
         }
     }
 

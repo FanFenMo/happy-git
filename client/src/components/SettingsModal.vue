@@ -196,6 +196,38 @@
           </div>
         </div>
 
+        <!-- 4. 已隐藏的推荐项目（可解除隐藏） -->
+        <div v-if="userStore.hasAccount" class="p-4 rounded-2xl card-raised border border-[var(--color-border)] space-y-2.5">
+          <div class="flex items-center justify-between">
+            <div class="text-xs font-semibold text-[var(--color-text-muted)]">4. 已隐藏的推荐仓库 ({{ feedStore.hiddenItems.length }})</div>
+            <span v-if="feedStore.hiddenLoading" class="text-[11px] text-[var(--color-text-subtle)]">加载中...</span>
+          </div>
+          <div v-if="feedStore.hiddenItems.length === 0" class="text-[11px] text-[var(--color-text-subtle)]">
+            暂无已隐藏仓库。在推荐列表点击“隐藏”后会同步记录于此并排除后续推荐，可随时恢复。
+          </div>
+          <div v-else class="max-h-36 overflow-y-auto space-y-1.5 pr-1">
+            <div
+              v-for="item in feedStore.hiddenItems"
+              :key="item.repoId"
+              class="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-border)]"
+            >
+              <div class="min-w-0">
+                <div class="text-xs font-medium text-[var(--color-text)] truncate">{{ item.fullName || item.repoId }}</div>
+                <div v-if="item.description || item.language" class="text-[10px] text-[var(--color-text-subtle)] truncate">
+                  {{ item.language ? `[${item.language}] ` : '' }}{{ item.description || '' }}
+                </div>
+              </div>
+              <button
+                @click="handleUnhideRepo(item.repoId)"
+                :disabled="unhidingRepoId === item.repoId"
+                class="shrink-0 px-2.5 py-1 rounded-lg btn-secondary text-[11px] cursor-pointer !min-h-0"
+              >
+                {{ unhidingRepoId === item.repoId ? '恢复中...' : '恢复推荐' }}
+              </button>
+            </div>
+          </div>
+        </div>
+
         <!-- 关于应用 -->
         <div class="p-4 rounded-2xl card-raised border border-[var(--color-border)] space-y-2">
           <div class="text-xs font-semibold text-[var(--color-text-muted)] mb-1">关于应用</div>
@@ -238,11 +270,12 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useUserStore } from '../stores/user'
 import { useHistoryStore } from '../stores/history'
+import { useFeedStore } from '../stores/feed'
 
-defineProps({
+const props = defineProps({
   isOpen: Boolean
 })
 
@@ -250,10 +283,35 @@ const emit = defineEmits(['close', 'open-login'])
 
 const userStore = useUserStore()
 const historyStore = useHistoryStore()
+const feedStore = useFeedStore()
 const isSyncing = ref(false)
 const isFlushingCloud = ref(false)
 const isResettingAnalysis = ref(false)
+const unhidingRepoId = ref(null)
 const feedback = ref('')
+
+watch(
+  () => props.isOpen,
+  (open) => {
+    if (open && userStore.hasAccount) {
+      feedStore.loadHiddenRecommendations()
+    }
+  },
+  { immediate: true }
+)
+
+const handleUnhideRepo = async (repoId) => {
+  if (unhidingRepoId.value) return
+  unhidingRepoId.value = repoId
+  feedback.value = ''
+  try {
+    await feedStore.unhideRecommendation(repoId)
+  } catch (error) {
+    feedback.value = error.message
+  } finally {
+    unhidingRepoId.value = null
+  }
+}
 
 const openLogin = () => {
   emit('close')

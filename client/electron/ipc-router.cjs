@@ -3,7 +3,10 @@
  * 安全 NativeBridge IPC 路由与操作分发 (依据 project.md 第四节及阶段二云端协同契约)
  */
 
-const { shell } = require('electron')
+let shell = null
+try {
+  shell = require('electron').shell || null
+} catch (_) {}
 const { CloudService } = require('./cloud-service.cjs')
 
 class IpcRouter {
@@ -27,9 +30,11 @@ class IpcRouter {
       'stars.set', 'history.record', 'history.list', 'history.delete', 'history.clear',
       'account.savePreferences', 'account.forgetLocalData', 'recommendation.createSnapshot',
       'recommendation.commit', 'recommendation.list', 'recommendation.feedback',
+      'recommendation.listHidden',
       'cloud.auth.begin', 'cloud.auth.poll', 'cloud.session.restore', 'cloud.session.logout',
       'cloud.sync.readState', 'cloud.sync.flush', 'cloud.preferences.save',
-      'cloud.analysis.reset', 'cloud.collections.sync'
+      'cloud.analysis.reset', 'cloud.collections.sync',
+      'cloud.portrait.read', 'cloud.portrait.refresh', 'cloud.searchPlan.read'
     ]
 
     if (personalOps.includes(operation)) {
@@ -211,18 +216,28 @@ class IpcRouter {
           limit: payload.limit || 20
         })
 
-      case 'recommendation.feedback':
-        await this.database.callDatabase('recordRecommendationFeedback', {
+      case 'recommendation.feedback': {
+        const fbResult = await this.database.callDatabase('recordRecommendationFeedback', {
           accountId: context.accountId,
           repoId: payload.repoId,
           kind: payload.kind,
+          hidden: typeof payload.hidden === 'boolean' ? payload.hidden : undefined,
           eventId: payload.eventId || `fb_${Date.now()}`
         })
-        return { recorded: true }
+        this.cloudService.syncFeedbackPreferences(context, {
+          operationId: fbResult?.eventId || payload.eventId
+        }).catch(() => {})
+        return fbResult || { recorded: true }
+      }
+
+      case 'recommendation.listHidden':
+        return this.database.callDatabase('listHiddenRecommendations', {
+          accountId: context.accountId
+        })
 
       case 'repository.open': {
         const repo = payload.repository
-        if (repo?.htmlUrl) {
+        if (repo?.htmlUrl && shell) {
           if (payload.target === 'external') {
             await shell.openExternal(repo.htmlUrl)
           }
@@ -276,6 +291,28 @@ class IpcRouter {
       case 'cloud.collections.sync':
         return this.cloudService.syncCollections(context, payload.collections || ['stars', 'owned'])
 
+      case 'cloud.portrait.read':
+        return this.cloudService.readPortrait(context)
+
+      case 'cloud.portrait.refresh':
+        return this.cloudService.refreshPortrait(context)
+
+      case 'cloud.searchPlan.read': {
+        const portrait = await this.cloudService.readPortrait(context)
+        return {
+          status: portrait?.status || 'unbound',
+          generationId: portrait?.generationId || null,
+          modelVersion: portrait?.modelVersion || null,
+          searchPlan: portrait?.searchPlan || null
+        }
+      }
+
+      case 'cloud.cohorts.read':
+        return this.cloudService.readCohorts()
+
+      case 'cloud.cohorts.refresh':
+        return this.cloudService.refreshCohorts(context)
+
       default:
         throw new Error(`UNKNOWN_OPERATION: ${operation}`)
     }
@@ -313,45 +350,82 @@ class IpcRouter {
       const queryPlan = Array.isArray(rawPlan)
         ? rawPlan
         : (Array.isArray(rawPlan?.queryPlan) ? rawPlan.queryPlan : [])
+      // 有界搜索：单轮最多 4 个查询、总计最多 8 页；结果按 repoId/canonicalKey 去重并保留完整 DTO
+      const MAX_QUERIES = 4
+      const MAX_TOTAL_PAGES = 8
+      const seen = new Set()
       const candidates = []
+      const queryReports = []
+      let pagesUsed = 0
 
-      for (const q of queryPlan.slice(0, 4)) {
+      for (const q of queryPlan.slice(0, MAX_QUERIES)) {
         const queryStr = q.query || (q.topics || []).map(t => `topic:${t}`).join(' ')
-        const sort = q.sort || 'stars'
-        const url = this.routes.searchRepositoriesUrl(queryStr, sort)
+        if (!queryStr) continue
+        const sort = q.sort === 'updated' ? 'updated' : 'stars'
+        const startPage = Math.max(1, Number(q.startPage || 1))
+        const maxPages = Math.max(1, Math.min(2, Number(q.maxPages || 1)))
+        const report = { id: q.id || null, query: queryStr, sort, startPage, pagesFetched: 0, itemCount: 0, nextPage: null, exhausted: false, error: null }
 
-        try {
-          const searchRes = await this.scheduler.enqueue({
-            taskId: `disc_search_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            contextId: context.contextId,
-            kind: 'discovery',
-            taskFn: async () => {
-              const workPage = this.browser.getOrCreateWorkPage()
-              const executor = this.pageExecutorFactory(workPage.webContents)
-              return executor.runTask({
-                scriptId: 'readSearchResults',
-                url
-              })
+        for (let page = startPage; page < startPage + maxPages && pagesUsed < MAX_TOTAL_PAGES; page++) {
+          const url = this.routes.searchRepositoriesUrl(queryStr, sort, page)
+          try {
+            const searchRes = await this.scheduler.enqueue({
+              taskId: `disc_search_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              contextId: context.contextId,
+              kind: 'discovery',
+              taskFn: async () => {
+                const workPage = this.browser.getOrCreateWorkPage()
+                const executor = this.pageExecutorFactory(workPage.webContents)
+                return executor.runTask({ scriptId: 'readSearchResults', url, args: { pageSeq: page } })
+              }
+            })
+            pagesUsed += 1
+            report.pagesFetched += 1
+            const items = (searchRes?.items || []).filter(Boolean).map(item => ({
+              ...item,
+              discoveredBy: { queryId: q.id || null, directionId: q.directionId || null, generationId: q.generationId || null, page }
+            }))
+            const fresh = []
+            for (const item of items) {
+              const key = item.repoId || item.canonicalKey
+              if (!key || seen.has(key)) continue
+              seen.add(key)
+              fresh.push(item)
             }
-          })
+            candidates.push(...fresh)
+            report.itemCount += fresh.length
+            report.nextPage = searchRes?.nextUrl ? page + 1 : null
 
-          const items = searchRes?.items || []
-          candidates.push(...items)
-
-          await this.database.callDatabase('saveDiscoveryCache', {
-            accountId: context.accountId,
-            queryKey: `search:${queryStr}:${sort}`,
-            queryJson: JSON.stringify(q),
-            resultJson: JSON.stringify(items),
-            fetchedAt: Date.now(),
-            expiresAt: Date.now() + 24 * 60 * 60 * 1000
-          })
-        } catch (err) {
-          console.warn('[IpcRouter] 候选查询异常:', err.message)
+            await this.database.callDatabase('saveDiscoveryCache', {
+              accountId: context.accountId,
+              queryKey: `search:${queryStr}:${sort}:p${page}`,
+              queryJson: JSON.stringify({ ...q, page }),
+              resultJson: JSON.stringify(items),
+              fetchedAt: Date.now(),
+              expiresAt: Date.now() + 24 * 60 * 60 * 1000
+            })
+            if (!searchRes?.nextUrl) {
+              report.exhausted = true
+              break
+            }
+          } catch (err) {
+            report.error = err.code || err.message
+            console.warn('[IpcRouter] 候选查询异常:', err.message)
+            if (err.code === 'RATE_LIMITED') pagesUsed = MAX_TOTAL_PAGES
+            break
+          }
         }
+        queryReports.push(report)
       }
 
-      return { candidates, count: candidates.length }
+      return {
+        candidates,
+        count: candidates.length,
+        pagesUsed,
+        bounded: true,
+        complete: false,
+        queries: queryReports
+      }
     }
 
     return { items: [], count: 0 }

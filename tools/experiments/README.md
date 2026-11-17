@@ -41,14 +41,9 @@ python tools/experiments/run_experiment.py `
   --output-dir <path/to/output>
 ```
 
-或通过 CLI 命令适配器直接调用成员甲数据平台推断入口：
-```powershell
-python tools/experiments/run_experiment.py `
-  --dataset-dir <path/to/dataset> `
-  --split test `
-  --learned-cmd "bash data-platform/bin/data-platform infer-file --dataset {dataset_dir} --split {split} --output {output}" `
-  --output-dir <path/to/output>
-```
+成员甲的实际文件推断命令为 `learning-infer-file --file <请求JSON> --output <新输出目录>`。请求包含冻结的 `manifest` 和模型 `model` 描述符；命令返回 `profiles` 目录，目录中的 `part-*` 为每用户一行的结果，已携带实际 `modelVersion`、`featureSpaceVersion` 和证据引用。将这些分片合并为 JSONL 后传给上面的 `--learned-predictions`。HDFS 输出可以用 `hdfs dfs -getmerge <profiles目录> <本地结果.jsonl>` 导出。
+
+运行器的 `--learned-cmd` 支持自定义包装命令；包装器负责把上述目录导出到 `{output}` 指定的 JSONL 文件。数据平台没有名为 `infer-file` 的命令，也不直接接受运行器的 `--dataset`、`--split` 参数。训练及推断请求格式见[画像训练与回流交接](../../docs/implementation/画像训练与回流交接.md)。
 
 ### 4. 第三轮正式外部大模型对比与重复抽样波动评估
 ```powershell

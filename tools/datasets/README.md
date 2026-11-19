@@ -20,15 +20,17 @@
    - 支持 `--behavior-source-mode deterministic_rules|llm_synthesized|real_observed` 显式区分确定性规则生成、外部大模型素材生成与真实观察来源；
    - 当真实公开仓库数量不足目标规模时，构建器**绝不复制已有仓库或伪造 `github_public` README**，而是输出结构化的 `real-catalog-gap-report.json` 与 `dataset-manifest.json`（`status: "blocked_missing_real_catalog"`）。
    ```powershell
-   # 接入成员甲真实采集目录生成正式冻结数据集
+   # 将参考时间设为不早于本次采集结束的固定毫秒时间戳。以下为 2026-11-19 00:00（北京时间）。
    python tools/datasets/build_dataset.py `
      --scale standard `
      --catalog-mode real `
      --repo-catalog <path/to/collected-batches-dir> `
+     --reference-time 1795017600000 `
      --behavior-source-mode deterministic_rules `
      --output-dir <path/to/frozen-standard-real>
    python tools/datasets/validate_dataset.py --dataset-dir <path/to/frozen-standard-real> --strict-real
    ```
+   使用自己的冻结时间替换示例值，并将它与输入文件和摘要一并保存。晚于该时间的项目观察会被排除。
 
 2. **完整格式与流水线演示包（`--catalog-mode synthetic_fixture`）**：
    - 显式使用 `sourceKind="synthetic_fixture"` 合成测试仓库补齐 240（`pilot`）或 10,000（`standard`）规模，生成完整 `canonical/`、`splits/`、`runtime/{train,validation,test}/part-*.jsonl`、`evidence-views/` 与 `evaluation-only/`，供 MapReduce `J01-J12`、证据视图与校验脚本做端到端契约验证。

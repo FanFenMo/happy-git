@@ -1,77 +1,64 @@
-# GitHub 网页登录与会话生命周期说明
+# GitHub 网页登录、可选云端应用会话与公开配置说明
 
-本文档依据 2026-10-19 架构规范编写，阐明 HappyGit 的真实 GitHub 网页会话接入机制、双端原生容器架构与会话状态机。
-
----
-
-## 一、架构定位与设计原则
-
-HappyGit 彻底摆脱对公网独立授权服务器与后端服务的依赖。应用作为安装后直接运行的本地客户端，由用户通过应用管理的真实 GitHub 网页窗口直接登录，产品统一称为 **“GitHub 登录”**。
-
-1. **真实网页会话（Local Web Session）**：
-   - 登录过程由 GitHub 官方网页提供界面、密码验证、两步验证（2FA）与安全验证；
-   - HappyGit 不制作任何替代登录表单，不收集密码、验证码、恢复码或 WebAuthn 凭据；
-   - 严禁要求用户配置服务器地址、注册第三方 OAuth App / GitHub App、获取访问令牌或编辑配置文件。
-2. **本地后端与安全隔离**：
-   - 前端（Vue 3 / Pinia）仅负责展现与意图提交，不直接接触 Cookie，不执行任意抓取脚本；
-   - 网页导航、身份识别探针、Cookie 管理与数据提交完全由两端本地后端受控执行。
+本文档对齐 HappyGit `v1.2.0`（双端画像协同版）的真实实现，阐明**本机 GitHub 网页会话**与**可选云端应用会话（`/api/v2`）**的职责边界、公开服务地址预置方式与安全约束。
 
 ---
 
-## 二、双端网页容器与会话隔离
+## 一、双会话架构定位
 
-### 1. Windows 端 (Electron)
-- **专用持久分区**：主进程使用专用 `persist:happygit-github` partition 隔离 GitHub 会话，所有 Cookie 和缓存持久化保存在应用的 `userData` 目录下，不干扰系统 Chrome / Edge 浏览器；
-- **登录窗口 (`github-browser.cjs`)**：
-  - 采用无主界面 preload、关闭 Node 集成、开启 contextIsolation、sandbox 与 webSecurity 的安全 BrowserWindow；
-  - 顶部由原生窗口栏固定显示真实网址（如 `https://github.com/login`），防范钓鱼与地址欺骗；
-- **后台工作页**：单一复用同 partition 的隐藏工作页，仅在需要同步资料、公开仓库与 Star 时调度导航，空闲时不发起无谓请求。
+HappyGit 区分两层相互隔离的身份会话，避免混淆本机网页登录与云端画像协同：
 
-### 2. Android 端 (Capacitor)
-- **独立登录 Activity (`GitHubLoginActivity.java`)**：
-  - 作为标准原生 Activity 启动，承载专用普通 Android WebView；
-  - 严禁注入 Capacitor Bridge 或 JavaScriptInterface，切断对本地原生能力的直接暴露；
-  - 顶部原生工具栏清晰展示当前访问域名与关闭按钮；
-- **应用内会话共享 (`GitHubWebViewHost.java`)**：
-  - 登录 WebView 与后台工作 WebView 运行在同一应用进程内，共享 Android 本应用的 `CookieManager`；
-  - 登录完成后后台工作 WebView 自动继承已登录会话，主界面 Capacitor WebView 继续仅加载本地资产，严禁导航到 GitHub。
+1. **本机 GitHub 网页会话（Local Web Session，默认离线可用）**：
+   - 登录过程由应用管理的真实 GitHub 网页窗口承载（官方登录页、密码、2FA、Passkey/安全校验均在 GitHub 原页完成）；
+   - 应用绝不制作替代登录表单，不收集或上传用户的 GitHub Cookie、密码或私有仓库内容；
+   - 仅在本地驱动当前账号的公开资料、自有公开仓库、公开 Star 同步、显式 Star/取消 Star、本地浏览历史与本地基线推荐。
+2. **可选云端应用会话（Cloud App Session，`/api/v2/auth/github/*`）**：
+   - 仅当用户主动开启“参与云端兴趣画像分析并上传行为”并点击“绑定云端会话”时触发；
+   - 由预置公开服务地址的 HappyGit 业务服务完成 GitHub 身份核验，签发仅限应用使用的 `accessToken / refreshToken` 并经原生安全存储加密持久化（Windows `safeStorage` / Android Keystore `AES/GCM`）；
+   - 每次上传或读取云端画像前强制核对 `cloudAccountId === localAccountId`，不一致时阻断上传并标记 `CLOUD_ACCOUNT_MISMATCH`。
 
 ---
 
-## 三、会话状态机流转
+## 二、公开服务地址预置（普通用户零配置）
 
-应用维护严格的会话生命周期状态机：
+普通用户在桌面端或移动端安装后**无需手动填写任何 API 地址、OAuth Client Secret 或访问密钥**：
+
+- 维护者在打包前通过 [client/public-config.json](../client/public-config.json) 或 CI 环境变量 `VITE_API_BASE_URL`（GitHub Actions 仓库变量 `HAPPYGIT_API_BASE_URL`）提供单一公开 HTTPS 业务地址；
+- `client/scripts/prepare-config.mjs` 在构建时校验正式发布地址合法性（拒绝空地址、`localhost`/`127.0.0.1`/`10.0.2.2`、非 HTTPS、内嵌凭据、查询参数与 hash），严格过滤敏感字段后生成：
+  - Windows：`client/electron/config.generated.json`（由 `client/electron/cloud-service.cjs` 自动读取）与 `client/electron/release-metadata.json`；
+  - Android：`client/android/app/src/main/res/values/happygit_config.xml`（由 `CloudService.java` 读取 `happygit_api_base_url`）与 `client/android/app/src/main/assets/happygit/release-metadata.json`；
+- 未预置云端地址或云端不可达时，本机 GitHub 网页登录、本地历史与本地基线推荐仍可完整运行，云端功能清晰呈现 `unbound` / `offline` 状态。
+
+---
+
+## 三、双端网页容器与凭据隔离
+
+### 1. Windows 端（Electron）
+- **专用持久分区**：主进程使用 `persist:happygit-github` 隔离 GitHub 网页会话，不污染系统浏览器；
+- **安全登录窗口（`github-browser.cjs`）**：禁用 Node 集成，开启 `contextIsolation`、`sandbox`、`webSecurity`，原生标题栏显示真实访问地址；
+- **云端凭据存储（`cloud-service.cjs`）**：优先使用 Electron `safeStorage` 加密存储应用会话令牌，不支持系统凭据库时退回本地独立 AES-256-GCM 密钥。
+
+### 2. Android 端（Capacitor）
+- **独立登录 Activity（`GitHubLoginActivity.java`）**：使用原生普通 WebView 承载 GitHub 登录，不注入 Capacitor Bridge 或自定义 `JavascriptInterface`；
+- **会话共享与隔离（`GitHubWebViewHost.java`）**：仅登录页与受控后台工作页共享应用内 `CookieManager`，主界面 Capacitor WebView 仅加载本地静态资源；
+- **云端凭据存储（`CredentialStore.java` / `CloudService.java`）**：使用 Android Keystore 加密存储应用会话令牌，与本地 SQLite v4 数据库（含账号、历史、事件队列与画像缓存）隔离管理。
+
+---
+
+## 四、会话与数据控制生命周期
 
 ```text
-guest --点击登录--> 登录任务 opening / waiting / verifying
-登录任务验证成功 --> authenticated
+guest --GitHub网页登录--> opening / waiting / verifying --> authenticated
 应用重启 --> restoring --> authenticated / offline / reauth_required / guest
-authenticated --明确被网站要求登录--> reauth_required
-authenticated --仅网络不可用--> offline
-offline --复核同一账号成功--> authenticated
-任一账号状态 --退出--> logging_out --> guest
+authenticated --可选绑定云端--> cloudBound (核对 cloudAccountId == localAccountId)
+authenticated --退出当前账号--> logging_out --> guest (清理网页会话，保留本地历史)
+authenticated --删除本账号本地数据--> 撤销云端本地凭据 + 级联清除该账号 SQLite 全部记录 --> guest
 ```
 
-1. **访客状态 (`guest`)**：
-   - 未登录状态，可正常浏览热门项目卡片；
-   - 不产生与账号绑定的资料、Star 和私有数据；
-2. **登录中 (`opening` / `waiting` / `verifying`)**：
-   - 登录任务作为独立任务单例管理，不混入已激活会话；
-   - 网页完成加载并通过身份探针识别到当前有效数字账号 ID 时，由原生 `SessionManager.activateIdentity` 事务激活；
-3. **已认证 (`authenticated`)**：
-   - 拥有有效网页会话与本地账号记录；
-   - 允许执行公开集合同步、真实网页 Star 操作、本地历史记录及个性化推荐计算；
-4. **离线只读 (`offline`)**：
-   - 网络中断时自动降级，保留当前账号本地历史与缓存浏览，禁止向远端发起 Star 写操作；
-5. **需要重新验证 (`reauth_required`)**：
-   - 网站会话失效或被注销时触发，提示用户重新打开登录窗口完成认证；
-6. **登出与清除 (`logging_out` / `guest`)**：
-   - **退出登录 (`session.logout`)**：停止后台在途任务，安全清理专用 partition / WebView Cookie，保留本地历史并恢复为 guest 状态；
-   - **清除本地数据 (`account.forgetLocalData`)**：在退出登录的基础上，级联删除 SQLite 中该账号的所有资料、集合缓存、浏览记录、偏好与推荐结果。
-
----
-
-## 四、安全与合规边界
-
-1. **最小权限与范围**：仅读取当前登录用户的公开基本资料、本人公开仓库与公开 Star；私有仓库、组织机密、邮件与 GitHub 内部历史均不纳入采集；
-2. **无外传与零云端存储**：所有兴趣画像向量、TF-IDF 特征计算、浏览历史与 MMR 多样性重排均在本地 Web Worker 与 SQLite 中完成，默认绝不上传任何服务器。
+设置弹窗严格拆分三类控制边界：
+1. **本地浏览历史开关**：控制是否记录本机浏览历史（30 秒同仓去重）；
+2. **云端兴趣分析与行为上传开关**：关闭后立即停止事件上传、同步更新云端偏好并将本地云端画像状态置为 `analysis_disabled`；
+3. **数据清除范围分离**：
+   - **仅清空本地浏览历史**：删除本机历史并将未确认的待上传事件转为 `discard` 墓碑以保持设备序号连续，不重置云端 `analysisEpoch`；
+   - **重置云端分析（`analysisEpoch` 递增）**：使旧周期云端事件、集合快照与旧画像失效，同时保留本机浏览历史；
+   - **删除本账号本地数据并退出**：登出并级联清除本机该账号全部缓存、历史与凭据。

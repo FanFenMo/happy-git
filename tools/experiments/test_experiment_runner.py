@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -173,6 +174,218 @@ class ExperimentRunnerTest(unittest.TestCase):
             self.assertEqual(report["methods"]["baseline_local_v1"]["modelVersion"], "cmd-base-v1")
             self.assertEqual(report["methods"]["baseline_local_v1"]["status"], "completed")
             self.assertIsNone(report["metadata"]["blindReview"])
+
+    def test_server_export_bundle_extra_model_llm_repeats_blind_audit_and_charts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            test_rows = [
+                json.loads(line)
+                for line in (PILOT_FIXTURE_DIR / "evidence-views" / "test.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            # 1. Build a compliant Member A learning-export bundle with SHA-256 checksums
+            export_dir = tmp_dir / "server-export"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            mr_base_lines, learned_lines, retrained_lines = [], [], []
+            for row in test_rows:
+                sid = row["subjectId"]
+                repos = (row.get("evidence") or {}).get("repositories") or []
+                allowed = [str(r["repoId"]) for r in repos[:2]]
+                if not allowed:
+                    empty_row = {
+                        "subjectId": sid,
+                        "status": "empty",
+                        "languages": {},
+                        "topics": {},
+                        "topInterests": [],
+                        "usedRepoIds": [],
+                        "evidenceRepos": [],
+                    }
+                    mr_base_lines.append(json.dumps({**empty_row, "method": "baseline_mr_fixed_v1", "modelVersion": "rules-mr-30d-3-1.5-v1"}))
+                    learned_lines.append(json.dumps({**empty_row, "method": "learned_model", "modelVersion": "portrait-r3-init"}))
+                    retrained_lines.append(json.dumps({**empty_row, "method": "learned_model", "modelVersion": "portrait-r3-retrained"}))
+                else:
+                    first_lang = repos[0].get("primaryLanguage") or "Python"
+                    first_topics = repos[0].get("topics") or ["llm"]
+                    mr_base_lines.append(json.dumps({
+                        "subjectId": sid,
+                        "method": "baseline_mr_fixed_v1",
+                        "modelVersion": "rules-mr-30d-3-1.5-v1",
+                        "status": "ready",
+                        "languages": {first_lang: 1.0},
+                        "topics": {first_topics[0]: 1.0},
+                        "topInterests": [{"tag": first_topics[0], "score": 1.0, "evidenceRepos": allowed}],
+                        "usedRepoIds": allowed,
+                    }))
+                    learned_lines.append(json.dumps({
+                        "subjectId": sid,
+                        "method": "learned_model",
+                        "modelVersion": "portrait-r3-init",
+                        "status": "ready",
+                        "languages": {first_lang: 1.0},
+                        "topics": {t: round(1.0 / len(first_topics), 4) for t in first_topics},
+                        "topInterests": [{"tag": t, "score": 0.5, "evidenceRepos": allowed} for t in first_topics],
+                        "evidenceRepos": allowed,
+                    }))
+                    retrained_lines.append(json.dumps({
+                        "subjectId": sid,
+                        "method": "learned_model",
+                        "modelVersion": "portrait-r3-retrained",
+                        "status": "ready",
+                        "languages": {first_lang: 1.0},
+                        "topics": {t: round(1.0 / len(first_topics), 4) for t in first_topics},
+                        "topInterests": [{"tag": t, "score": 0.6, "evidenceRepos": allowed} for t in first_topics],
+                        "evidenceRepos": allowed,
+                    }))
+
+            base_file = export_dir / "baseline.jsonl"
+            learned_file = export_dir / "learned.jsonl"
+            retrained_file = tmp_dir / "learned_retrained.jsonl"
+            base_file.write_text("\n".join(mr_base_lines) + "\n", encoding="utf-8")
+            learned_file.write_text("\n".join(learned_lines) + "\n", encoding="utf-8")
+            retrained_file.write_text("\n".join(retrained_lines) + "\n", encoding="utf-8")
+
+            export_manifest = {
+                "schemaVersion": "1.0.0",
+                "state": "completed",
+                "protocolDigest": "abc123",
+                "datasetVersion": "hg-pilot-synthetic_fixture-20261103",
+                "catalogSnapshotId": "cat_1",
+                "featureSpaceVersion": "fs_1",
+                "modelVersion": "portrait-r3-init",
+                "framework": "local",
+                "userBlocks": 1,
+                "elapsedMs": 120,
+                "files": {
+                    "baseline": {"path": "baseline.jsonl", "sha256": hashlib.sha256(base_file.read_bytes()).hexdigest()},
+                    "learned": {"path": "learned.jsonl", "sha256": hashlib.sha256(learned_file.read_bytes()).hexdigest()},
+                },
+            }
+            (export_dir / "run-manifest.json").write_text(json.dumps(export_manifest), encoding="utf-8")
+
+            # 2. Fake LLM caller tracking call counts per subject & simulating 1 failed subject
+            call_counts: dict[str, int] = {}
+            failed_sid = str(test_rows[-1]["subjectId"])
+
+            def fake_llm_caller(prompt_row, api_url, api_key, model_name, timeout_sec=60, temperature=0.0, provider=None):
+                sid = str(prompt_row["subjectId"])
+                call_counts[sid] = call_counts.get(sid, 0) + 1
+                if sid == failed_sid:
+                    return {
+                        "ok": False,
+                        "subjectId": sid,
+                        "provider": provider or "test-provider",
+                        "calledAt": "2026-11-18T00:00:00Z",
+                        "modelIdentifier": "test-llm-v1",
+                        "promptVersion": prompt_row["promptVersion"],
+                        "promptDigest": prompt_row["promptDigest"],
+                        "requestParams": {"temperature": temperature},
+                        "evidenceHash": prompt_row["evidenceHash"],
+                        "elapsedMs": 15,
+                        "error": "simulated_timeout",
+                    }
+                ev = next(r["evidence"] for r in test_rows if str(r["subjectId"]) == sid)
+                repos = ev.get("repositories") or []
+                if not repos:
+                    pred = {"subjectId": sid, "method": "llm_reference", "modelVersion": "test-llm-v1", "status": "empty", "languages": {}, "topics": {}, "topInterests": [], "evidenceRepos": []}
+                else:
+                    rid = str(repos[0]["repoId"])
+                    topic = (repos[0].get("topics") or ["llm"])[0]
+                    pred = {
+                        "subjectId": sid,
+                        "method": "llm_reference",
+                        "modelVersion": "test-llm-v1",
+                        "status": "ready",
+                        "languages": {repos[0].get("primaryLanguage") or "Python": 1.0},
+                        "topics": {topic: 1.0},
+                        "topInterests": [{"tag": topic, "score": 1.0, "evidenceRepos": [rid]}],
+                        "evidenceRepos": [rid],
+                    }
+                return {
+                    "ok": True,
+                    "subjectId": sid,
+                    "provider": provider or "test-provider",
+                    "calledAt": "2026-11-18T00:00:00Z",
+                    "modelIdentifier": "test-llm-v1",
+                    "promptVersion": prompt_row["promptVersion"],
+                    "promptDigest": prompt_row["promptDigest"],
+                    "requestParams": {"temperature": temperature},
+                    "evidenceHash": prompt_row["evidenceHash"],
+                    "elapsedMs": 25,
+                    "prediction": pred,
+                    "rawResponse": json.dumps(pred),
+                }
+
+            out_dir = tmp_dir / "round3-out"
+            report = run_experiment_pipeline(
+                dataset_dir=PILOT_FIXTURE_DIR,
+                output_dir=out_dir,
+                split="test",
+                server_export_dir=export_dir,
+                extra_models=[("learned_retrained", retrained_file)],
+                run_llm_api=True,
+                subset_repeats=3,
+                repeat_subset_size=3,
+                llm_provider="test-provider",
+                llm_caller=fake_llm_caller,
+            )
+
+            self.assertIn("baseline_local_v1", report["methods"])
+            self.assertIn("baseline_mr_fixed_v1", report["methods"])
+            self.assertIn("learned_model", report["methods"])
+            self.assertIn("learned_retrained", report["methods"])
+            self.assertIn("llm_reference", report["methods"])
+            self.assertEqual(report["methods"]["llm_reference"]["metrics"]["overall"]["failedCount"], 1)
+            self.assertEqual(report["methods"]["llm_reference"]["stability"]["totalCallsPerSubsetSubject"], 3)
+            # Subset users were called exactly 3 times total (1 main + 2 repeats), non-subset called 1 time
+            subset_ids = set(report["methods"]["llm_reference"]["stability"]["subsetSubjectIds"])
+            for sid, cnt in call_counts.items():
+                self.assertEqual(cnt, 3 if sid in subset_ids else 1)
+
+            # Verify empty distributions were separated (not padded into cosine averages)
+            empty_evals = [r for r in report["methods"]["baseline_local_v1"]["perSubject"] if r["expectedEmpty"]]
+            self.assertEqual(len(empty_evals), 1)
+            self.assertIsNone(empty_evals[0]["langCosine"])
+            self.assertTrue(empty_evals[0]["emptyLangExact"])
+
+            # Verify SVG charts generated
+            self.assertGreaterEqual(len(report["charts"]), 3)
+            for c in report["charts"]:
+                self.assertTrue((out_dir / c["path"]).exists())
+
+            # Verify blind audit worksheet & unblinding pass
+            template_rows = [
+                json.loads(l)
+                for l in (out_dir / "blind-review-audit-template.jsonl").read_text(encoding="utf-8").splitlines()
+                if l.strip()
+            ]
+            self.assertTrue((out_dir / "blind-review-worksheet.md").exists())
+            annotated_path = tmp_dir / "annotated.jsonl"
+            for idx, r in enumerate(template_rows):
+                r["category"] = "grounded" if idx % 2 == 0 else "over_inferred"
+            annotated_path.write_text("\n".join(json.dumps(r) for r in template_rows) + "\n", encoding="utf-8")
+
+            report2 = run_experiment_pipeline(
+                dataset_dir=PILOT_FIXTURE_DIR,
+                output_dir=out_dir,
+                split="test",
+                server_export_dir=export_dir,
+                extra_models=[("learned_retrained", retrained_file)],
+                blind_audit_file=annotated_path,
+                blind_key_file=out_dir / "blind-review-key.json",
+            )
+            self.assertEqual(report2["blindAuditSummary"]["annotatedEntries"], len(template_rows))
+            self.assertIn("learned_model", report2["blindAuditSummary"]["byMethod"])
+
+            # Tampered server export SHA-256 must fail fast
+            base_file.write_text("{}\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                run_experiment_pipeline(
+                    dataset_dir=PILOT_FIXTURE_DIR,
+                    output_dir=tmp_dir / "bad-export",
+                    split="test",
+                    server_export_dir=export_dir,
+                )
 
 
 if __name__ == "__main__":

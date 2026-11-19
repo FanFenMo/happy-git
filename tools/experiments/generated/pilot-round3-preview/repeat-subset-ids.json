@@ -1,0 +1,13 @@
+{
+  "seed": 20261103,
+  "requestedSubsetSize": 20,
+  "actualSubsetSize": 5,
+  "totalCallsPlannedPerSubject": 3,
+  "subjectIds": [
+    "subj_pilot_0009",
+    "subj_pilot_0018",
+    "subj_pilot_0029",
+    "subj_pilot_0039",
+    "subj_pilot_0050"
+  ]
+}

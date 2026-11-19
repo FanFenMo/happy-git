@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="420" viewBox="0 0 860 420">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; fill: #0f172a; }.title { font-size: 16px; font-weight: 700; }.sub { font-size: 11px; fill: #475569; }.axis { font-size: 11px; fill: #334155; }.val { font-size: 10px; fill: #1e293b; font-weight: 600; }.legend { font-size: 11px; fill: #1e293b; }</style>
+<text x="68" y="28" class="title">HappyGit Portrait Evaluation - Top-8 F1 by Scenario</text>
+<text x="68" y="46" class="sub">dataset=hg-pilot-synthetic_fixture-20261103 | split=test | n=5</text>
+<rect x="68" y="58" width="12" height="12" rx="2" fill="#2563eb"/>
+<text x="85" y="68" class="legend">baseline_local_v1</text>
+<line x1="68" y1="334.0" x2="832" y2="334.0" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="338.0" text-anchor="end" class="axis">0.0</text>
+<line x1="68" y1="284.4" x2="832" y2="284.4" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="288.4" text-anchor="end" class="axis">0.2</text>
+<line x1="68" y1="234.8" x2="832" y2="234.8" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="238.8" text-anchor="end" class="axis">0.4</text>
+<line x1="68" y1="185.2" x2="832" y2="185.2" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="189.2" text-anchor="end" class="axis">0.6</text>
+<line x1="68" y1="135.6" x2="832" y2="135.6" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="139.6" text-anchor="end" class="axis">0.8</text>
+<line x1="68" y1="86.0" x2="832" y2="86.0" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="90.0" text-anchor="end" class="axis">1.0</text>
+<line x1="68" y1="334" x2="832" y2="334" stroke="#64748b" stroke-width="1.2"/>
+<text x="144.4" y="352.0" text-anchor="end" transform="rotate(-24 144.4 352.0)" class="axis">no_evidence (n=1)</text>
+<rect x="126.4" y="86.0" width="36.0" height="248.0" rx="2" fill="#2563eb"/>
+<text x="144.4" y="96.0" text-anchor="middle" class="val">1.00</text>
+<text x="297.2" y="352.0" text-anchor="end" transform="rotate(-24 297.2 352.0)" class="axis">stable_multi (n=1)</text>
+<rect x="279.2" y="263.1" width="36.0" height="70.9" rx="2" fill="#2563eb"/>
+<text x="297.2" y="259.1" text-anchor="middle" class="val">0.29</text>
+<text x="450.0" y="352.0" text-anchor="end" transform="rotate(-24 450.0 352.0)" class="axis">stable_single (n=1)</text>
+<rect x="432.0" y="243.8" width="36.0" height="90.2" rx="2" fill="#2563eb"/>
+<text x="450.0" y="239.8" text-anchor="middle" class="val">0.36</text>
+<text x="602.8" y="352.0" text-anchor="end" transform="rotate(-24 602.8 352.0)" class="axis">star_only (n=1)</text>
+<rect x="584.8" y="185.2" width="36.0" height="148.8" rx="2" fill="#2563eb"/>
+<text x="602.8" y="181.2" text-anchor="middle" class="val">0.60</text>
+<text x="755.6" y="352.0" text-anchor="end" transform="rotate(-24 755.6 352.0)" class="axis">temporary_task (n=1)</text>
+<rect x="737.6" y="334.0" width="36.0" height="0.0" rx="2" fill="#2563eb"/>
+<text x="755.6" y="330.0" text-anchor="middle" class="val">0.00</text>
+</svg>

@@ -1,0 +1,22 @@
+{
+  "executedAt": "2026-11-19T06:11:20Z",
+  "gitCommit": "792a0bc290df9e47f96bf71c93f5c9bc1321212c",
+  "datasetVersion": "hg-pilot-synthetic_fixture-20261103",
+  "catalogMode": "synthetic_fixture",
+  "behaviorSourceMode": null,
+  "datasetDir": "C:\\课件\\软件产品综合研发实践（阶段二）\\happy-git\\tools\\datasets\\generated\\pilot-synthetic-fixture",
+  "split": "test",
+  "subjectCount": 5,
+  "evidenceFileSha256": "95a55d21d992d3eb8b2d9f1b219f3c98d74064fab403c78a9dfc7efe2d8abe14",
+  "promptsFileSha256": "7f9002e1c88bcc652c0162452e0045b222d7fbe39218eae99711c7aea3205cd1",
+  "aliasesTaxonomyVersion": "hg-taxonomy-2026-11-v1",
+  "referenceTime": 1794096000000,
+  "repeatSubset": {
+    "seed": 20261103,
+    "subsetSize": 5,
+    "totalCallsPlannedPerSubject": 3,
+    "file": "repeat-subset-ids.json"
+  },
+  "serverExport": null,
+  "blindReview": null
+}

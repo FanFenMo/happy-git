@@ -4,6 +4,8 @@
  */
 
 const crypto = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
 let electronSafeStorage = null
 let electronShell = null
 try {
@@ -39,14 +41,26 @@ function base64UrlEncode(buffer) {
     .replace(/=+$/g, '')
 }
 
+function readBundledApiBaseUrl(configPath = null) {
+  const target = configPath || path.join(__dirname, 'config.generated.json')
+  try {
+    if (!fs.existsSync(target)) return ''
+    const parsed = JSON.parse(fs.readFileSync(target, 'utf8'))
+    return typeof parsed?.apiBaseUrl === 'string' ? parsed.apiBaseUrl.trim().replace(/\/+$/g, '') : ''
+  } catch (_) {
+    return ''
+  }
+}
+
 class CloudService {
-  constructor({ database, fetchImpl = globalThis.fetch, defaultBaseUrl = null }) {
+  constructor({ database, fetchImpl = globalThis.fetch, defaultBaseUrl = null, configPath = null }) {
     this.database = database
     this.fetchImpl = fetchImpl
     this.defaultBaseUrl =
       defaultBaseUrl ||
       process.env.HAPPYGIT_CLOUD_BASE_URL ||
       process.env.HAPPYGIT_SERVER_URL ||
+      readBundledApiBaseUrl(configPath) ||
       'http://127.0.0.1:8080'
     this.authChallenges = new Map() // challengeId -> { challengeId, codeVerifier, authorizeUrl, expiresAt, accountId }
     this.flushingAccounts = new Set()

@@ -54,14 +54,22 @@ fs.cpSync(path.join(rootDir, 'electron'), path.join(appDir, 'electron'), { recur
 // 复制 shared 模块 (契约、路由、推荐算法与规范化模型)
 fs.cpSync(path.join(rootDir, 'shared'), path.join(appDir, 'shared'), { recursive: true })
 
-// 生成精简的生产配置 package.json
+// 生成精简的生产配置 package.json（版本与 client/package.json 保持一致）
+const clientPkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'))
 const prodPkg = {
   name: 'happygit-client',
-  version: '1.0.0',
-  description: 'HappyGit - 开源项目个性化推荐与展示系统',
+  version: clientPkg.version || '1.2.0',
+  description: clientPkg.description || 'HappyGit - 开源项目个性化推荐与展示系统',
   main: 'electron/main.cjs'
 }
 fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify(prodPkg, null, 2), 'utf-8')
+
+if (fs.existsSync(newExe)) {
+  execSync(
+    `node scripts/generate-release-manifest.mjs --platform windows --artifact "${newExe}" --output "${path.join(outDir, 'release-manifest-windows.json')}" --build-command "npm run build:win"`,
+    { cwd: rootDir, stdio: 'inherit' }
+  )
+}
 
 console.log('🎉 打包成功！')
 console.log(`📍 可执行文件位置: ${newExe}`)

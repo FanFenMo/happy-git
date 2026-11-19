@@ -1,7 +1,7 @@
 {
   "name": "happygit-client",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "HappyGit - 开源项目个性化推荐与展示系统",
   "author": "FanFenMo",
   "type": "module",
@@ -17,7 +17,8 @@
     "cap:android": "npm run build && cap add android",
     "cap:ios": "npm run build && cap add ios",
     "test": "node scripts/run-tests.mjs",
-    "build:release": "node scripts/build-release.mjs"
+    "build:release": "node scripts/build-release.mjs",
+    "release:manifest": "node scripts/generate-release-manifest.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

@@ -16,7 +16,9 @@ release/
 
 # Generated configs
 electron/config.generated.json
+electron/release-metadata.json
 android/app/src/main/res/values/happygit_config.xml
+android/app/src/main/assets/happygit/release-metadata.json
 
 # SQLite data files
 data/

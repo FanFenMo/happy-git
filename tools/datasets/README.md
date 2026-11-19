@@ -15,11 +15,19 @@
 
 ## 2. 真实 Catalog 缺口检查 vs 格式演示包 (`synthetic_fixture`)
 
-1. **真实采集缺口检查（`--catalog-mode real`）**：
-   - 当 `sources/repositories-real.jsonl` 中的真实公开仓库数量不足目标规模（`pilot` 需 240 个、`standard` 需 10,000 个）时，构建器**绝不复制已有仓库或伪造 `github_public` README**，而是输出结构化的 `real-catalog-gap-report.json` 与 `dataset-manifest.json`（`status: "blocked_missing_real_catalog"`），供成员甲导出真实采集仓库后直接复跑。
+1. **真实采集多批目录接入与缺口检查（`--catalog-mode real`）**：
+   - 支持通过 `--repo-catalog <文件或导出目录>`（可重复指定）直接读取成员甲采集导出的多批 JSONL（例如 51 批采集导出目录），按 `repoId` 保留较新 `observedAt` 去重、统计非空 README 并按领域与热度分层冻结至 `pilot`（240 仓库）或 `standard`（10,000 仓库）规模；
+   - 支持 `--behavior-source-mode deterministic_rules|llm_synthesized|real_observed` 显式区分确定性规则生成、外部大模型素材生成与真实观察来源；
+   - 当真实公开仓库数量不足目标规模时，构建器**绝不复制已有仓库或伪造 `github_public` README**，而是输出结构化的 `real-catalog-gap-report.json` 与 `dataset-manifest.json`（`status: "blocked_missing_real_catalog"`）。
    ```powershell
-   python tools/datasets/build_dataset.py --scale pilot --catalog-mode real --output-dir tools/datasets/generated/pilot-real-gap
-   python tools/datasets/validate_dataset.py --dataset-dir tools/datasets/generated/pilot-real-gap
+   # 接入成员甲真实采集目录生成正式冻结数据集
+   python tools/datasets/build_dataset.py `
+     --scale standard `
+     --catalog-mode real `
+     --repo-catalog <path/to/collected-batches-dir> `
+     --behavior-source-mode deterministic_rules `
+     --output-dir <path/to/frozen-standard-real>
+   python tools/datasets/validate_dataset.py --dataset-dir <path/to/frozen-standard-real> --strict-real
    ```
 
 2. **完整格式与流水线演示包（`--catalog-mode synthetic_fixture`）**：

@@ -60,16 +60,31 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleDebug --no-daemon
 
-      - name: Organize Output APK
+      - name: Resolve Client Version
+        id: meta
+        run: |
+          VER=$(node -p "require('./client/package.json').version")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Organize Output APK & Checksum
         run: |
           mkdir -p output
-          cp client/android/app/build/outputs/apk/debug/app-debug.apk output/HappyGit-v1.0.0.apk
+          APK_NAME="HappyGit-v${{ steps.meta.outputs.version }}.apk"
+          cp client/android/app/build/outputs/apk/debug/app-debug.apk "output/${APK_NAME}"
+          node client/scripts/generate-release-manifest.mjs \
+            --platform android \
+            --artifact "output/${APK_NAME}" \
+            --output "output/release-manifest-android.json" \
+            --build-command "cd client && npm run build:release && npx cap sync android && cd android && ./gradlew assembleDebug --no-daemon"
 
       - name: Upload APK to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: HappyGit-v1.0.0-Android-APK
-          path: output/HappyGit-v1.0.0.apk
+          name: HappyGit-v${{ steps.meta.outputs.version }}-Android-APK
+          path: |
+            output/HappyGit-v${{ steps.meta.outputs.version }}.apk
+            output/HappyGit-v${{ steps.meta.outputs.version }}.apk.sha256
+            output/release-manifest-android.json
           if-no-files-found: error
 
   build-windows:
@@ -96,17 +111,29 @@ jobs:
           VITE_API_BASE_URL: ${{ vars.HAPPYGIT_API_BASE_URL }}
         run: npm run build:win
 
-      - name: Organize Windows Archive
+      - name: Resolve Client Version & Organize Windows Archive
+        id: win_meta
         shell: pwsh
         run: |
+          $ver = (Get-Content client/package.json -Raw | ConvertFrom-Json).version
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           New-Item -ItemType Directory -Force -Path output | Out-Null
-          Compress-Archive -LiteralPath client/release/HappyGit-win-x64 -DestinationPath output/HappyGit-v1.0.0-win-x64.zip
+          $zipPath = "output/HappyGit-v$ver-win-x64.zip"
+          Compress-Archive -LiteralPath client/release/HappyGit-win-x64 -DestinationPath $zipPath -Force
+          node client/scripts/generate-release-manifest.mjs `
+            --platform windows `
+            --artifact $zipPath `
+            --output output/release-manifest-windows.json `
+            --build-command "cd client && npm run build:win"
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HappyGit-v1.0.0-Windows
-          path: output/HappyGit-v1.0.0-win-x64.zip
+          name: HappyGit-v${{ steps.win_meta.outputs.version }}-Windows
+          path: |
+            output/HappyGit-v${{ steps.win_meta.outputs.version }}-win-x64.zip
+            output/HappyGit-v${{ steps.win_meta.outputs.version }}-win-x64.zip.sha256
+            output/release-manifest-windows.json
           if-no-files-found: error
 
   publish:
@@ -115,32 +142,45 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Client Version
+        id: pub_meta
+        run: |
+          VER=$(node -p "require('./client/package.json').version")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
       - name: Download Client Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: HappyGit-v1.0.0-*
+          pattern: HappyGit-v${{ steps.pub_meta.outputs.version }}-*
           path: output
           merge-multiple: true
 
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0-alpha
-          name: "HappyGit v1.0.0 跨平台客户端预发布 (含 Android APK)"
+          tag_name: v${{ steps.pub_meta.outputs.version }}
+          name: "HappyGit v${{ steps.pub_meta.outputs.version }} 跨平台客户端发布 (Windows + Android)"
           body: |
-            ### 📱 HappyGit v1.0.0 客户端下载
-            
-            - **Android 安装包**: 点击下方 `HappyGit-v1.0.0.apk` 即可直接在安卓手机上安装体验。
-            - **Windows 桌面端**: 下载 `HappyGit-v1.0.0-win-x64.zip`，完整解压后运行 `HappyGit.exe`。
-            - 授权服务地址已随安装包预置，用户无需填写服务地址或应用凭据。
-            
+            ### 📱 HappyGit v${{ steps.pub_meta.outputs.version }} 客户端下载
+
+            - **Android 安装包**：下载 `HappyGit-v${{ steps.pub_meta.outputs.version }}.apk` 及对应 `.sha256` 校验文件（`versionCode=3`，覆盖旧版升级保留本地 SQLite 数据）。
+            - **Windows 桌面端**：下载 `HappyGit-v${{ steps.pub_meta.outputs.version }}-win-x64.zip` 及对应 `.sha256` 校验文件，解压后运行 `HappyGit.exe`。
+            - 公开云端服务地址已随安装包预置（无内置密钥），普通用户无需手动填写 API 地址或应用凭据；未绑定云端时可独立使用本地 GitHub 网页会话与本地推荐。
+
             #### 🌟 本版功能特色：
-            - GitHub 账号登录与公开项目画像同步
-            - 类抖音风格个人主页与多维技术标签展示
-            - 浏览历史与 Star 记录管理
-            - 热门项目卡片流预告
+            - 本地 GitHub 网页会话 + 可选云端应用会话（`/api/v2`）双会话隔离与账号一致性校验
+            - SQLite 无损升级、按次有效浏览去重上传队列与 `accepted / exported / processed` 三水位展示
+            - 同构 8192 维特征空间摘要校验、云端画像驱动有界搜索（最多 4 查询 / 8 页）与近期增量接续排序
+            - 个人画像多状态真实反馈、群体分布页签（`<10` 抑制）与已隐藏推荐恢复管理
           files: |
-            output/HappyGit-v1.0.0.apk
-            output/HappyGit-v1.0.0-win-x64.zip
+            output/HappyGit-v${{ steps.pub_meta.outputs.version }}.apk
+            output/HappyGit-v${{ steps.pub_meta.outputs.version }}.apk.sha256
+            output/release-manifest-android.json
+            output/HappyGit-v${{ steps.pub_meta.outputs.version }}-win-x64.zip
+            output/HappyGit-v${{ steps.pub_meta.outputs.version }}-win-x64.zip.sha256
+            output/release-manifest-windows.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

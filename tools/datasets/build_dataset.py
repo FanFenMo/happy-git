@@ -124,6 +124,141 @@ def _write_sharded_runtime_jsonl(split_dir: Path, rows: List[Dict[str, Any]]) ->
     return shards_meta
 
 
+def _resolve_jsonl_sources(paths: List[Path]) -> List[Path]:
+    resolved: List[Path] = []
+    seen: set[Path] = set()
+    for raw_path in paths:
+        p = Path(raw_path)
+        if p.is_dir():
+            candidates = sorted(f for f in p.rglob("*.jsonl") if f.is_file())
+        elif p.exists() and p.is_file():
+            candidates = [p]
+        else:
+            candidates = []
+        for item in candidates:
+            rp = item.resolve()
+            if rp not in seen:
+                seen.add(rp)
+                resolved.append(rp)
+    return resolved
+
+
+def _load_and_deduplicate_real_repositories(
+    source_paths: List[Path],
+    reference_time: int,
+) -> Dict[str, Any]:
+    files = _resolve_jsonl_sources(source_paths)
+    by_repo_id: Dict[str, Tuple[int, int, int, Dict[str, Any]]] = {}
+    file_records: List[Dict[str, Any]] = []
+    raw_row_count = 0
+    duplicate_row_count = 0
+    skipped_invalid_count = 0
+    seq = 0
+
+    for fpath in files:
+        f_rows = 0
+        with fpath.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                s = line.strip()
+                if not s:
+                    continue
+                f_rows += 1
+                raw_row_count += 1
+                seq += 1
+                row = json.loads(s)
+                if row.get("kind") != "repository" or row.get("visibility") != "public":
+                    skipped_invalid_count += 1
+                    continue
+                if row.get("sourceKind") != "github_public":
+                    skipped_invalid_count += 1
+                    continue
+                obs = int(row.get("observedAt") or row.get("updatedAt") or 0)
+                if obs > reference_time:
+                    skipped_invalid_count += 1
+                    continue
+                rid = str(row.get("repoId") or "").strip()
+                if not rid:
+                    skipped_invalid_count += 1
+                    continue
+                has_readme = 1 if str(row.get("readmeText") or "").strip() else 0
+                rank_key = (obs, has_readme, seq)
+                if rid in by_repo_id:
+                    duplicate_row_count += 1
+                    prev_obs, prev_readme, prev_seq, _ = by_repo_id[rid]
+                    if rank_key >= (prev_obs, prev_readme, prev_seq):
+                        by_repo_id[rid] = (obs, has_readme, seq, row)
+                else:
+                    by_repo_id[rid] = (obs, has_readme, seq, row)
+        file_records.append(
+            {
+                "path": fpath.name,
+                "recordCount": f_rows,
+                "sha256": _sha256_file(fpath),
+            }
+        )
+
+    dedup_rows = [
+        by_repo_id[rid][3]
+        for rid in sorted(by_repo_id.keys())
+    ]
+    non_empty_readme = sum(1 for r in dedup_rows if str(r.get("readmeText") or "").strip())
+    return {
+        "files": file_records,
+        "rawRowCount": raw_row_count,
+        "duplicateRowCount": duplicate_row_count,
+        "skippedInvalidCount": skipped_invalid_count,
+        "deduplicatedRepositoryCount": len(dedup_rows),
+        "nonEmptyReadmeCount": non_empty_readme,
+        "repositories": dedup_rows,
+    }
+
+
+def _select_stratified_repositories(
+    valid_repos: List[Dict[str, Any]],
+    taxonomy: Dict[str, Any],
+    target_count: int,
+    rng: random.Random,
+) -> List[Dict[str, Any]]:
+    if len(valid_repos) <= target_count:
+        return sorted(valid_repos, key=lambda r: str(r["repoId"]))
+
+    domains = taxonomy.get("domains", [])
+    domain_topics = [(d["domainId"], set(d["topics"])) for d in domains]
+    buckets: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+
+    for repo in sorted(valid_repos, key=lambda r: str(r["repoId"])):
+        topics = {str(t).lower() for t in (repo.get("topics") or [])}
+        matched_domain = "general"
+        for dom_id, d_topics in domain_topics:
+            if topics & d_topics:
+                matched_domain = dom_id
+                break
+        stars = int(repo.get("starCount") or 0)
+        tier = "high" if stars >= 10000 else ("medium" if stars >= 500 else "long_tail")
+        buckets.setdefault((matched_domain, tier), []).append(repo)
+
+    for bucket_rows in buckets.values():
+        rng.shuffle(bucket_rows)
+
+    selected: List[Dict[str, Any]] = []
+    bucket_keys = sorted(buckets.keys())
+    cursors = {k: 0 for k in bucket_keys}
+    while len(selected) < target_count:
+        progressed = False
+        for key in bucket_keys:
+            idx = cursors[key]
+            rows = buckets[key]
+            if idx < len(rows):
+                selected.append(rows[idx])
+                cursors[key] = idx + 1
+                progressed = True
+                if len(selected) >= target_count:
+                    break
+        if not progressed:
+            break
+    return sorted(selected, key=lambda r: str(r["repoId"]))
+
+
 def _inspect_real_catalog(
     real_repos: List[Dict[str, Any]],
     real_collections: List[Dict[str, Any]],
@@ -752,13 +887,26 @@ def build_dataset(
     seed: int = SEED_DEFAULT,
     reference_time: int = REFERENCE_TIME_DEFAULT,
     derived_profiles_input: Optional[Path] = None,
+    repo_catalog_paths: Optional[List[Path]] = None,
+    real_users_path: Optional[Path] = None,
+    behavior_source_mode: str = "deterministic_rules",
 ) -> Dict[str, Any]:
     taxonomy_path = datasets_root / "taxonomy.json"
-    real_repos_path = datasets_root / "sources" / "repositories-real.jsonl"
-    real_collections_path = datasets_root / "sources" / "user-collections-real.jsonl"
+    default_real_repos_path = datasets_root / "sources" / "repositories-real.jsonl"
+    catalog_sources = (
+        [Path(p) for p in repo_catalog_paths]
+        if repo_catalog_paths
+        else [default_real_repos_path]
+    )
+    real_collections_path = (
+        Path(real_users_path)
+        if real_users_path
+        else (datasets_root / "sources" / "user-collections-real.jsonl")
+    )
 
     taxonomy = json.loads(taxonomy_path.read_text(encoding="utf-8"))
-    real_repos = _read_jsonl(real_repos_path)
+    catalog_ingest = _load_and_deduplicate_real_repositories(catalog_sources, reference_time)
+    real_repos = catalog_ingest["repositories"]
     real_collections = _read_jsonl(real_collections_path)
 
     target_repo_count = 240 if scale == "pilot" else 10000
@@ -781,6 +929,15 @@ def build_dataset(
         "catalogMode": catalog_mode,
         "referenceTime": reference_time,
         "readyForFormalRealExperiment": gap_inspection["ready"],
+        "catalogIngestion": {
+            "sourceFileCount": len(catalog_ingest["files"]),
+            "rawRowCount": catalog_ingest["rawRowCount"],
+            "duplicateRowCount": catalog_ingest["duplicateRowCount"],
+            "skippedInvalidCount": catalog_ingest["skippedInvalidCount"],
+            "deduplicatedRepositoryCount": catalog_ingest["deduplicatedRepositoryCount"],
+            "nonEmptyReadmeCount": catalog_ingest["nonEmptyReadmeCount"],
+            "files": catalog_ingest["files"],
+        },
         "availableRealRepositoryCount": gap_inspection["availableRealRepositoryCount"],
         "requiredRealRepositoryCount": gap_inspection["requiredRealRepositoryCount"],
         "missingRealRepositoryCount": gap_inspection["missingRealRepositoryCount"],
@@ -793,7 +950,7 @@ def build_dataset(
             "Real GitHub public repository catalog currently contains "
             f"{gap_inspection['availableRealRepositoryCount']} verified repositories "
             f"(target: {target_repo_count}). Do not duplicate or fabricate github_public READMEs; "
-            "Member A should export collected public repositories to tools/datasets/sources/repositories-real.jsonl."
+            "pass Member A's collected public repository JSONL files or directory via --repo-catalog."
         ),
     }
     gap_report_path.write_text(
@@ -807,12 +964,14 @@ def build_dataset(
             "datasetVersion": f"hg-{scale}-real-20261103",
             "scale": scale,
             "catalogMode": "real",
+            "behaviorSourceMode": behavior_source_mode,
             "status": "blocked_missing_real_catalog",
             "seed": seed,
             "referenceTime": reference_time,
             "windowDays": WINDOW_DAYS_DEFAULT,
             "taxonomyVersion": taxonomy["taxonomyVersion"],
             "realCatalogGapReport": "real-catalog-gap-report.json",
+            "catalogIngestion": gap_report_payload["catalogIngestion"],
             "counts": {
                 "availableRealRepositories": gap_inspection["availableRealRepositoryCount"],
                 "requiredRealRepositories": target_repo_count,
@@ -828,9 +987,11 @@ def build_dataset(
 
     rng = random.Random(seed)
     if catalog_mode == "real":
-        repositories = sorted(
-            gap_inspection["validRealRepositories"][:target_repo_count],
-            key=lambda r: str(r["repoId"]),
+        repositories = _select_stratified_repositories(
+            gap_inspection["validRealRepositories"],
+            taxonomy=taxonomy,
+            target_count=target_repo_count,
+            rng=rng,
         )
         _, annotations = _generate_fixture_repositories(
             existing_real=repositories,
@@ -950,11 +1111,14 @@ def build_dataset(
         {
             "kind": "provenance",
             "schemaVersion": "1.0.0",
-            "asset": "sources/repositories-real.jsonl",
+            "asset": "catalog_sources",
             "sourceKind": "github_public",
+            "sourceFiles": catalog_ingest["files"],
+            "rawRowCount": catalog_ingest["rawRowCount"],
+            "duplicateRowCount": catalog_ingest["duplicateRowCount"],
             "recordCount": gap_inspection["availableRealRepositoryCount"],
             "observedAt": reference_time,
-            "note": "Verified public repositories from repo validation history.",
+            "note": "Verified public repositories ingested and deduplicated by repoId keeping newer observation.",
         },
         {
             "kind": "provenance",
@@ -964,7 +1128,7 @@ def build_dataset(
             "recordCount": gap_inspection["realUserCollectionCount"],
             "available": gap_inspection["realUserCollectionsAvailable"],
             "observedAt": reference_time,
-            "note": "Optional real public user Star/Owned collections (not provided in current offline seed).",
+            "note": "Optional real public user Star/Owned collections.",
         },
         {
             "kind": "provenance",
@@ -975,10 +1139,20 @@ def build_dataset(
             "seed": seed,
             "observedAt": reference_time,
             "note": (
-                "Full real GitHub catalog."
+                "Frozen stratified real GitHub public catalog."
                 if catalog_mode == "real"
-                else "Format demonstration fixture combining 4 real repos with deterministic synthetic_fixture repos."
+                else "Format demonstration fixture combining available real repos with deterministic synthetic_fixture repos."
             ),
+        },
+        {
+            "kind": "provenance",
+            "schemaVersion": "1.0.0",
+            "asset": "canonical/events.jsonl",
+            "sourceKind": behavior_source_mode,
+            "recordCount": len(generated["events"]),
+            "seed": seed,
+            "observedAt": reference_time,
+            "note": "Explicitly separated behavior source provenance (deterministic_rules vs llm_synthesized vs real_observed).",
         },
     ]
     record_file("provenance.jsonl", provenance_rows)
@@ -988,6 +1162,7 @@ def build_dataset(
         "datasetVersion": f"hg-{scale}-{catalog_mode}-20261103",
         "scale": scale,
         "catalogMode": catalog_mode,
+        "behaviorSourceMode": behavior_source_mode,
         "datasetKind": "real_plus_synthetic" if catalog_mode == "real" else "synthetic_fixture_demo",
         "status": "ready_for_formal_experiment" if catalog_mode == "real" else "ready_for_format_and_pipeline_verification",
         "seed": seed,
@@ -997,10 +1172,11 @@ def build_dataset(
         "taxonomyVersion": taxonomy["taxonomyVersion"],
         "realUserCollectionsAvailable": gap_inspection["realUserCollectionsAvailable"],
         "realCatalogGapReport": "real-catalog-gap-report.json",
+        "catalogIngestion": gap_report_payload["catalogIngestion"],
         "counts": {
             "repositories": len(repositories),
-            "realRepositoriesIncluded": gap_inspection["availableRealRepositoryCount"],
-            "syntheticFixtureRepositoriesIncluded": max(0, len(repositories) - gap_inspection["availableRealRepositoryCount"]),
+            "realRepositoriesIncluded": len(repositories) if catalog_mode == "real" else gap_inspection["availableRealRepositoryCount"],
+            "syntheticFixtureRepositoriesIncluded": 0 if catalog_mode == "real" else max(0, len(repositories) - gap_inspection["availableRealRepositoryCount"]),
             "subjects": len(generated["subjects"]),
             "subjectsBySplit": {
                 "train": len(subjects_by_split["train"]),
@@ -1031,6 +1207,23 @@ def main() -> int:
         default="real",
         help="Use 'real' to require full real GitHub catalog or 'synthetic_fixture' for format demo.",
     )
+    parser.add_argument(
+        "--repo-catalog",
+        action="append",
+        default=None,
+        help="Path to collected real repository JSONL file or directory (repeatable; deduplicated by repoId keeping newer observation).",
+    )
+    parser.add_argument(
+        "--real-users",
+        default=None,
+        help="Optional path to real public user collections JSONL.",
+    )
+    parser.add_argument(
+        "--behavior-source-mode",
+        choices=("deterministic_rules", "llm_synthesized", "real_observed"),
+        default="deterministic_rules",
+        help="Explicitly register provenance of subject behavior synthesis.",
+    )
     parser.add_argument("--output-dir", required=True, help="Output directory for dataset package.")
     parser.add_argument("--seed", type=int, default=SEED_DEFAULT)
     parser.add_argument("--reference-time", type=int, default=REFERENCE_TIME_DEFAULT)
@@ -1039,6 +1232,8 @@ def main() -> int:
 
     datasets_root = Path(__file__).resolve().parent
     derived_path = Path(args.derived_profiles_input) if args.derived_profiles_input else None
+    repo_catalog_paths = [Path(p) for p in args.repo_catalog] if args.repo_catalog else None
+    real_users_path = Path(args.real_users) if args.real_users else None
     manifest = build_dataset(
         scale=args.scale,
         catalog_mode=args.catalog_mode,
@@ -1047,6 +1242,9 @@ def main() -> int:
         seed=args.seed,
         reference_time=args.reference_time,
         derived_profiles_input=derived_path,
+        repo_catalog_paths=repo_catalog_paths,
+        real_users_path=real_users_path,
+        behavior_source_mode=args.behavior_source_mode,
     )
     print(json.dumps({"status": manifest["status"], "datasetVersion": manifest["datasetVersion"]}, ensure_ascii=False))
     return 0

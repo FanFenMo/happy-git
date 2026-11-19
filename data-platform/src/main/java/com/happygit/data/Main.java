@@ -11,7 +11,7 @@ import java.util.*;
 public final class Main {
     private static final Set<String> TYPES=new HashSet<>(Arrays.asList("repository","collection","import","process"));
     public static void main(String[] args) throws Exception {
-        if(args.length==0){System.out.println("HappyGit data: worker | enqueue | plan | plan-control | export-catalog | archive-cloud | import | process | pipeline | learning-prepare | learning-submit | learning-train | learning-infer-file | learning-model | learning-schedule | learning-batch | status | serve");return;}
+        if(args.length==0){System.out.println("HappyGit data: worker | enqueue | plan | plan-control | export-catalog | archive-cloud | import | process | pipeline | learning-prepare | learning-submit | learning-train | learning-infer-file | learning-export | learning-task | learning-model | learning-schedule | learning-batch | status | serve");return;}
         Map<String,String> options=new LinkedHashMap<>();for(int i=1;i<args.length;i+=2){if(!args[i].startsWith("--")||i+1>=args.length)throw new IllegalArgumentException("Expected --key value");options.put(args[i].substring(2),args[i+1]);}
         Configuration conf=new Configuration();String config=System.getenv("HADOOP_CONF_DIR");
         if(config!=null)for(String file:Arrays.asList("core-site.xml","hdfs-site.xml","yarn-site.xml","mapred-site.xml"))conf.addResource(new Path(config,file));
@@ -32,6 +32,10 @@ public final class Main {
             ObjectNode request=Json.parse(Files.readString(java.nio.file.Path.of(required(options,"file"))));
             System.out.println(new LearningPipeline(conf).infer((ObjectNode)request.path("manifest"),(ObjectNode)request.path("model"),required(options,"output")));return;
         }
+        if(args[0].equals("learning-export")){
+            ObjectNode protocol=Json.parse(Files.readString(java.nio.file.Path.of(required(options,"file"))));
+            System.out.println(ModelExport.run(conf,protocol,required(options,"output"),java.nio.file.Path.of(required(options,"local-output"))));return;
+        }
         if(args[0].equals("learning-model")){
             String action=options.getOrDefault("action","status");CloudArchiveClient cloud=new CloudArchiveClient();
             if(action.equals("status"))System.out.println(cloud.status());
@@ -42,6 +46,12 @@ public final class Main {
         String connect=options.getOrDefault("zk",System.getenv().getOrDefault("HG_ZK_CONNECT","127.0.0.1:2181"));
         try(TaskStore store=new TaskStore(connect,System.getenv().getOrDefault("HG_ZK_ROOT","/happygit"),12000,System.getenv("HG_ZK_AUTH"))){
             switch(args[0]){
+                case "learning-task": {
+                    String id=required(options,"id"),action=options.getOrDefault("action","show");
+                    ObjectNode task=store.get(id);
+                    if(!task.path("namespace").asText().equals(namespace)||!task.path("type").asText().startsWith("learning-"))throw new IllegalArgumentException("Task namespace/type mismatch");
+                    System.out.println(action.equals("show")?task:LearningRunner.controlTask(store,namespace,id,action,Integer.parseInt(required(options,"attempt")),required(options,"reason")));break;
+                }
                 case "learning-submit":System.out.println(Json.object().put("taskId",LearningRunner.submit(store,Json.parse(Files.readString(java.nio.file.Path.of(required(options,"file")))))));break;
                 case "learning-schedule":System.out.println(LearningRunner.schedule(store));break;
                 case "learning-batch":{
@@ -105,7 +115,7 @@ public final class Main {
             for(ObjectNode item:store.list()){
                 if(item.path("type").asText().equals("import"))continue;
                 ObjectNode task=store.claim(item.path("id").asText(),worker);if(task==null)continue;claimed=true;
-                try{
+                try(RunGuard guard=RunGuard.open(conf,store,task)){
                     String type=task.path("type").asText();ObjectNode result;
                     GitHubCollector collector=new GitHubCollector(System.getenv("GITHUB_TOKEN"),store,cache,task.path("input").path("planId").asText(),task.path("id").asText());
                     if(type.equals("learning-train")){
@@ -134,10 +144,14 @@ public final class Main {
                         result.set("lastRequest",collector.observation());
                         CollectionPlan.expand(store,task,records);
                     }
-                    store.finish(task,result);System.out.println(Json.object().put("taskId",task.path("id").asText()).put("state","succeeded"));
+                    RunGuard.check(conf);store.finish(task,result);System.out.println(Json.object().put("taskId",task.path("id").asText()).put("state","succeeded"));
+                }catch(RunGuard.Cancelled cancelled){
+                    store.finishCancellation(task);System.out.println(Json.object().put("taskId",task.path("id").asText()).put("state","cancelled"));
                 }catch(Exception failure){
                     if(store.expired())throw failure;
-                    if(store.get(task.path("id").asText()).path("state").asText().equals("succeeded"))continue;
+                    ObjectNode current=store.get(task.path("id").asText());
+                    if(!current.path("token").equals(task.path("token"))||Arrays.asList("succeeded","cancelled").contains(current.path("state").asText()))continue;
+                    if(current.path("cancelRequested").asBoolean()){store.finishCancellation(task);continue;}
                     long retry=System.currentTimeMillis()+Math.min(300000,5000L*(1L<<Math.min(task.path("attempt").asInt(),6)));
                     boolean permanent=failure instanceof IllegalArgumentException;
                     if(failure instanceof CollectionPlan.Paused)task.put("attempt",task.path("attempt").asInt()-1);

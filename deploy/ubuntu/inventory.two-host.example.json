@@ -1,0 +1,12 @@
+{
+  "clusterName": "happygit",
+  "installRoot": "/opt/happygit",
+  "dataRoot": "/var/lib/happygit",
+  "serviceUser": "happygit",
+  "learningCoordinator": "hg-1",
+  "api": {"node": "hg-1", "port": 8080, "heapMb": 512, "envFile": "/etc/happygit/cloud.env"},
+  "nodes": [
+    {"name": "hg-1", "address": "10.0.0.11", "ssh": "hg-1", "yarnMemoryMb": 2048, "vcores": 2},
+    {"name": "hg-2", "address": "10.0.0.12", "ssh": "hg-2", "yarnMemoryMb": 2048, "vcores": 2}
+  ]
+}

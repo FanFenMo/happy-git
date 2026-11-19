@@ -1,0 +1,8 @@
+{
+  "dataset": {"path": "hdfs://happygit/path/to/dataset.json", "sha256": "replace-with-frozen-dataset-sha256"},
+  "model": {"artifactPath": "hdfs://happygit/path/to/artifact.json", "artifactDigest": "replace-with-model-artifact-sha256", "modelVersion": "replace-with-validated-model-version"},
+  "split": "test",
+  "mode": "both",
+  "userBlocks": 1,
+  "subjectIds": []
+}

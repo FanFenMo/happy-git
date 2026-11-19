@@ -10,6 +10,15 @@ import java.util.*;
 /** Worker and operator entry points; all long jobs retain the existing task lease. */
 final class LearningRunner {
     private LearningRunner() {}
+    static ObjectNode controlTask(TaskStore store,String namespace,String id,String action,int attempt,String reason) throws Exception {
+        ObjectNode task=store.controlLearning(namespace,id,action,attempt,reason);
+        if(task.path("type").asText().equals("learning-infer")) {
+            JsonNode request=task.path("input");
+            new CloudArchiveClient().control("queue",Json.object().put("inputId",request.path("input").path("inputId").asText()).put("modelVersion",request.path("model").path("modelVersion").asText())
+                    .put("taskId",task.path("id").asText()).put("state",action.equals("retry")?"scheduled":"cancelled").put("error",reason));
+        }
+        return task;
+    }
     static String submit(TaskStore store,ObjectNode request) throws Exception {
         Json.requireId(request.path("namespace").asText());
         if(!request.path("dataset").path("sha256").asText().matches("[a-f0-9]{64}"))throw new IllegalArgumentException("A frozen dataset descriptor is required");
@@ -24,7 +33,7 @@ final class LearningRunner {
         if(cloud!=null)cloud.control("check-scopes",Json.object().set("scopes",dataset.path("scopes")));
         ObjectNode result=new LearningPipeline(conf).train(request,destination,progress);
         if(cloud!=null)cloud.control("check-scopes",Json.object().set("scopes",dataset.path("scopes")));
-        if(register)cloud.control("models",result);return result;
+        RunGuard.check(conf);if(register)cloud.control("models",result);return result;
     }
     static ObjectNode infer(Configuration conf,ObjectNode task,String destination) throws Exception {
         ObjectNode request=(ObjectNode)task.path("input"),model=(ObjectNode)request.path("model"),input=(ObjectNode)request.path("input");
@@ -50,7 +59,7 @@ final class LearningRunner {
         payload.set("profile",profile[0]);ObjectNode plan=Portraits.searchPlan(profile[0]);
         for(String field:Arrays.asList("generationId","modelVersion","featureSpaceVersion","catalogSnapshotId","referenceTime"))plan.set(field,payload.path(field));payload.set("searchPlan",plan);
         ObjectNode saved=LearningFiles.write(conf,new Path(destination,"generation.json"),payload);
-        cloud.control("generations",payload);cloud.control("generations/"+generation+"/publish",Json.object());
+        RunGuard.check(conf);cloud.control("generations",payload);RunGuard.check(conf);cloud.control("generations/"+generation+"/publish",Json.object());
         saved.put("generationId",generation).put("state","published").put("subjectId",input.path("subjectId").asText());return saved;
     }
     static ObjectNode schedule(TaskStore store) throws Exception {

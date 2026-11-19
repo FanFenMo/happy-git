@@ -14,10 +14,11 @@ public final class LearningPipeline {
     public LearningPipeline(Configuration configuration){this.configuration=configuration;}
 
     public ObjectNode train(ObjectNode request,String destination,Progress progress) throws Exception {
+        long started=System.currentTimeMillis();
         ObjectNode dataset=LearningFiles.verified(configuration,(ObjectNode)request.path("dataset"));
         Path root=new Path(destination);FileSystem fs=root.getFileSystem(configuration);
         if(fs.exists(root))throw new IllegalArgumentException("Training attempt already exists");fs.mkdirs(root);
-        Configuration conf=new Configuration(configuration);conf.setLong("hg.referenceTime",dataset.path("referenceTime").asLong());
+        Configuration conf=new Configuration(configuration);RunJournal.use(conf,root);conf.setLong("hg.referenceTime",dataset.path("referenceTime").asLong());
         long seed=request.path("seed").asLong(20261103);int iterations=request.path("maxIterations").asInt(12);
         double tolerance=request.path("tolerance").asDouble(1e-5);
         if(iterations<1||iterations>50||tolerance<=0||tolerance>1)throw new IllegalArgumentException("Invalid iteration budget or tolerance");
@@ -92,25 +93,30 @@ public final class LearningPipeline {
         ObjectNode saved=LearningFiles.write(conf,new Path(root,"artifact.json"),best);
         ObjectNode descriptor=Json.object().put("namespace",best.path("namespace").asText()).put("modelVersion",version).put("artifactPath",saved.path("path").asText()).put("artifactDigest",saved.path("sha256").asText()).put("trainedAt",System.currentTimeMillis());
         for(String field:Arrays.asList("catalogMode","datasetKind","datasetVersion","inputDigest","catalogSnapshotId","featureSpaceVersion","codeDigest","projection","scopes","sourceCounts","validation"))descriptor.set(field,best.path(field));
-        LearningFiles.write(conf,new Path(root,"model-descriptor.json"),descriptor);progress.record("validated",descriptor);return descriptor;
+        LearningFiles.write(conf,new Path(root,"model-descriptor.json"),descriptor);
+        ObjectNode receipt=Json.object().put("state","validated").put("modelVersion",version).put("datasetVersion",best.path("datasetVersion").asText())
+                .put("referenceTime",dataset.path("referenceTime").asLong()).put("framework",conf.get("mapreduce.framework.name","local"))
+                .put("startedAt",started).put("completedAt",System.currentTimeMillis()).put("elapsedMs",System.currentTimeMillis()-started);
+        receipt.set("sourceCounts",dataset.path("counts"));receipt.set("model",descriptor);receipt.set("jobs",RunJournal.read(conf));
+        LearningFiles.write(conf,new Path(root,"training-run.json"),receipt);progress.record("validated",descriptor);return descriptor;
     }
     public ObjectNode infer(ObjectNode manifest,ObjectNode model,String destination) throws Exception {
         ObjectNode artifact=load(model);Path root=new Path(destination);FileSystem fs=root.getFileSystem(configuration);
         if(fs.exists(root))throw new IllegalArgumentException("Inference attempt already exists");fs.mkdirs(root);
         Path space=new Path(root,"space.json");LearningFiles.write(configuration,space,(ObjectNode)artifact.path("projection").path("dictionary"));
-        Configuration conf=new Configuration(configuration);applyBehavior(conf,artifact.path("config").path("behavior"));conf.setLong("hg.referenceTime",manifest.path("referenceTime").asLong());
+        Configuration conf=new Configuration(configuration);RunJournal.use(conf,root);applyBehavior(conf,artifact.path("config").path("behavior"));conf.setLong("hg.referenceTime",manifest.path("referenceTime").asLong());
         ObjectNode normalized=normalize(conf,manifest,new Path(root,"input"));ObjectNode baseline=runProfiles(conf,normalized,new Path(root,"baseline"),space);
         conf.set("hg.artifact",model.path("artifactPath").asText());ArrayNode jobs=Json.MAPPER.createArrayNode();
         Path learned=Pipeline.stage(conf,root,"L04-portraits",LearningJobs.InferMap.class,Jobs.IdentityReduce.class,Collections.singletonList(new Path(baseline.path("outputs").path("profiles").asText())),false,jobs);
         ObjectNode result=Json.object().put("modelVersion",artifact.path("modelVersion").asText()).put("baseline",baseline.path("outputs").path("profiles").asText()).put("profiles",learned.toString()).put("completedAt",System.currentTimeMillis());
-        result.set("jobs",jobs);LearningFiles.write(conf,new Path(root,"inference.json"),result);return result;
+        result.set("jobs",RunJournal.read(conf));LearningFiles.write(conf,new Path(root,"inference.json"),result);return result;
     }
     ObjectNode load(ObjectNode descriptor) throws Exception {
         ObjectNode artifact=LearningFiles.verified(configuration,Json.object().put("path",descriptor.path("artifactPath").asText()).put("sha256",descriptor.path("artifactDigest").asText()));
         if(!artifact.path("modelVersion").equals(descriptor.path("modelVersion"))||!Json.sha256(Json.bytes(artifact.path("projection"))).equals(artifact.path("featureSpaceVersion").asText()))throw new IllegalArgumentException("Model artifact version mismatch");
         if(!LearningFiles.describe(configuration,new Path(artifact.path("catalog").path("path").asText())).path("sha256").equals(artifact.path("catalog").path("sha256")))throw new IllegalArgumentException("Model catalog digest mismatch");return artifact;
     }
-    private ObjectNode normalize(Configuration conf,ObjectNode manifest,Path root) throws Exception {
+    ObjectNode normalize(Configuration conf,ObjectNode manifest,Path root) throws Exception {
         List<Path> inputs=new ArrayList<>();
         for(JsonNode descriptor:manifest.path("files")) {
             Path file=new Path(descriptor.path("path").asText());if(!LearningFiles.describe(conf,file).path("sha256").equals(descriptor.path("sha256")))throw new IllegalArgumentException("Frozen input digest mismatch");inputs.add(file);

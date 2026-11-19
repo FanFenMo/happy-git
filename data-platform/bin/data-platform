@@ -3,5 +3,7 @@ set -euo pipefail
 : "${HADOOP_HOME:?Set HADOOP_HOME}"
 : "${JAVA_HOME:?Set JAVA_HOME to JDK 11}"
 platform_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-platform_jar="${HG_PLATFORM_JAR:-$platform_dir/happygit-data-platform.jar}"
-exec "$HADOOP_HOME/bin/hadoop" jar "$platform_jar" com.happygit.data.Main "$@"
+default_jar="$platform_dir/happygit-data-platform.jar"
+if [[ -f "$platform_dir/current/artifacts/happygit-data-platform.jar" ]]; then default_jar="$platform_dir/current/artifacts/happygit-data-platform.jar"; fi
+platform_jar="${HG_PLATFORM_JAR:-$default_jar}"
+exec "$HADOOP_HOME/bin/hadoop" jar "$platform_jar" "$@"

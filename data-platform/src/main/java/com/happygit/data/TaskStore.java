@@ -45,6 +45,7 @@ public final class TaskStore implements AutoCloseable {
                 .put("target", target).put("state", "queued").put("attempt", 0)
                 .put("createdAt", System.currentTimeMillis()).put("retryAt", 0L);
         task.set("input", input);
+        if(type.startsWith("learning-")&&input.has("retryOfTask"))task.put("retryOfTask",input.path("retryOfTask").asText()).put("retryReason",input.path("retryReason").asText());
         try { zk.create(root + "/tasks/" + id, Json.bytes(task), acl, CreateMode.PERSISTENT); }
         catch (KeeperException.NodeExistsException exists) {
             ObjectNode old = get(id);
@@ -80,6 +81,11 @@ public final class TaskStore implements AutoCloseable {
         if(!planId.isEmpty()&&!plan(planId).path("state").asText().equals("active"))return null;
         if (Arrays.asList("succeeded", "failed", "cancelled").contains(task.path("state").asText()))
             return null;
+        if(task.path("cancelRequested").asBoolean()&&zk.exists(path+"/lease",false)==null) {
+            task.put("state","cancelled").put("finishedAt",System.currentTimeMillis());
+            try{zk.setData(path,Json.bytes(task),stat.getVersion());}catch(KeeperException.BadVersionException raced){/* the active owner decides disposition */}
+            return null;
+        }
         if (task.path("retryAt").asLong() > System.currentTimeMillis() || zk.exists(path + "/lease", false) != null) return null;
         String token = UUID.randomUUID().toString();
         task.put("owner", workerId).put("token", token).put("state", "running")
@@ -100,14 +106,42 @@ public final class TaskStore implements AutoCloseable {
             throw new IllegalStateException("Task ownership changed");
         return stat;
     }
+    public void checkClaim(ObjectNode claim) throws Exception {
+        if(expired)throw new IllegalStateException("Worker ZooKeeper session expired");
+        String path=root+"/tasks/"+claim.path("id").asText();owned(claim,path);
+        if(read(path).path("cancelRequested").asBoolean())throw new RunGuard.Cancelled();
+    }
+    public void finishCancellation(ObjectNode claim) throws Exception {
+        String path=root+"/tasks/"+claim.path("id").asText();Stat stat=owned(claim,path);ObjectNode current=read(path);
+        current.put("state","cancelled").put("finishedAt",System.currentTimeMillis());
+        zk.multi(Arrays.asList(Op.check(path,stat.getVersion()),Op.setData(path,Json.bytes(current),stat.getVersion()),Op.delete(path+"/lease",0)));
+    }
+    public ObjectNode controlLearning(String namespace,String id,String action,int attempt,String reason) throws Exception {
+        Json.requireId(namespace);String path=root+"/tasks/"+Json.requireId(id);Stat stat=new Stat();ObjectNode task=read(path,stat);
+        if(!task.path("namespace").asText().equals(namespace)||!Arrays.asList("learning-train","learning-infer").contains(task.path("type").asText()))throw new IllegalArgumentException("Select an exact learning task in its namespace");
+        if(task.path("attempt").asInt()!=attempt)throw new IllegalArgumentException("Task attempt changed; reload its current status");
+        if(reason==null||reason.isBlank()||reason.length()>512)throw new IllegalArgumentException("Provide a reason of 1..512 characters");
+        if(action.equals("cancel")) {
+            if(Arrays.asList("succeeded","failed","cancelled").contains(task.path("state").asText()))throw new IllegalArgumentException("Task is already terminal");
+            boolean running=zk.exists(path+"/lease",false)!=null;
+            task.put("cancelRequested",true).put("cancelReason",reason).put("cancelRequestedAt",System.currentTimeMillis()).put("state",running?"cancelling":"cancelled");
+            if(!running)task.put("finishedAt",System.currentTimeMillis());
+            zk.setData(path,Json.bytes(task),stat.getVersion());return task;
+        }
+        if(!action.equals("retry")||!Arrays.asList("failed","cancelled").contains(task.path("state").asText())||zk.exists(path+"/lease",false)!=null)throw new IllegalArgumentException("Retry requires a failed or cancelled task without a lease");
+        ObjectNode input=((ObjectNode)task.path("input")).deepCopy();input.put("retryOfTask",id).put("retryReason",reason);
+        return get(enqueue(task.path("type").asText(),namespace,task.path("target").asText(),input,"retry-"+UUID.randomUUID()));
+    }
     public void progress(ObjectNode claim,String phase,ObjectNode detail) throws Exception {
         String path=root+"/tasks/"+claim.path("id").asText();Stat stat=owned(claim,path);
-        ObjectNode update=claim.deepCopy().put("phase",phase).put("progressAt",System.currentTimeMillis());update.set("progress",detail);
+        ObjectNode update=read(path);if(update.path("cancelRequested").asBoolean())throw new RunGuard.Cancelled();
+        update.put("phase",phase).put("progressAt",System.currentTimeMillis());update.set("progress",detail);
         zk.setData(path,Json.bytes(update),stat.getVersion());claim.put("phase",phase).set("progress",detail);
     }
     public void finish(ObjectNode claim, ObjectNode result) throws Exception {
         String path = root + "/tasks/" + claim.path("id").asText();
         Stat stat = owned(claim, path);
+        if(read(path).path("cancelRequested").asBoolean())throw new RunGuard.Cancelled();
         ObjectNode completed = claim.deepCopy().put("state", "succeeded").put("finishedAt", System.currentTimeMillis());
         completed.set("result", result);
         List<Op> ops = new ArrayList<>();

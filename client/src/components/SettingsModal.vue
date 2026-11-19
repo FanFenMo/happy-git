@@ -233,7 +233,7 @@
           <div class="text-xs font-semibold text-[var(--color-text-muted)] mb-1">关于应用</div>
           <div class="flex items-center justify-between text-xs">
             <span class="text-[var(--color-text-subtle)]">应用版本</span>
-            <span class="text-[var(--color-text)] font-mono">v1.1.0 (双端云协同版)</span>
+            <span class="text-[var(--color-text)] font-mono">v1.2.0 (双端画像协同版)</span>
           </div>
           <div class="flex items-center justify-between text-xs">
             <span class="text-[var(--color-text-subtle)]">平台支持</span>
@@ -241,7 +241,7 @@
           </div>
           <div class="flex items-center justify-between text-xs">
             <span class="text-[var(--color-text-subtle)]">存储引擎</span>
-            <span class="text-[var(--color-text)]">本地 SQLite v3 + 云端事件队列</span>
+            <span class="text-[var(--color-text)]">本地 SQLite (Win v3 / Android v4) + 云端事件队列</span>
           </div>
         </div>
       </div>

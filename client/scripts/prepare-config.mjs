@@ -3,6 +3,7 @@
  * 客户端配置准备与可选授权服务核对 (依据 project.md 第十一节与第十二节)
  */
 
+import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -102,6 +103,56 @@ export function writeNativeConfigs(config = { apiBaseUrl: '' }, rootDir = client
 `)
 }
 
+export function resolveClientVersion(rootDir = clientDir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'))
+    return pkg.version || '1.2.0'
+  } catch {
+    return '1.2.0'
+  }
+}
+
+export function resolveGitCommit(rootDir = clientDir) {
+  try {
+    return execSync('git rev-parse HEAD', { cwd: rootDir, stdio: ['ignore', 'pipe', 'ignore'] }).toString('utf8').trim() || null
+  } catch {
+    return null
+  }
+}
+
+export function writeReleaseMetadata(config = { apiBaseUrl: '' }, rootDir = clientDir) {
+  const metadata = {
+    schemaVersion: '1.0.0',
+    appVersion: resolveClientVersion(rootDir),
+    gitCommit: resolveGitCommit(rootDir),
+    apiBaseUrl: config.apiBaseUrl || '',
+    apiContractVersion: 'v2',
+    sqliteSchemaVersion: { electron: 'v3-round2', android: 'v4' },
+    builtAt: new Date().toISOString()
+  }
+  const electronDir = path.join(rootDir, 'electron')
+  const androidAssetsDir = path.join(rootDir, 'android/app/src/main/assets/happygit')
+  fs.mkdirSync(electronDir, { recursive: true })
+  fs.mkdirSync(androidAssetsDir, { recursive: true })
+  const payload = JSON.stringify(metadata, null, 2) + '\n'
+  fs.writeFileSync(path.join(electronDir, 'release-metadata.json'), payload, 'utf8')
+  fs.writeFileSync(path.join(androidAssetsDir, 'release-metadata.json'), payload, 'utf8')
+  return metadata
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  writeNativeConfigs()
+  const args = process.argv.slice(2)
+  const modeIdx = args.indexOf('--mode')
+  const mode = (modeIdx >= 0 && args[modeIdx + 1]) ? args[modeIdx + 1] : 'production'
+  const isReleaseFlag = args.includes('--release') || process.env.HAPPYGIT_RELEASE === '1'
+  const requireCloud = args.includes('--require-cloud') || process.env.HAPPYGIT_REQUIRE_CLOUD === '1'
+  const rootArgIdx = args.indexOf('--root-dir')
+  const targetRoot = (rootArgIdx >= 0 && args[rootArgIdx + 1]) ? path.resolve(args[rootArgIdx + 1]) : clientDir
+
+  const preliminary = readPublicConfig({ rootDir: targetRoot, env: process.env, mode, release: false })
+  const enforceRelease = requireCloud || (isReleaseFlag && Boolean(preliminary.apiBaseUrl))
+  const finalConfig = readPublicConfig({ rootDir: targetRoot, env: process.env, mode, release: enforceRelease })
+
+  writeNativeConfigs(finalConfig, targetRoot)
+  writeReleaseMetadata(finalConfig, targetRoot)
 }

@@ -43,6 +43,15 @@ public class CloudService {
                 return unquoted.replaceAll("/+$", "");
             }
         }
+        try {
+            int resId = context.getResources().getIdentifier("happygit_api_base_url", "string", context.getPackageName());
+            if (resId != 0) {
+                String bundled = context.getString(resId);
+                if (bundled != null && !bundled.trim().isEmpty()) {
+                    return bundled.trim().replaceAll("/+$", "");
+                }
+            }
+        } catch (Exception ignored) {}
         return "http://10.0.2.2:8080";
     }
 

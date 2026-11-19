@@ -1,0 +1,22 @@
+{
+  "executedAt": "2026-11-19T06:08:31Z",
+  "gitCommit": "792a0bc290df9e47f96bf71c93f5c9bc1321212c",
+  "datasetVersion": "hg-standard-synthetic_fixture-20261103",
+  "catalogMode": "synthetic_fixture",
+  "behaviorSourceMode": "deterministic_rules",
+  "datasetDir": "<generated via build_dataset.py --scale standard --catalog-mode synthetic_fixture --seed 20261103>",
+  "split": "test",
+  "subjectCount": 100,
+  "evidenceFileSha256": "268cc20fed3cf6a8bb925d4ee8380235fd3152e43740a93753bb6470089315b3",
+  "promptsFileSha256": "af282e93e6fde9fb1b019403c2b1208f56b9e1710352fb1f690205682806a5c8",
+  "aliasesTaxonomyVersion": "hg-taxonomy-2026-11-v1",
+  "referenceTime": 1794096000000,
+  "repeatSubset": {
+    "seed": 20261103,
+    "subsetSize": 20,
+    "totalCallsPlannedPerSubject": 3,
+    "file": "repeat-subset-ids.json"
+  },
+  "serverExport": null,
+  "blindReview": null
+}

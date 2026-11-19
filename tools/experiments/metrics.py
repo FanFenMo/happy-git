@@ -140,7 +140,7 @@ def extract_evidence_repo_ids(prediction: Dict[str, Any]) -> List[str]:
             seen.add(s)
             result.append(s)
 
-    for repo in prediction.get("evidenceRepos") or []:
+    for repo in prediction.get("evidenceRepos") or prediction.get("usedRepoIds") or []:
         _add(repo)
     for item in prediction.get("topInterests") or []:
         if isinstance(item, dict):
@@ -318,10 +318,27 @@ def evaluate_subject_prediction(
         ev_set = set(pred_ev_ids)
         required_ev_recall = sum(1 for r in required_ev if r in ev_set) / len(required_ev)
 
-    lang_cos = cosine_similarity_dist(pred_langs, emp_lang) if emp_lang else (1.0 if not pred_langs else 0.0)
-    lang_jsd = js_divergence(pred_langs, emp_lang)
-    topic_cos = cosine_similarity_dist(pred_topics, emp_topic) if emp_topic else (1.0 if not pred_topics else 0.0)
-    topic_jsd = js_divergence(pred_topics, emp_topic)
+    lang_evidence_empty = len(emp_lang) == 0
+    topic_evidence_empty = len(emp_topic) == 0
+
+    # Empty distributions are scored separately without padding into uniform vectors.
+    if lang_evidence_empty:
+        lang_cos: Optional[float] = None
+        lang_js_sim: Optional[float] = None
+        empty_lang_exact: Optional[bool] = len(pred_langs) == 0
+    else:
+        lang_cos = cosine_similarity_dist(pred_langs, emp_lang)
+        lang_js_sim = 1.0 - js_divergence(pred_langs, emp_lang)
+        empty_lang_exact = None
+
+    if topic_evidence_empty:
+        topic_cos: Optional[float] = None
+        topic_js_sim: Optional[float] = None
+        empty_topic_exact: Optional[bool] = len(pred_topics) == 0
+    else:
+        topic_cos = cosine_similarity_dist(pred_topics, emp_topic)
+        topic_js_sim = 1.0 - js_divergence(pred_topics, emp_topic)
+        empty_topic_exact = None
 
     scenario = (
         (control_case or {}).get("scenario")
@@ -339,6 +356,8 @@ def evaluate_subject_prediction(
     return {
         "subjectId": str(evidence_view_row["subjectId"]),
         "split": evidence_view_row.get("split", "test"),
+        "failed": False,
+        "error": None,
         "scenario": scenario,
         "sourceKind": source_kind,
         "sparsity": sparsity,
@@ -348,18 +367,74 @@ def evaluate_subject_prediction(
         "isEmptyPrediction": is_empty_prediction,
         "expectedEmpty": expected_empty,
         "emptyHandlingCorrect": empty_handling_correct,
+        "langEvidenceEmpty": lang_evidence_empty,
+        "topicEvidenceEmpty": topic_evidence_empty,
+        "emptyLangExact": empty_lang_exact,
+        "emptyTopicExact": empty_topic_exact,
         "precisionAtK": precision_at_k,
         "recallAtK": recall_at_k,
         "f1AtK": f1_at_k,
         "jaccard": jaccard,
         "ndcgAtK": ndcg_at_k,
         "langCosine": lang_cos,
-        "langJsSimilarity": 1.0 - lang_jsd,
+        "langJsSimilarity": lang_js_sim,
         "topicCosine": topic_cos,
-        "topicJsSimilarity": 1.0 - topic_jsd,
+        "topicJsSimilarity": topic_js_sim,
         "evidenceValidRate": evidence_valid_rate,
         "hallucinatedEvidenceCount": hallucinated_evidence_count,
         "requiredEvidenceRecall": required_ev_recall,
+    }
+
+
+def make_failed_subject_evaluation(
+    evidence_view_row: Dict[str, Any],
+    truth_row: Optional[Dict[str, Any]] = None,
+    control_case: Optional[Dict[str, Any]] = None,
+    subject_row: Optional[Dict[str, Any]] = None,
+    error_message: str = "prediction_missing_or_failed",
+) -> Dict[str, Any]:
+    scenario = (
+        (control_case or {}).get("scenario")
+        or (truth_row or {}).get("scenario")
+        or (evidence_view_row.get("scenario"))
+        or "unknown"
+    )
+    source_kind = (
+        (subject_row or {}).get("sourceKind")
+        or (truth_row or {}).get("subjectSourceKind")
+        or (evidence_view_row.get("subjectSourceKind"))
+        or ("ambiguous" if "ambiguous" in scenario else "synthetic")
+    )
+    return {
+        "subjectId": str(evidence_view_row["subjectId"]),
+        "split": evidence_view_row.get("split", "test"),
+        "failed": True,
+        "error": str(error_message),
+        "scenario": scenario,
+        "sourceKind": source_kind,
+        "sparsity": classify_sparsity(evidence_view_row),
+        "allowedRepoCount": len(compute_allowed_evidence_repo_ids(evidence_view_row)),
+        "predictedTagCount": 0,
+        "predictedTags": [],
+        "isEmptyPrediction": False,
+        "expectedEmpty": False,
+        "emptyHandlingCorrect": None,
+        "langEvidenceEmpty": False,
+        "topicEvidenceEmpty": False,
+        "emptyLangExact": None,
+        "emptyTopicExact": None,
+        "precisionAtK": None,
+        "recallAtK": None,
+        "f1AtK": None,
+        "jaccard": None,
+        "ndcgAtK": None,
+        "langCosine": None,
+        "langJsSimilarity": None,
+        "topicCosine": None,
+        "topicJsSimilarity": None,
+        "evidenceValidRate": None,
+        "hallucinatedEvidenceCount": 0,
+        "requiredEvidenceRecall": None,
     }
 
 
@@ -372,29 +447,39 @@ def _avg(values: Iterable[Optional[float]]) -> Optional[float]:
 
 def aggregate_metrics(per_subject: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not per_subject:
-        return {"count": 0}
-
-    empty_cases = [r for r in per_subject if r.get("emptyHandlingCorrect") is not None]
-    total_hallucinations = sum(int(r.get("hallucinatedEvidenceCount") or 0) for r in per_subject)
+        return {"overall": {"count": 0, "succeededCount": 0, "failedCount": 0}, "byScenario": {}, "bySourceKind": {}, "bySparsity": {}}
 
     def _summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-        e_rows = [r for r in rows if r.get("emptyHandlingCorrect") is not None]
+        failed_rows = [r for r in rows if r.get("failed")]
+        ok_rows = [r for r in rows if not r.get("failed")]
+        e_rows = [r for r in ok_rows if r.get("emptyHandlingCorrect") is not None]
+        non_empty_lang = [r for r in ok_rows if r.get("langCosine") is not None]
+        non_empty_topic = [r for r in ok_rows if r.get("topicCosine") is not None]
+        empty_lang_rows = [r for r in ok_rows if r.get("emptyLangExact") is not None]
+        empty_topic_rows = [r for r in ok_rows if r.get("emptyTopicExact") is not None]
         return {
             "count": len(rows),
-            "precisionAt8": _avg(r.get("precisionAtK") for r in rows),
-            "recallAt8": _avg(r.get("recallAtK") for r in rows),
-            "f1At8": _avg(r.get("f1AtK") for r in rows),
-            "jaccard": _avg(r.get("jaccard") for r in rows),
-            "ndcgAt8": _avg(r.get("ndcgAtK") for r in rows),
-            "langCosine": _avg(r.get("langCosine") for r in rows),
-            "langJsSimilarity": _avg(r.get("langJsSimilarity") for r in rows),
-            "topicCosine": _avg(r.get("topicCosine") for r in rows),
-            "topicJsSimilarity": _avg(r.get("topicJsSimilarity") for r in rows),
-            "evidenceValidRate": _avg(r.get("evidenceValidRate") for r in rows),
-            "hallucinatedEvidenceTotal": sum(int(r.get("hallucinatedEvidenceCount") or 0) for r in rows),
+            "succeededCount": len(ok_rows),
+            "failedCount": len(failed_rows),
+            "precisionAt8": _avg(r.get("precisionAtK") for r in ok_rows),
+            "recallAt8": _avg(r.get("recallAtK") for r in ok_rows),
+            "f1At8": _avg(r.get("f1AtK") for r in ok_rows),
+            "jaccard": _avg(r.get("jaccard") for r in ok_rows),
+            "ndcgAt8": _avg(r.get("ndcgAtK") for r in ok_rows),
+            "nonEmptyLangCount": len(non_empty_lang),
+            "langCosine": _avg(r.get("langCosine") for r in non_empty_lang),
+            "langJsSimilarity": _avg(r.get("langJsSimilarity") for r in non_empty_lang),
+            "nonEmptyTopicCount": len(non_empty_topic),
+            "topicCosine": _avg(r.get("topicCosine") for r in non_empty_topic),
+            "topicJsSimilarity": _avg(r.get("topicJsSimilarity") for r in non_empty_topic),
+            "emptyDistributionCount": len({r["subjectId"] for r in empty_lang_rows} | {r["subjectId"] for r in empty_topic_rows}),
+            "emptyLangExactRate": _avg((1.0 if r["emptyLangExact"] else 0.0) for r in empty_lang_rows),
+            "emptyTopicExactRate": _avg((1.0 if r["emptyTopicExact"] else 0.0) for r in empty_topic_rows),
+            "evidenceValidRate": _avg(r.get("evidenceValidRate") for r in ok_rows),
+            "hallucinatedEvidenceTotal": sum(int(r.get("hallucinatedEvidenceCount") or 0) for r in ok_rows),
             "emptyCaseCount": len(e_rows),
             "emptyHandlingAccuracy": _avg((1.0 if r["emptyHandlingCorrect"] else 0.0) for r in e_rows),
-            "requiredEvidenceRecall": _avg(r.get("requiredEvidenceRecall") for r in rows),
+            "requiredEvidenceRecall": _avg(r.get("requiredEvidenceRecall") for r in ok_rows),
         }
 
     by_scenario: Dict[str, List[Dict[str, Any]]] = {}
@@ -406,13 +491,146 @@ def aggregate_metrics(per_subject: List[Dict[str, Any]]) -> Dict[str, Any]:
         by_sparsity.setdefault(str(row["sparsity"]), []).append(row)
 
     summary = _summarize(per_subject)
-    summary["emptyCaseCount"] = len(empty_cases)
-    summary["hallucinatedEvidenceTotal"] = total_hallucinations
     return {
         "overall": summary,
         "byScenario": {k: _summarize(v) for k, v in sorted(by_scenario.items())},
         "bySourceKind": {k: _summarize(v) for k, v in sorted(by_source.items())},
         "bySparsity": {k: _summarize(v) for k, v in sorted(by_sparsity.items())},
+    }
+
+
+def compute_method_comparison_deltas(
+    eval_base: List[Dict[str, Any]],
+    eval_candidate: List[Dict[str, Any]],
+    epsilon: float = 0.01,
+) -> Dict[str, Any]:
+    """Compare candidate vs base per subject: improved, regressed, or tied/uncertain."""
+    base_map = {str(r["subjectId"]): r for r in eval_base if not r.get("failed")}
+    cand_map = {str(r["subjectId"]): r for r in eval_candidate if not r.get("failed")}
+    common_ids = sorted(set(base_map) & set(cand_map))
+    if not common_ids:
+        return {
+            "commonSubjects": 0,
+            "improvedCount": 0,
+            "regressedCount": 0,
+            "uncertainOrTiedCount": 0,
+            "meanF1Delta": None,
+            "meanJaccardDelta": None,
+            "meanTopicCosineDelta": None,
+            "byScenario": {},
+        }
+
+    improved = 0
+    regressed = 0
+    uncertain = 0
+    f1_deltas: List[float] = []
+    jac_deltas: List[float] = []
+    topic_deltas: List[float] = []
+    by_scenario: Dict[str, Dict[str, int]] = {}
+
+    for sid in common_ids:
+        b = base_map[sid]
+        c = cand_map[sid]
+        scen = str(c.get("scenario") or b.get("scenario") or "unknown")
+        bucket = by_scenario.setdefault(scen, {"improved": 0, "regressed": 0, "uncertainOrTied": 0})
+        bf1 = b.get("f1AtK")
+        cf1 = c.get("f1AtK")
+        bjac = b.get("jaccard")
+        cjac = c.get("jaccard")
+        btop = b.get("topicCosine")
+        ctop = c.get("topicCosine")
+
+        if isinstance(bf1, (int, float)) and isinstance(cf1, (int, float)):
+            df1 = float(cf1) - float(bf1)
+            f1_deltas.append(df1)
+            if df1 > epsilon:
+                improved += 1
+                bucket["improved"] += 1
+            elif df1 < -epsilon:
+                regressed += 1
+                bucket["regressed"] += 1
+            else:
+                uncertain += 1
+                bucket["uncertainOrTied"] += 1
+        else:
+            uncertain += 1
+            bucket["uncertainOrTied"] += 1
+
+        if isinstance(bjac, (int, float)) and isinstance(cjac, (int, float)):
+            jac_deltas.append(float(cjac) - float(bjac))
+        if isinstance(btop, (int, float)) and isinstance(ctop, (int, float)):
+            topic_deltas.append(float(ctop) - float(btop))
+
+    return {
+        "commonSubjects": len(common_ids),
+        "epsilon": epsilon,
+        "improvedCount": improved,
+        "regressedCount": regressed,
+        "uncertainOrTiedCount": uncertain,
+        "meanF1Delta": _avg(f1_deltas),
+        "meanJaccardDelta": _avg(jac_deltas),
+        "meanTopicCosineDelta": _avg(topic_deltas),
+        "byScenario": dict(sorted(by_scenario.items())),
+    }
+
+
+BLIND_AUDIT_CATEGORIES = (
+    "grounded",
+    "over_inferred",
+    "nonexistent_citation",
+    "insufficient_evidence",
+)
+
+
+def summarize_blind_audit(
+    audit_rows: List[Dict[str, Any]],
+    key_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Unblind 4-category human evidence audit rows using blind-review-key.json."""
+    mapping_by_subject = key_data.get("mappingBySubject") or {}
+    per_method: Dict[str, Dict[str, int]] = {}
+    unmatched = 0
+    invalid_category = 0
+    annotated = 0
+
+    for row in audit_rows:
+        sid = str(row.get("subjectId") or "")
+        blind_label = str(row.get("blindLabel") or "")
+        category = str(row.get("category") or "").strip().lower()
+        if not category:
+            continue
+        if category not in BLIND_AUDIT_CATEGORIES:
+            invalid_category += 1
+            continue
+        real_method = (mapping_by_subject.get(sid) or {}).get(blind_label)
+        if not real_method:
+            unmatched += 1
+            continue
+        annotated += 1
+        counts = per_method.setdefault(
+            real_method,
+            {cat: 0 for cat in BLIND_AUDIT_CATEGORIES},
+        )
+        counts[category] += 1
+
+    methods_out: Dict[str, Any] = {}
+    for method, counts in sorted(per_method.items()):
+        total = sum(counts.values())
+        methods_out[method] = {
+            "total": total,
+            "counts": counts,
+            "rates": {
+                cat: round(counts[cat] / total, 4) if total > 0 else None
+                for cat in BLIND_AUDIT_CATEGORIES
+            },
+        }
+
+    return {
+        "categories": list(BLIND_AUDIT_CATEGORIES),
+        "annotatedEntries": annotated,
+        "unmatchedEntries": unmatched,
+        "invalidCategoryEntries": invalid_category,
+        "byMethod": methods_out,
     }
 
 

@@ -7,8 +7,10 @@ const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 
-// 1. 设置稳定的正式数据目录
-const userDataPath = path.join(app.getPath('appData'), 'HappyGit')
+// 1. 设置稳定的正式数据目录（支持测试/隔离环境显式指定 HAPPYGIT_USER_DATA_DIR）
+const userDataPath = process.env.HAPPYGIT_USER_DATA_DIR
+  ? path.resolve(process.env.HAPPYGIT_USER_DATA_DIR)
+  : path.join(app.getPath('appData'), 'HappyGit')
 app.setPath('userData', userDataPath)
 
 const { startDatabaseWorker, callDatabase, closeDatabaseWorker } = require('./database.cjs')

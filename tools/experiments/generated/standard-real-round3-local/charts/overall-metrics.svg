@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="420" viewBox="0 0 860 420">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; fill: #0f172a; }.title { font-size: 16px; font-weight: 700; }.sub { font-size: 11px; fill: #475569; }.axis { font-size: 11px; fill: #334155; }.val { font-size: 10px; fill: #1e293b; font-weight: 600; }.legend { font-size: 11px; fill: #1e293b; }</style>
+<text x="68" y="28" class="title">HappyGit Portrait Evaluation - Overall Metrics</text>
+<text x="68" y="46" class="sub">dataset=hg-standard-real-20261103 | split=test | n=100</text>
+<rect x="68" y="58" width="12" height="12" rx="2" fill="#2563eb"/>
+<text x="85" y="68" class="legend">baseline_local_v1 (baseline-local-v1)</text>
+<rect x="402" y="58" width="12" height="12" rx="2" fill="#16a34a"/>
+<text x="419" y="68" class="legend">baseline_mr_fixed_v1 (rules-mr-30d-3-1.5-v1)</text>
+<rect x="792" y="58" width="12" height="12" rx="2" fill="#ea580c"/>
+<text x="809" y="68" class="legend">learned_model (portrait-171b14f41dd3b349e93fbcad)</text>
+<line x1="68" y1="334.0" x2="832" y2="334.0" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="338.0" text-anchor="end" class="axis">0.0</text>
+<line x1="68" y1="284.4" x2="832" y2="284.4" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="288.4" text-anchor="end" class="axis">0.2</text>
+<line x1="68" y1="234.8" x2="832" y2="234.8" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="238.8" text-anchor="end" class="axis">0.4</text>
+<line x1="68" y1="185.2" x2="832" y2="185.2" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="189.2" text-anchor="end" class="axis">0.6</text>
+<line x1="68" y1="135.6" x2="832" y2="135.6" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="139.6" text-anchor="end" class="axis">0.8</text>
+<line x1="68" y1="86.0" x2="832" y2="86.0" stroke="#e2e8f0" stroke-width="1"/>
+<text x="60" y="90.0" text-anchor="end" class="axis">1.0</text>
+<line x1="68" y1="334" x2="832" y2="334" stroke="#64748b" stroke-width="1.2"/>
+<text x="122.6" y="352.0" text-anchor="middle" class="axis">F1@8</text>
+<rect x="84.3" y="258.4" width="24.2" height="75.6" rx="2" fill="#2563eb"/>
+<text x="96.4" y="254.4" text-anchor="middle" class="val">0.30</text>
+<rect x="110.5" y="258.1" width="24.2" height="75.9" rx="2" fill="#16a34a"/>
+<text x="122.6" y="254.1" text-anchor="middle" class="val">0.31</text>
+<rect x="136.7" y="258.1" width="24.2" height="75.9" rx="2" fill="#ea580c"/>
+<text x="148.8" y="254.1" text-anchor="middle" class="val">0.31</text>
+<text x="231.7" y="352.0" text-anchor="middle" class="axis">Jaccard@8</text>
+<rect x="193.4" y="283.7" width="24.2" height="50.3" rx="2" fill="#2563eb"/>
+<text x="205.5" y="279.7" text-anchor="middle" class="val">0.20</text>
+<rect x="219.6" y="283.4" width="24.2" height="50.6" rx="2" fill="#16a34a"/>
+<text x="231.7" y="279.4" text-anchor="middle" class="val">0.20</text>
+<rect x="245.8" y="283.4" width="24.2" height="50.6" rx="2" fill="#ea580c"/>
+<text x="257.9" y="279.4" text-anchor="middle" class="val">0.20</text>
+<text x="340.9" y="352.0" text-anchor="middle" class="axis">nDCG@8</text>
+<rect x="302.6" y="224.1" width="24.2" height="109.9" rx="2" fill="#2563eb"/>
+<text x="314.7" y="220.1" text-anchor="middle" class="val">0.44</text>
+<rect x="328.8" y="224.6" width="24.2" height="109.4" rx="2" fill="#16a34a"/>
+<text x="340.9" y="220.6" text-anchor="middle" class="val">0.44</text>
+<rect x="355.0" y="224.6" width="24.2" height="109.4" rx="2" fill="#ea580c"/>
+<text x="367.1" y="220.6" text-anchor="middle" class="val">0.44</text>
+<text x="450.0" y="352.0" text-anchor="middle" class="axis">Lang Cos</text>
+<rect x="411.7" y="88.3" width="24.2" height="245.7" rx="2" fill="#2563eb"/>
+<text x="423.8" y="96.0" text-anchor="middle" class="val">0.99</text>
+<rect x="437.9" y="88.3" width="24.2" height="245.7" rx="2" fill="#16a34a"/>
+<text x="450.0" y="96.0" text-anchor="middle" class="val">0.99</text>
+<rect x="464.1" y="88.3" width="24.2" height="245.7" rx="2" fill="#ea580c"/>
+<text x="476.2" y="96.0" text-anchor="middle" class="val">0.99</text>
+<text x="559.1" y="352.0" text-anchor="middle" class="axis">Topic Cos</text>
+<rect x="520.9" y="92.5" width="24.2" height="241.5" rx="2" fill="#2563eb"/>
+<text x="532.9" y="96.0" text-anchor="middle" class="val">0.97</text>
+<rect x="547.0" y="110.5" width="24.2" height="223.5" rx="2" fill="#16a34a"/>
+<text x="559.1" y="106.5" text-anchor="middle" class="val">0.90</text>
+<rect x="573.2" y="110.5" width="24.2" height="223.5" rx="2" fill="#ea580c"/>
+<text x="585.3" y="106.5" text-anchor="middle" class="val">0.90</text>
+<text x="668.3" y="352.0" text-anchor="middle" class="axis">Evidence</text>
+<rect x="630.0" y="86.0" width="24.2" height="248.0" rx="2" fill="#2563eb"/>
+<text x="642.1" y="96.0" text-anchor="middle" class="val">1.00</text>
+<rect x="656.2" y="86.0" width="24.2" height="248.0" rx="2" fill="#16a34a"/>
+<text x="668.3" y="96.0" text-anchor="middle" class="val">1.00</text>
+<rect x="682.4" y="86.0" width="24.2" height="248.0" rx="2" fill="#ea580c"/>
+<text x="694.5" y="96.0" text-anchor="middle" class="val">1.00</text>
+<text x="777.4" y="352.0" text-anchor="middle" class="axis">Empty Acc</text>
+<rect x="739.1" y="86.0" width="24.2" height="248.0" rx="2" fill="#2563eb"/>
+<text x="751.2" y="96.0" text-anchor="middle" class="val">1.00</text>
+<rect x="765.3" y="86.0" width="24.2" height="248.0" rx="2" fill="#16a34a"/>
+<text x="777.4" y="96.0" text-anchor="middle" class="val">1.00</text>
+<rect x="791.5" y="86.0" width="24.2" height="248.0" rx="2" fill="#ea580c"/>
+<text x="803.6" y="96.0" text-anchor="middle" class="val">1.00</text>
+</svg>

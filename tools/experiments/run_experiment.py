@@ -86,16 +86,22 @@ def file_sha256(path: Path) -> str:
 
 
 def current_git_commit() -> Optional[str]:
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(REPO_ROOT),
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        return out or None
-    except Exception:
-        return None
+    for cmd in (
+        ["git", "rev-parse", "HEAD"],
+        ["git", "-c", "safe.directory=*", "rev-parse", "HEAD"],
+    ):
+        try:
+            out = subprocess.check_output(
+                cmd,
+                cwd=str(REPO_ROOT),
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            if out:
+                return out
+        except Exception:
+            continue
+    return None
 
 
 def run_rule_baseline_for_subject(
@@ -731,27 +737,29 @@ def render_markdown_report(report: Dict[str, Any]) -> str:
             )
         lines.append("")
 
-    for name, block in report["methods"].items():
-        if block.get("status") != "completed":
-            continue
-        lines.append(f"## 7. `{name}` 分场景、来源与稀疏度统计")
+    completed_methods = [(name, block) for name, block in report["methods"].items() if block.get("status") == "completed"]
+    if completed_methods:
+        lines.append("## 7. 各方法分场景、来源与稀疏度统计")
         lines.append("")
-        for section_title, key_name in [
-            ("按行为场景 (`byScenario`)", "byScenario"),
-            ("按数据源类别 (`bySourceKind`)", "bySourceKind"),
-            ("按稀疏程度 (`bySparsity`)", "bySparsity"),
-        ]:
-            lines.append(f"### {section_title}")
+        for idx, (name, block) in enumerate(completed_methods, start=1):
+            lines.append(f"### 7.{idx} `{name}`")
             lines.append("")
-            lines.append("| 分组 | 样本数 | 失败数 | F1@8 | 主题余弦(非空) | 证据有效率 | 空画像准确率 |")
-            lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-            for grp, sv in block["metrics"][key_name].items():
-                lines.append(
-                    f"| `{grp}` | {sv['count']} | {sv.get('failedCount', 0)} | {_fmt_opt(sv.get('f1At8'))} | "
-                    f"{_fmt_opt(sv.get('topicCosine'))} | {_fmt_opt(sv.get('evidenceValidRate'))} | "
-                    f"{_fmt_opt(sv.get('emptyHandlingAccuracy'))} |"
-                )
-            lines.append("")
+            for section_title, key_name in [
+                ("按行为场景 (`byScenario`)", "byScenario"),
+                ("按数据源类别 (`bySourceKind`)", "bySourceKind"),
+                ("按稀疏程度 (`bySparsity`)", "bySparsity"),
+            ]:
+                lines.append(f"#### {section_title}")
+                lines.append("")
+                lines.append("| 分组 | 样本数 | 失败数 | F1@8 | 主题余弦(非空) | 证据有效率 | 空画像准确率 |")
+                lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+                for grp, sv in block["metrics"][key_name].items():
+                    lines.append(
+                        f"| `{grp}` | {sv['count']} | {sv.get('failedCount', 0)} | {_fmt_opt(sv.get('f1At8'))} | "
+                        f"{_fmt_opt(sv.get('topicCosine'))} | {_fmt_opt(sv.get('evidenceValidRate'))} | "
+                        f"{_fmt_opt(sv.get('emptyHandlingAccuracy'))} |"
+                    )
+                lines.append("")
 
     return "\n".join(lines)
 

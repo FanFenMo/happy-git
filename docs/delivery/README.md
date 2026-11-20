@@ -10,6 +10,7 @@ A、B 的第三轮交付已合入 `develop`。首版构建、数据冻结、自�
 
 ### 1. 项目方案、架构设计与契约
 - [项目根目录总览 (README)](../../README.md)
+- 三轮实施方案与分工契约：[项目实施方案](../implementation/项目方案.md) / [接口与模型契约](../implementation/接口与模型契约.md) / [功能模块任务表](../implementation/功能模块任务表.md) / [三轮协作与验收](../implementation/三轮协作与验收.md)
 - [第一版函数级设计文档总览](../design/v1/README.md)
   - [服务端详细设计](../design/v1/服务端详细设计.md)
   - [Hadoop 计算实现详解](../design/v1/Hadoop计算实现详解.md)
@@ -20,7 +21,7 @@ A、B 的第三轮交付已合入 `develop`。首版构建、数据冻结、自�
 - 历史基线快照（保留原日期与核对记录）：[2026-11-03 完成情况清单](../roadmap/2026-11-03-完成情况清单.md)、[下一代应用迭代方案](../roadmap/2026-11-03-下一代应用迭代方案.md)
 
 ### 2. 数据规范与数据集工具链
-- [实验数据集规范 (`数据集生成要求.md`)](../../数据集生成要求.md)
+- [实验数据集规范 (`数据集生成要求.md`)](../../数据集生成要求.md) / [服务端数据接入规范 (`数据集生成要求-服务端版.md`)](../../数据集生成要求-服务端版.md)
 - [数据集工具链使用说明 (`tools/datasets/README.md`)](../../tools/datasets/README.md)
 - 真实公开目录缺口诊断样例：[pilot-real-gap/real-catalog-gap-report.json](../../tools/datasets/generated/pilot-real-gap/real-catalog-gap-report.json)
 - `pilot` 格式与流水线验证包（显式 `synthetic_fixture`）：[pilot-synthetic-fixture/dataset-manifest.json](../../tools/datasets/generated/pilot-synthetic-fixture/dataset-manifest.json)
@@ -28,9 +29,9 @@ A、B 的第三轮交付已合入 `develop`。首版构建、数据冻结、自�
 ### 3. 独立画像对比实验与报告
 - [第三轮画像对比实验报告](../experiments/第三轮画像对比实验报告.md)
 - [独立实验运行器使用说明 (`tools/experiments/README.md`)](../../tools/experiments/README.md)
-- 预览产物与 SVG 图表：
-  - `pilot`（5 test 用户）：[pilot-round3-preview/report.md](../../tools/experiments/generated/pilot-round3-preview/report.md)
-  - `standard`（100 test 用户 + 20 固定重复子集 + SVG 图表）：[standard-round3-baseline-preview/report.md](../../tools/experiments/generated/standard-round3-baseline-preview/report.md)
+- 实测与预览产物及 SVG 图表：
+  - **真实公开目录 `standard-real` 三方实测**（10,000 真实仓库、100 test 用户）：[standard-real-round3-local/report.md](../../tools/experiments/generated/standard-real-round3-local/report.md)
+  - 历史合成夹具预览：`pilot`（5 test 用户）[pilot-round3-preview/report.md](../../tools/experiments/generated/pilot-round3-preview/report.md) / `standard`（100 test 用户）[standard-round3-baseline-preview/report.md](../../tools/experiments/generated/standard-round3-baseline-preview/report.md)
 
 ### 4. 服务端、数据平台与集群部署（成员甲维护入口）
 - [数据平台运行说明 (`data-platform/README.md`)](../../data-platform/README.md)

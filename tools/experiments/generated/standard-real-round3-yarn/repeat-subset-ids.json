@@ -1,0 +1,28 @@
+{
+  "seed": 20261103,
+  "requestedSubsetSize": 20,
+  "actualSubsetSize": 20,
+  "totalCallsPlannedPerSubject": 3,
+  "subjectIds": [
+    "subj_standard_0164",
+    "subj_standard_0173",
+    "subj_standard_0345",
+    "subj_standard_0352",
+    "subj_standard_0479",
+    "subj_standard_0480",
+    "subj_standard_0574",
+    "subj_standard_0677",
+    "subj_standard_0679",
+    "subj_standard_0747",
+    "subj_standard_0749",
+    "subj_standard_0779",
+    "subj_standard_0780",
+    "subj_standard_0838",
+    "subj_standard_0840",
+    "subj_standard_0897",
+    "subj_standard_0898",
+    "subj_standard_0939",
+    "subj_standard_0940",
+    "subj_standard_0995"
+  ]
+}

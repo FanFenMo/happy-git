@@ -1,0 +1,38 @@
+{
+  "executedAt": "2026-11-20T14:58:43Z",
+  "gitCommit": "e8e6709d060c57d0074ddf1f52583747c9338c08",
+  "datasetVersion": "hg-standard-real-20261103",
+  "catalogMode": "real",
+  "behaviorSourceMode": "deterministic_rules",
+  "datasetDir": "E:\\happy git\\output\\first-release-20261119\\standard-real-frozen",
+  "split": "test",
+  "subjectCount": 100,
+  "evidenceFileSha256": "5bb5e99918eb10b90a179ca715728cc72a0bf4811543242975bc31f8946ea634",
+  "promptsFileSha256": "e00d4b0e1a5f2cb4d9ebbe27db19e3e4a03debf82bb8ba2e16703b230351ce94",
+  "aliasesTaxonomyVersion": "hg-taxonomy-2026-11-v1",
+  "referenceTime": 1795017600000,
+  "repeatSubset": {
+    "seed": 20261103,
+    "subsetSize": 20,
+    "totalCallsPlannedPerSubject": 3,
+    "file": "repeat-subset-ids.json"
+  },
+  "serverExport": {
+    "exportDir": "E:\\happy git\\output\\two-host-20261120-212158\\server-export-fixed",
+    "protocolDigest": "8cc8589fb19d6a1b6e1adc6cef27d1c82ac2757cb7318ee4267266ab77be1270",
+    "datasetVersion": "dataset-39327654de15d6c24438ecd8",
+    "catalogSnapshotId": "5d4c7257cb26f81e76e8a096fb182fc797dbf2c2391acf3bb617f9a281f497f1",
+    "featureSpaceVersion": "fb6cd68c9ff3229f29d3e0ca62c5b9b5671835988b69a4524e329a924c328f69",
+    "modelVersion": "portrait-a43992293a479d9c8b70d9a7",
+    "framework": "yarn",
+    "userBlocks": 1,
+    "elapsedMs": 708219
+  },
+  "blindReview": {
+    "sampleCount": 15,
+    "sampleFile": "blind-review-sample.jsonl",
+    "keyFile": "blind-review-key.json",
+    "worksheetFile": "blind-review-worksheet.md",
+    "auditTemplateFile": "blind-review-audit-template.jsonl"
+  }
+}

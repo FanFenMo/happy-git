@@ -2,7 +2,7 @@
 
 本文档作为 HappyGit 项目的可导航交付总入口，汇总代码与版本、数据与规范、模型与回流、独立画像对比实验、服务端部署入口、双端构建与真机验收以及端到端演示指南。
 
-A、B 的第三轮交付已合入 `develop`。首版构建、数据冻结、自动化回归见 [2026-11-19 首版集成验收记录](../validation/2026-11-19-first-release.md)；本机主机 A（`hg-1`）部署验证、双端旧版无损覆盖升级及双主机训练准备见 [2026-11-20 本机就绪验收记录](../validation/2026-11-20-local-readiness.md)。下表保留各模块的验收范围。
+A、B 的第三轮交付已合入 `develop`。首版构建、数据冻结、自动化回归见 [2026-11-19 首版集成验收记录](../validation/2026-11-19-first-release.md)；本机主机 A（`hg-1`）部署验证与双端旧版无损覆盖升级见 [2026-11-20 本机就绪验收记录](../validation/2026-11-20-local-readiness.md)；真实双物理机（`hg-1` + `hg-2`）YARN 分布式训练、跨节点并行取证与任务取消/重试验收见 [2026-11-20 双主机 YARN 验收记录](../validation/2026-11-20-two-host-yarn-acceptance.md)。下表保留各模块的验收范围。
 
 ---
 
@@ -30,8 +30,8 @@ A、B 的第三轮交付已合入 `develop`。首版构建、数据冻结、自�
 - [第三轮画像对比实验报告](../experiments/第三轮画像对比实验报告.md)
 - [独立实验运行器使用说明 (`tools/experiments/README.md`)](../../tools/experiments/README.md)
 - 实测与预览产物及 SVG 图表：
-  - **真实公开目录 `standard-real` 三方实测**（10,000 真实仓库、100 test 用户）：[standard-real-round3-local/report.md](../../tools/experiments/generated/standard-real-round3-local/report.md)
-  - 历史合成夹具预览：`pilot`（5 test 用户）[pilot-round3-preview/report.md](../../tools/experiments/generated/pilot-round3-preview/report.md) / `standard`（100 test 用户）[standard-round3-baseline-preview/report.md](../../tools/experiments/generated/standard-round3-baseline-preview/report.md)
+  - **双主机 YARN 真实公开目录 `standard-real` 正式三方实测**（10,000 真实仓库、92 训练 + 21 导出 YARN 作业、`portrait-a43992293a479d9c8b70d9a7`）：[standard-real-round3-yarn/report.md](../../tools/experiments/generated/standard-real-round3-yarn/report.md)
+  - 历史单机与合成预览：`standard-real` 单机版 [standard-real-round3-local/report.md](../../tools/experiments/generated/standard-real-round3-local/report.md) / `pilot` [pilot-round3-preview/report.md](../../tools/experiments/generated/pilot-round3-preview/report.md) / `standard` 合成夹具 [standard-round3-baseline-preview/report.md](../../tools/experiments/generated/standard-round3-baseline-preview/report.md)
 
 ### 4. 服务端、数据平台与集群部署（成员甲维护入口）
 - [数据平台运行说明 (`data-platform/README.md`)](../../data-platform/README.md)
@@ -49,6 +49,7 @@ A、B 的第三轮交付已合入 `develop`。首版构建、数据冻结、自�
 - [第二轮 A/B 集成验证记录 (2026-11-17)](../validation/2026-11-17-round-two-integration.md)
 - [首版集成验收记录 (2026-11-19)](../validation/2026-11-19-first-release.md)
 - [本机就绪验收与双主机训练准备记录 (2026-11-20)](../validation/2026-11-20-local-readiness.md)
+- [双主机 YARN 分布式训练与跨节点并行取证记录 (2026-11-20)](../validation/2026-11-20-two-host-yarn-acceptance.md)
 - [第三轮双端构建与真机验收记录](双端构建与真机验收记录.md)
 - [端到端项目演示指南](演示指南.md)
 
@@ -69,14 +70,14 @@ A、B 的第三轮交付已合入 `develop`。首版构建、数据冻结、自�
 | 云端身份与业务存储 | A | 已完成并集成验证 | MySQL `V1/V2` 迁移、应用会话与设备注册在独立 MySQL 集成测试通过 |
 | 客户端逐次行为与上传 | B | 已完成并集成验证 | 双端 SQLite 升级、30 秒去重、`discard` 墓碑、同构 SHA-256、`client_mutation_outbox` 单测与第二轮集成通过 |
 | 服务端接收与 HDFS 归档 | A | 已完成并集成验证 | 批量幂等 ACK、三水位分离与归档导出在第二轮集成通过 |
-| 初始训练与模型制品 | A | 标准规模本地训练通过 | 10,000 个真实公开项目及模拟行为用于本地 MapReduce 训练，验证通过的模型为 `portrait-171b14f41dd3b349e93fbcad`，待多节点 YARN 复验 |
+| 初始训练与模型制品 | A | 双主机 YARN 正式训练与并行取证通过 | 10,000 真实公开项目及 200,000 模拟浏览在真实双主机 YARN（`hg-1`+`hg-2`，92 个作业，`parallelExecution=proven`）完成多行为网格训练，产出 `portrait-a43992293a479d9c8b70d9a7` |
 | 个人离线推断与结果发布 | A | 已完成并集成验证 | 固定模型推断、同代发布与客户端对接验证通过 |
 | 回流样本与模型再训练 | A | 机制已集成验证，待真实回流规模验证 | 第二轮已走通 `初始模型 → 原生事件回流 → 再训练 portrait-9c1eaf9435bf526334cc56a3`；待真实部署环境端上回流 |
 | 云端画像与本地搜索 | B | 已完成并集成验证 | 同代缓存、8192 维 SHA-256 校验、4 查询 / 8 页有界搜索与 DTO 完整保留通过第二轮集成 |
 | 本地排序与近期行为接续 | B | 已完成并集成验证 | `acceptedThrough`/`processedThrough` 分离、未处理近期事件增量与 24h 已看降权、隐藏/恢复及快照防漂移通过测试 |
 | 个人群体界面与项目证据 | B | 已完成代码与构建，待真机实测 | `ProfileView` / `TrendingView` / `SettingsModal` 接通多状态、`<10` 抑制、项目用途/安装/关注度与已隐藏恢复 |
 | 数据与模型管理工作台 | A | 已完成并集成验证 | 管理台支持采集/训练/推断/发布/回退状态展示；第三轮任务取消与重试随 A 分支集成 |
-| 独立画像对比与报告 | B | 标准真实目录三方对照已同步报告 | 100 名固定测试用户的真实目录两份 MapReduce 导出均通过摘要校验并更新至实验报告及 SVG 图表；外部大模型实调与人工盲评待完成 |
-| 真实 Ubuntu 部署与运行核对 | A | 主机 A (`hg-1`) 已部署验收，待主机 B 加入跑双机 YARN | `happygit-v1.2.0-two-host` 已在 `hg-1` 无损升级并验通 MySQL/API/Console/HDFS/YARN/CLI（保留 239,424 HDFS 块），主机 B 升级包与一键双机训练脚本已就绪；双机 YARN 并行重叠、故障接续与三节点 HA 待执行 |
+| 独立画像对比与报告 | B | 双主机 YARN 真实目录三方对照已同步报告 | 100 名固定测试用户的双机 YARN 固定导出（21 作业，`parallelExecution=proven`，修复 `ModelExport` 基线 `referenceTime` 后复跑）均通过摘要校验并更新至实验报告及 SVG 图表；外部大模型实调与人工盲评待完成 |
+| 真实 Ubuntu 部署与运行核对 | A | 双主机部署与跨节点 YARN 并行、任务取消/重试已验收 | `hg-1`+`hg-2` 双 DataNode（0 缺失块）/双 NodeManager 完成 92 训练 + 21 导出跨节点并行取证（`parallelExecution=proven`）与 ZK 精确取消/重试实测；两主机按受限控制面记录，三节点 HA 演练留作三机环境扩展 |
 | 双端安装包与真实使用验收 | B | 双端全新启动与 `v1.0.0→v1.2.0` 覆盖升级已验通 | Windows 独立启动及真实 `user_version=2→3` 无损升级、Android 模拟器 `versionCode=2→3` 原地覆盖升级（`user_version=4`，0 崩溃）均已通过；带正式 HTTPS 地址的重构包、真机联网登录、指定仓库 Star 与真实端上回流待外部环境验证 |
 | 项目说明与最终材料整理 | B 主责 / A 配合 | 首版交付与方案文档已对齐 | 补齐三轮方案/契约/任务表/服务端数据规范入库，更新真实目录实验报告与本机就绪验收记录 |

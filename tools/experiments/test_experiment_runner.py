@@ -387,6 +387,112 @@ class ExperimentRunnerTest(unittest.TestCase):
                     server_export_dir=export_dir,
                 )
 
+    def test_precomputed_llm_repeats_raw_logs_extra_llm_and_isolated_bundle(self) -> None:
+        from export_isolated_llm_bundle import export_isolated_bundle
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            test_rows = [
+                json.loads(line)
+                for line in (PILOT_FIXTURE_DIR / "evidence-views" / "test.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            # First run baseline-only to produce frozen llm-prompts.jsonl and repeat-subset-ids.json
+            prep_dir = tmp_dir / "prep"
+            run_experiment_pipeline(
+                dataset_dir=PILOT_FIXTURE_DIR,
+                output_dir=prep_dir,
+                split="test",
+                repeat_subset_size=3,
+                blind_review_count=0,
+            )
+
+            # Export isolated bundle and verify zero leakage + validator script
+            bundle_dir = tmp_dir / "isolated-bundle"
+            manifest = export_isolated_bundle(
+                prompts_jsonl=prep_dir / "llm-prompts.jsonl",
+                repeat_subset_json=prep_dir / "repeat-subset-ids.json",
+                output_dir=bundle_dir,
+            )
+            self.assertEqual(manifest["promptCount"], len(test_rows))
+            self.assertTrue(manifest["zeroLeakageVerified"])
+            self.assertTrue((bundle_dir / "validate_predictions.py").exists())
+            self.assertEqual(len(list((bundle_dir / "prompts").glob("*.json"))), len(test_rows))
+
+            # Build pre-computed main + 2 repeat runs for both llm_reference and an extra external LLM
+            repeat_ids = json.loads((prep_dir / "repeat-subset-ids.json").read_text(encoding="utf-8"))["subjectIds"]
+            llm_run1, llm_run2, llm_run3, raw_logs = [], [], [], []
+            codex_run1, codex_run2, codex_run3 = [], [], []
+            for row in test_rows:
+                sid = str(row["subjectId"])
+                repos = (row.get("evidence") or {}).get("repositories") or []
+                if not repos:
+                    pred = {"subjectId": sid, "modelVersion": "gemini-4-neon-xhigh", "status": "empty", "languages": {}, "topics": {}, "topInterests": [], "evidenceRepos": []}
+                else:
+                    rid = str(repos[0]["repoId"])
+                    topic = (repos[0].get("topics") or ["llm"])[0]
+                    pred = {
+                        "subjectId": sid,
+                        "modelVersion": "gemini-4-neon-xhigh",
+                        "status": "ready",
+                        "languages": {repos[0].get("primaryLanguage") or "Python": 1.0},
+                        "topics": {topic: 1.0},
+                        "topInterests": [{"tag": topic, "score": 1.0, "evidenceRepos": [rid]}],
+                        "evidenceRepos": [rid],
+                    }
+                llm_run1.append(json.dumps(pred))
+                codex_pred = {**pred, "modelVersion": "codex-6.2-sol-xhigh"}
+                codex_run1.append(json.dumps(codex_pred))
+                raw_logs.append(json.dumps({
+                    "ok": True,
+                    "repeatIndex": 1,
+                    "subjectId": sid,
+                    "provider": "antigravity-isolated-workflow",
+                    "executionChannel": "antigravity-run_workflow-isolated",
+                    "modelIdentifier": "gemini-4-neon-xhigh",
+                    "elapsedMs": 120,
+                }))
+                if sid in repeat_ids:
+                    llm_run2.append(json.dumps(pred))
+                    llm_run3.append(json.dumps(pred))
+                    codex_run2.append(json.dumps(codex_pred))
+                    codex_run3.append(json.dumps(codex_pred))
+
+            p_r1 = tmp_dir / "llm_r1.jsonl"
+            p_r2 = tmp_dir / "llm_r2.jsonl"
+            p_r3 = tmp_dir / "llm_r3.jsonl"
+            p_raw = tmp_dir / "llm_raw.jsonl"
+            c_r1 = tmp_dir / "codex_r1.jsonl"
+            c_r2 = tmp_dir / "codex_r2.jsonl"
+            c_r3 = tmp_dir / "codex_r3.jsonl"
+            p_r1.write_text("\n".join(llm_run1) + "\n", encoding="utf-8")
+            p_r2.write_text("\n".join(llm_run2) + "\n", encoding="utf-8")
+            p_r3.write_text("\n".join(llm_run3) + "\n", encoding="utf-8")
+            p_raw.write_text("\n".join(raw_logs) + "\n", encoding="utf-8")
+            c_r1.write_text("\n".join(codex_run1) + "\n", encoding="utf-8")
+            c_r2.write_text("\n".join(codex_run2) + "\n", encoding="utf-8")
+            c_r3.write_text("\n".join(codex_run3) + "\n", encoding="utf-8")
+
+            out_dir = tmp_dir / "dual-llm-out"
+            report = run_experiment_pipeline(
+                dataset_dir=PILOT_FIXTURE_DIR,
+                output_dir=out_dir,
+                split="test",
+                repeat_subset_size=3,
+                llm_predictions_path=p_r1,
+                llm_repeat_predictions=[p_r2, p_r3],
+                llm_raw_responses_path=p_raw,
+                extra_models=[("llm_codex_sol_xhigh", c_r1)],
+                extra_model_repeats=[("llm_codex_sol_xhigh", c_r2), ("llm_codex_sol_xhigh", c_r3)],
+            )
+            self.assertEqual(report["methods"]["llm_reference"]["modelVersion"], "gemini-4-neon-xhigh")
+            self.assertEqual(report["methods"]["llm_reference"]["provider"], "antigravity-isolated-workflow")
+            self.assertEqual(report["methods"]["llm_reference"]["stability"]["totalCallsPerSubsetSubject"], 3)
+            self.assertEqual(report["methods"]["llm_codex_sol_xhigh"]["stability"]["totalCallsPerSubsetSubject"], 3)
+            md_text = (out_dir / "report.md").read_text(encoding="utf-8")
+            self.assertIn("### 5.1 `llm_codex_sol_xhigh`", md_text)
+            self.assertIn("### 5.2 `llm_reference`", md_text)
+
 
 if __name__ == "__main__":
     unittest.main()

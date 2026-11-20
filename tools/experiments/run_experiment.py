@@ -696,30 +696,38 @@ def render_markdown_report(report: Dict[str, Any]) -> str:
             )
         lines.append("")
 
-    llm_block = (report.get("methods") or {}).get("llm_reference") or {}
-    if isinstance(llm_block.get("stability"), dict):
-        st = llm_block["stability"]
-        sm = st.get("summary") or {}
+    stability_blocks = [
+        (m_name, m_block["stability"])
+        for m_name, m_block in (report.get("methods") or {}).items()
+        if isinstance(m_block.get("stability"), dict)
+    ]
+    if stability_blocks:
         lines.append("## 5. 通用大模型固定子集重复调用波动分析")
         lines.append("")
-        lines.append(
-            f"- 固定子集规模：`{st.get('subsetSize')}`，每样本独立调用总次数：`{st.get('totalCallsPerSubsetSubject')}`，"
-            f"各轮失败数：`{st.get('failuresPerRun')}`，状态完全一致率：`{_fmt_opt(st.get('statusExactConsistencyRate'))}`"
-        )
-        lines.append("")
-        lines.append("| 稳定性指标 | 均值 (mean) | 标准差 (std) | 最小值 (min) | 最大值 (max) |")
-        lines.append("| --- | ---: | ---: | ---: | ---: |")
-        for label, key in [
-            ("Top-8 Jaccard", "top8TagJaccard"),
-            ("语言分布余弦", "languageCosineAgreement"),
-            ("主题分布余弦", "topicCosineAgreement"),
-        ]:
-            row = sm.get(key) or {}
+        for idx_s, (m_name, st) in enumerate(stability_blocks, start=1):
+            sm = st.get("summary") or {}
+            if len(stability_blocks) > 1:
+                m_ver = (report["methods"][m_name] or {}).get("modelVersion") or "-"
+                lines.append(f"### 5.{idx_s} `{m_name}` (`{m_ver}`)")
+                lines.append("")
             lines.append(
-                f"| {label} | {_fmt_opt(row.get('mean'))} | {_fmt_opt(row.get('std'))} | "
-                f"{_fmt_opt(row.get('min'))} | {_fmt_opt(row.get('max'))} |"
+                f"- 固定子集规模：`{st.get('subsetSize')}`，每样本独立调用总次数：`{st.get('totalCallsPerSubsetSubject')}`，"
+                f"各轮失败数：`{st.get('failuresPerRun')}`，状态完全一致率：`{_fmt_opt(st.get('statusExactConsistencyRate'))}`"
             )
-        lines.append("")
+            lines.append("")
+            lines.append("| 稳定性指标 | 均值 (mean) | 标准差 (std) | 最小值 (min) | 最大值 (max) |")
+            lines.append("| --- | ---: | ---: | ---: | ---: |")
+            for label, key in [
+                ("Top-8 Jaccard", "top8TagJaccard"),
+                ("语言分布余弦", "languageCosineAgreement"),
+                ("主题分布余弦", "topicCosineAgreement"),
+            ]:
+                row = sm.get(key) or {}
+                lines.append(
+                    f"| {label} | {_fmt_opt(row.get('mean'))} | {_fmt_opt(row.get('std'))} | "
+                    f"{_fmt_opt(row.get('min'))} | {_fmt_opt(row.get('max'))} |"
+                )
+            lines.append("")
 
     if report.get("blindAuditSummary"):
         ba = report["blindAuditSummary"]
@@ -812,7 +820,10 @@ def run_experiment_pipeline(
     learned_predictions_path: Optional[Path] = None,
     learned_cmd: Optional[str] = None,
     extra_models: Optional[List[Tuple[str, Path]]] = None,
+    extra_model_repeats: Optional[List[Tuple[str, Path]]] = None,
     llm_predictions_path: Optional[Path] = None,
+    llm_repeat_predictions: Optional[List[Path]] = None,
+    llm_raw_responses_path: Optional[Path] = None,
     run_llm_api: bool = False,
     subset_repeats: int = 3,
     repeat_subset_size: int = 20,
@@ -1010,7 +1021,13 @@ def run_experiment_pipeline(
             "durationMs": learned_duration,
         }
 
-    # Optional extra model files (e.g., feedback-retrained model version on the same frozen test benchmark)
+    # Optional extra model files (e.g., feedback-retrained model or second external LLM on the same frozen test benchmark)
+    extra_repeats_by_name: Dict[str, List[Path]] = {}
+    for rep_name, rep_path in (extra_model_repeats or []):
+        clean_rep = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(rep_name).strip())
+        if clean_rep and rep_path.exists():
+            extra_repeats_by_name.setdefault(clean_rep, []).append(rep_path)
+
     for extra_name, extra_path in (extra_models or []):
         clean_name = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(extra_name).strip())
         if not clean_name or not extra_path.exists():
@@ -1021,9 +1038,27 @@ def run_experiment_pipeline(
         write_jsonl(ex_out, [ex_map[sid] for sid in sorted(ex_map)])
         ex_eval = _evaluate_prediction_map(ex_map, evidence_by_id, truth_by_id, control_by_id, subject_by_id, aliases)
         ex_ver = next((p.get("modelVersion") for p in ex_map.values() if p.get("modelVersion")), clean_name)
+        ex_stability: Optional[Dict[str, Any]] = None
+        rep_paths = extra_repeats_by_name.get(clean_name) or []
+        if rep_paths and repeat_subset_ids:
+            run1_sub = {sid: ex_map[sid] for sid in repeat_subset_ids if sid in ex_map}
+            run1_fails = sum(1 for sid in repeat_subset_ids if sid not in ex_map)
+            rep_runs: List[Dict[str, Dict[str, Any]]] = [run1_sub]
+            rep_fails: List[int] = [run1_fails]
+            for rp in rep_paths:
+                rmap = load_predictions_map(rp)
+                sub_map = {sid: rmap[sid] for sid in repeat_subset_ids if sid in rmap}
+                rep_runs.append(sub_map)
+                rep_fails.append(sum(1 for sid in repeat_subset_ids if sid not in sub_map))
+            ex_stability = summarize_repeat_stability(
+                repeat_runs=rep_runs,
+                subset_ids=repeat_subset_ids,
+                aliases=aliases,
+                failures_per_run=rep_fails,
+            )
         predictions_by_method[clean_name] = ex_map
         evals_by_method[clean_name] = ex_eval
-        methods_report[clean_name] = {
+        ex_block: Dict[str, Any] = {
             "status": "completed",
             "modelVersion": ex_ver,
             "durationMs": int((time.perf_counter() - t_ex) * 1000),
@@ -1031,6 +1066,9 @@ def run_experiment_pipeline(
             "metrics": aggregate_metrics(ex_eval),
             "perSubject": ex_eval,
         }
+        if ex_stability is not None:
+            ex_block["stability"] = ex_stability
+        methods_report[clean_name] = ex_block
 
     # 3. Independent LLM reference adapter
     llm_raw_log_path = output_dir / "llm-raw-responses.jsonl"
@@ -1136,20 +1174,83 @@ def run_experiment_pipeline(
         t2 = time.perf_counter()
         llm_map = load_predictions_map(llm_predictions_path)
         write_jsonl(preds_dir / "llm_reference.jsonl", [llm_map[sid] for sid in sorted(llm_map)])
-        llm_ms = int((time.perf_counter() - t2) * 1000)
-        llm_eval = _evaluate_prediction_map(llm_map, evidence_by_id, truth_by_id, control_by_id, subject_by_id, aliases)
-        sample_ver = next((p.get("modelVersion") for p in llm_map.values() if p.get("modelVersion")), "llm-reference")
+        llm_errors: Dict[str, str] = {}
+        raw_logs: List[Dict[str, Any]] = []
+        raw_elapsed_total = 0
+        raw_provider: Optional[str] = llm_provider
+        raw_model_ver: Optional[str] = None
+        raw_channel: Optional[str] = None
+        failures = 0
+        if llm_raw_responses_path and llm_raw_responses_path.exists():
+            raw_logs = read_jsonl(llm_raw_responses_path)
+            if llm_raw_responses_path.resolve() != llm_raw_log_path.resolve():
+                write_jsonl(llm_raw_log_path, raw_logs)
+            for row in raw_logs:
+                rep_i = int(row.get("repeatIndex") or 1)
+                if isinstance(row.get("elapsedMs"), (int, float)):
+                    raw_elapsed_total += int(row["elapsedMs"])
+                if not raw_provider and row.get("provider"):
+                    raw_provider = str(row["provider"])
+                if not raw_model_ver and row.get("ok") and row.get("modelIdentifier"):
+                    raw_model_ver = str(row["modelIdentifier"])
+                if not raw_channel and row.get("executionChannel"):
+                    raw_channel = str(row["executionChannel"])
+                if rep_i == 1 and not row.get("ok", True):
+                    sid_err = str(row.get("subjectId") or "")
+                    if sid_err and sid_err not in llm_map:
+                        llm_errors[sid_err] = str(row.get("error") or "llm_call_failed")
+                        failures += 1
+
+        existing_repeats = [p for p in (llm_repeat_predictions or []) if p and p.exists()]
+        if existing_repeats and repeat_subset_ids:
+            run1_subset = {sid: llm_map[sid] for sid in repeat_subset_ids if sid in llm_map}
+            run1_fails = sum(1 for sid in repeat_subset_ids if sid not in llm_map)
+            repeat_runs = [run1_subset]
+            failures_per_run = [run1_fails]
+            for rep_path in existing_repeats:
+                rep_loaded = load_predictions_map(rep_path)
+                rep_sub = {sid: rep_loaded[sid] for sid in repeat_subset_ids if sid in rep_loaded}
+                repeat_runs.append(rep_sub)
+                failures_per_run.append(sum(1 for sid in repeat_subset_ids if sid not in rep_sub))
+            llm_stability = summarize_repeat_stability(
+                repeat_runs=repeat_runs,
+                subset_ids=repeat_subset_ids,
+                aliases=aliases,
+                failures_per_run=failures_per_run,
+            )
+
+        llm_ms = raw_elapsed_total if raw_elapsed_total > 0 else int((time.perf_counter() - t2) * 1000)
+        llm_eval = _evaluate_prediction_map(
+            llm_map,
+            evidence_by_id,
+            truth_by_id,
+            control_by_id,
+            subject_by_id,
+            aliases,
+            error_by_id=llm_errors,
+        )
+        sample_ver = raw_model_ver or next((p.get("modelVersion") for p in llm_map.values() if p.get("modelVersion")), "llm-reference")
         predictions_by_method["llm_reference"] = llm_map
         evals_by_method["llm_reference"] = llm_eval
-        methods_report["llm_reference"] = {
+        llm_block: Dict[str, Any] = {
             "status": "completed",
             "modelVersion": sample_ver,
             "durationMs": llm_ms,
+            "failedCalls": failures,
             "promptsFile": "llm-prompts.jsonl",
             "predictionsFile": "predictions/llm_reference.jsonl",
             "metrics": aggregate_metrics(llm_eval),
             "perSubject": llm_eval,
         }
+        if raw_provider:
+            llm_block["provider"] = raw_provider
+        if raw_channel:
+            llm_block["executionChannel"] = raw_channel
+        if raw_logs:
+            llm_block["rawResponsesFile"] = "llm-raw-responses.jsonl"
+        if llm_stability is not None:
+            llm_block["stability"] = llm_stability
+        methods_report["llm_reference"] = llm_block
     else:
         methods_report["llm_reference"] = {
             "status": "pending_api_credentials",
@@ -1283,7 +1384,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--learned-predictions", default=None, type=Path, help="Optional JSONL of A's learned model predictions")
     parser.add_argument("--learned-cmd", default=None, type=str, help="Optional CLI command template to invoke A's learned inference")
     parser.add_argument("--extra-model", action="append", default=None, help="Additional model JSONL as label=path (e.g., learned_retrained_v2=path/to/learned.jsonl)")
+    parser.add_argument("--extra-model-repeat", action="append", default=None, help="Additional repeat-subset JSONL for an extra model as label=path (repeatable)")
     parser.add_argument("--llm-predictions", default=None, type=Path, help="Optional JSONL of LLM reference predictions")
+    parser.add_argument("--llm-repeat-predictions", action="append", default=None, type=Path, help="Optional repeat-subset JSONL(s) for pre-computed --llm-predictions stability analysis")
+    parser.add_argument("--llm-raw-responses", default=None, type=Path, help="Optional raw response log JSONL paired with --llm-predictions")
     parser.add_argument("--run-llm-api", action="store_true", help="Actually call external LLM API using env vars (Round 3)")
     parser.add_argument("--subset-repeats", type=int, default=3, help="Total independent calls per fixed subset user when --run-llm-api is set (default: 3)")
     parser.add_argument("--repeat-subset-size", type=int, default=20, help="Fixed stratified subset size for repeat variance evaluation (default: 20)")
@@ -1308,7 +1412,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         learned_predictions_path=args.learned_predictions,
         learned_cmd=args.learned_cmd,
         extra_models=_parse_extra_models(args.extra_model),
+        extra_model_repeats=_parse_extra_models(args.extra_model_repeat),
         llm_predictions_path=args.llm_predictions,
+        llm_repeat_predictions=args.llm_repeat_predictions,
+        llm_raw_responses_path=args.llm_raw_responses,
         run_llm_api=args.run_llm_api,
         subset_repeats=args.subset_repeats,
         repeat_subset_size=args.repeat_subset_size,

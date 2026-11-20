@@ -44,7 +44,23 @@
 
 ---
 
-## 四、学习任务精确取消与重试实测（ZooKeeper 实机验证）
+## 四、真实客户端事件回流 → 双主机 YARN 再训练 → live API 换版/回退全闭环
+
+基于升级至 `happygit-v1.2.0-two-host-r2`（`develop@5694818`，SHA-256 `725bbfd307415dbd4bf3c3358372fba7cfef59fb8fa0441cae1896a19f03ad5e`，主机 A 零中断热升级后 `api`/`console` 均返回 `r2` 代际且双机 HDFS/YARN 未断连）的环境，完整实测了回流再训练与模型换版/回退（完整证据位于验证机 `output/two-host-retrain-20261120/`）：
+
+1. **原生客户端回流输入准备**：
+   - 驱动真实 Electron `database-worker.cjs` 对 10,000 真实目录中的 8 个仓库记录 9 次浏览（含 1 次 10 秒内重复打开，实测被 30s 去重拦截），生成 **8 条**带真实 SHA-256 `payloadHash` 的 `client_authenticated` 规范事件（`subjectId = client_native_feedback_001`），并单独保存指向首版模型 `portrait-a43992293a479d9c8b70d9a7` 的 `derived-profiles.jsonl` 血缘记录（不充当监督真值）。
+   - 组装新训练快照 `hg-standard-real-20261103-retrain-r1`（`dataset-0ba16bed6d17ceb34a3ad71c`）：`train` 由 800 人增至 **801 人**（`client_authenticated_subject=1`、`client_authenticated_event=8`），原 100 名 `validation` 与 100 名 `test` 用户保持严格冻结不变。
+2. **双主机 YARN 回流再训练与导出并行取证**：
+   - **回流再训练（41 个 YARN 作业，耗时 `1,009.1s`）**：产出新模型 **`portrait-101f749d459768596fbb3275`**（制品 SHA-256 `72f951dec2d5bf02630c895c2330b56d7d82c556cd11e09cc2df76dcaf6c2905`），聚类中心成员由首版 `[273, 153, 337, 13]` 真实演化为 **`[255, 153, 357, 12]`**；`collect_model_run.py --require-parallel` 返回 `state=complete`、`allJobsSucceeded=true`、**`parallelExecution=proven`**（**38/41** 作业有跨节点重叠，最大重叠 **`86,970 ms`**，`hg-2: 140` / `hg-1: 106`，`1,373,375 memorySeconds` / `2,546 vcoreSeconds`）。
+   - **回流版固定测试集导出（11 个 YARN 作业）**：`state=complete`、`allJobsSucceeded=true`、**`parallelExecution=proven`**（**10/11** 作业有跨节点重叠，最大重叠 **`11,891 ms`**，`hg-1: 27` / `hg-2: 36`，`290,394 memorySeconds` / `525 vcoreSeconds`）。
+   - **固定测试集回归验证**：接入 `run_experiment.py --extra-model learned_retrained=...` 完成四方对照（`baseline_local_v1`、`baseline_mr_fixed_v1`、`learned_model`、`learned_retrained`），小样本原生回流（1 人 / 8 事件）下新版本在 100 位冻结测试用户上保持无退化（`nDCG@8=0.4463`、`语言余弦=0.9981`、`主题余弦=0.9157`、`0` 幻觉引用，如实记录小样本规模、不夸大效果提升）。
+3. **live `happygit-api`（MySQL `3307`）模型登记、发布、换版与回退全事务实测**（证据：`output/two-host-retrain-20261120/model-lifecycle-verification.json`，隔离实验命名空间 `experiment-two-host-20261120-205358`）：
+   - 依次执行 `register(首版)` → `publish(首版, rev=1)` → `register(回流版)` → `publish(回流版, rev=2)` → `rollback(首版, rev=3)` → `publish(回流版, rev=4)`，全部返回 HTTP `200`，MySQL `learning_model_events` 完整留存 4 条不可变审计事件记录。
+
+---
+
+## 五、学习任务精确取消与重试实测（ZooKeeper 实机验证）
 
 在隔离命名空间 `experiment-cancel-check-20261120` 对真实 ZooKeeper 执行 `learning-submit` → `learning-task --action show` → `--action cancel --attempt 0` → `--action retry --attempt 0` 全流程实测（证据：`output/two-host-20261120-212158/task-cancel-retry-evidence.json`）：
 - 原任务 `51b1fc9a5f22e8aae79be4d344055aa5362bce8a267eed0579238ce67d654c72` 由 `queued` 精确迁移至 `cancelled`（记录 `cancelReason` 与 `finishedAt`）；
@@ -52,8 +68,8 @@
 
 ---
 
-## 五、剩余待办项（明确边界）
+## 六、剩余待办项（明确边界）
 
-1. **外部通用大模型对照与人工盲评**：配置外部大模型 API 凭据后，直接针对 `output/two-host-20261120-212158/server-export-fixed` 执行 100 test + 20×3 重复波动调用，并完成 15 例匿名盲评工作表标注与解盲回写。
-2. **生产端上真实回流、换版与双端联网真机验收**：注入正式公开 HTTPS 域名与 GitHub OAuth 凭据重构建双端安装包，完成真机联网登录、30s 去重上传、指定测试仓库 Star 及恢复、真实回流再训练换版与演示彩排。
+1. **外部通用大模型对照与人工盲评**：配置外部大模型 API 凭据后，直接针对 `output/two-host-20261120-212158/server-export-fixed` 与 `output/two-host-retrain-20261120/server-export-retrained/learned.jsonl` 执行 100 test + 20×3 重复波动调用，并完成 15 例匿名盲评工作表标注与解盲回写。
+2. **正式公开 HTTPS 域名 + GitHub OAuth 生产构建与真机联网验收**：注入正式公开 HTTPS 域名与 GitHub OAuth 凭据重构建双端安装包，完成真机联网登录、30s 去重上传、指定测试仓库 Star 及恢复与演示彩排。
 3. **可选扩展与最终发版**：若需三节点 HA 证明需另行准备三台独立主机执行多数派/fencing/切换演练；全部验收闭环完成后再按指令将 `develop` 合并至 `main`。

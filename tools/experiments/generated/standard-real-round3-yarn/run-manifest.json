@@ -1,6 +1,6 @@
 {
-  "executedAt": "2026-11-20T14:58:43Z",
-  "gitCommit": "e8e6709d060c57d0074ddf1f52583747c9338c08",
+  "executedAt": "2026-11-20T16:25:19Z",
+  "gitCommit": "5694818452a6962436c87595440b4d95d48df6ac",
   "datasetVersion": "hg-standard-real-20261103",
   "catalogMode": "real",
   "behaviorSourceMode": "deterministic_rules",

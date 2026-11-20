@@ -84,4 +84,47 @@ class LearningLoopIntegrationTest {
             Files.writeString(java.nio.file.Path.of(summary),report.toString());
         }
     }
+    @Test void modelExportBaselinePreservesCollectionsWhenBehaviorDiffersFromFixedRules() throws Exception {
+        Configuration conf=new Configuration();conf.set("fs.defaultFS","file:///");conf.set("mapreduce.framework.name","local");conf.setInt("hg.reducers",1);
+        long now=System.currentTimeMillis();
+        ObjectNode repo=Json.object().put("kind","repository").put("repoId","23418517").put("name","database").put("fullName","fixture/database")
+                .put("primaryLanguage","Java").put("description","database storage engine").put("visibility","public").put("observedAt",now-86400000).put("sourceKind","synthetic_fixture");
+        repo.putArray("topics").add("database");
+        List<ObjectNode> subjects=Arrays.asList(
+                Json.object().put("kind","subject").put("subjectId","train-1").put("sourceKind","synthetic_llm"),
+                Json.object().put("kind","subject").put("subjectId","val-1").put("sourceKind","synthetic_llm"),
+                Json.object().put("kind","subject").put("subjectId","test-star-only").put("sourceKind","synthetic_llm"));
+        List<ObjectNode> splits=Arrays.asList(
+                Json.object().put("subjectId","train-1").put("split","train"),
+                Json.object().put("subjectId","val-1").put("split","validation"),
+                Json.object().put("subjectId","test-star-only").put("split","test"));
+        List<ObjectNode> events=Arrays.asList(
+                event("train-1","t1","23418517",now-14L*86400000),
+                event("val-1","v1","23418517",now-14L*86400000),
+                event("val-1","v2","23418517",now-86400000));
+        ObjectNode starCollection=Json.object().put("kind","collection").put("subjectId","test-star-only").put("collectionKind","stars")
+                .put("complete",true).put("revision",1).put("observedAt",now-3600000).put("sourceKind","synthetic_llm");
+        starCollection.putArray("repoIds").add("23418517");
+        ObjectNode source=Json.object().put("catalogMode","synthetic_fixture").put("datasetVersion","export-ref-time-test").put("referenceTime",now);
+        ArrayNode files=source.putArray("files");java.nio.file.Path input=temporaryDirectory.resolve("export-input");
+        for(var part:Map.of("repositories",Collections.singletonList(repo),"subjects",subjects,"events",events,"collections",Collections.singletonList(starCollection)).entrySet()) {
+            ObjectNode descriptor=writeRows(conf,input.resolve("canonical/"+part.getKey()+".jsonl"),part.getValue());descriptor.put("path","canonical/"+part.getKey()+".jsonl");files.add(descriptor);
+        }
+        ObjectNode splitFile=writeRows(conf,input.resolve("splits/subjects.jsonl"),splits);splitFile.put("path","splits/subjects.jsonl");files.add(splitFile);
+        java.nio.file.Path sourceFile=input.resolve("manifest.json");Files.writeString(sourceFile,source.toString());
+        ObjectNode dataset=LearningDataset.prepare(conf,sourceFile,"experiment-export-ref",new Path(temporaryDirectory.resolve("export-snapshot").toUri()),null);
+        ObjectNode request=Json.object().put("namespace","experiment-export-ref").put("seed",17).put("maxIterations",2);
+        request.set("dataset",dataset);request.putArray("centerCounts").add(1);request.putArray("directionBlends").add(0.0);
+        // Deliberately differ from fixed baseline (30, 3, 1.5) to exercise ModelExport's separate baseline branch.
+        request.putArray("behaviors").addObject().put("browseHalfLifeDays",60).put("starWeight",2).put("ownedWeight",1.5);
+        ObjectNode model=new LearningPipeline(conf).train(request,temporaryDirectory.resolve("export-model").toUri().toString(),(phase,detail)->{});
+        ObjectNode protocol=Json.object().put("split","test").put("mode","both").put("userBlocks",1);protocol.set("dataset",dataset);protocol.set("model",model);
+        java.nio.file.Path localOut=temporaryDirectory.resolve("export-local");
+        ObjectNode report=ModelExport.run(conf,protocol,temporaryDirectory.resolve("export-hdfs").toUri().toString(),localOut);
+        assertEquals("completed",report.path("state").asText());
+        List<ObjectNode> baselineRows=HdfsFiles.readJsonLines(conf,new Path(localOut.resolve("baseline.jsonl").toUri()));
+        assertEquals(1,baselineRows.size());
+        assertEquals("ready",baselineRows.get(0).path("status").asText(),"star-only user must not lose collections in baseline export");
+        assertTrue(baselineRows.get(0).path("evidenceRepos").toString().contains("23418517"));
+    }
 }

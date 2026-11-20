@@ -68,7 +68,7 @@ final class ModelExport {
                     JsonNode behavior=artifact.path("config").path("behavior");Path profiles;
                     if(inferred!=null&&behavior.path("browseHalfLifeDays").asDouble()==30&&behavior.path("starWeight").asDouble()==3&&behavior.path("ownedWeight").asDouble()==1.5)profiles=new Path(inferred.path("baseline").asText());
                     else {
-                        Configuration baseline=new Configuration(conf);LearningPipeline.applyBehavior(baseline,Json.object().put("browseHalfLifeDays",30).put("starWeight",3).put("ownedWeight",1.5));
+                        Configuration baseline=new Configuration(conf);baseline.setLong("hg.referenceTime",manifest.path("referenceTime").asLong());LearningPipeline.applyBehavior(baseline,Json.object().put("browseHalfLifeDays",30).put("starWeight",3).put("ownedWeight",1.5));
                         Path space=new Path(blockRoot,"baseline-space.json");LearningFiles.write(baseline,space,(ObjectNode)artifact.path("projection").path("dictionary"));
                         ObjectNode normalized=new LearningPipeline(baseline).normalize(baseline,manifest,new Path(blockRoot,"baseline-input"));
                         ObjectNode result=LearningFiles.verified(baseline,new Pipeline(baseline).run(normalized,new Path(blockRoot,"baseline-fixed").toString(),space,false));

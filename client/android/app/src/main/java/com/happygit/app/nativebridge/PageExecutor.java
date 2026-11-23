@@ -140,15 +140,19 @@ public class PageExecutor {
         String raw = resultRef.get();
         if (raw == null || raw.equals("null")) return new JSONObject();
 
-        // 规范化 Android evaluateJavascript 返回的转义 JSON 字符串
-        String cleanJson = raw;
-        if (cleanJson.startsWith("\"") && cleanJson.endsWith("\"")) {
-            cleanJson = cleanJson.substring(1, cleanJson.length() - 1)
-                    .replace("\\\"", "\"").replace("\\\\", "\\");
-        }
-
+        // 使用标准 JSONTokener 解码 Android evaluateJavascript 返回的 JSON 字符串字面量
         try {
-            return new JSONObject(cleanJson);
+            Object decoded = new org.json.JSONTokener(raw).nextValue();
+            if (decoded instanceof JSONObject) {
+                return (JSONObject) decoded;
+            }
+            if (decoded instanceof String) {
+                String inner = ((String) decoded).trim();
+                if (!inner.isEmpty() && !inner.equals("null")) {
+                    return new JSONObject(inner);
+                }
+            }
+            return new JSONObject();
         } catch (Exception e) {
             return new JSONObject();
         }

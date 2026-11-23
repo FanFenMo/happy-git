@@ -84,7 +84,10 @@ const androidData = {
 
 for (const [id, code] of Object.entries(scriptSources)) {
   // 将 ES 模块的 export 转换为自执行包装函数代码，供 Android evaluateJavascript 运行
-  const cleanCode = code.replace(/^export\\s+function\\s+run/m, 'function run')
+  const cleanCode = code.replace(/^export\s+function\s+run/m, 'function run')
+  if (/^\s*export\s+/m.test(cleanCode)) {
+    throw new Error(`Android 页面脚本 ${id} 仍包含未剥离的 export 语法`)
+  }
   androidData.scripts[id] = `(function() {
     ${cleanCode}
     try {

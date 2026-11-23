@@ -4,7 +4,7 @@
 
 A、B 的第三轮交付已合入 `develop`。首版构建、数据冻结、自动化回归见 [2026-11-19 首版集成验收记录](../validation/2026-11-19-first-release.md)；本机主机 A（`hg-1`）部署验证与双端旧版无损覆盖升级见 [2026-11-20 本机就绪验收记录](../validation/2026-11-20-local-readiness.md)；真实双物理机（`hg-1` + `hg-2`）YARN 分布式训练、跨节点并行取证与任务取消/重试验收见 [2026-11-20 双主机 YARN 验收记录](../validation/2026-11-20-two-host-yarn-acceptance.md)。下表保留各模块的验收范围。
 
-Gemini 与 Codex 对照均已纳入同一批 100 人的冻结测试集，六方报告和匿名盲评材料见 [2026-11-23 首版六方评测与收尾记录](../validation/2026-11-23-release-closeout.md)。
+Gemini 与 Codex 对照及 15 人（90 条候选）匿名盲评解盲均已纳入同一批 100 人的冻结测试集，六方完整报告、图表与盲评统计见 [第三轮画像对比实验报告](../experiments/第三轮画像对比实验报告.md) 与 [2026-11-23 首版六方评测与收尾记录](../validation/2026-11-23-release-closeout.md)。
 
 ---
 
@@ -32,7 +32,7 @@ Gemini 与 Codex 对照均已纳入同一批 100 人的冻结测试集，六方�
 - [第三轮画像对比实验报告](../experiments/第三轮画像对比实验报告.md)
 - [独立实验运行器使用说明 (`tools/experiments/README.md`)](../../tools/experiments/README.md)
 - 实测与预览产物及 SVG 图表：
-  - **双主机 YARN 真实公开目录 `standard-real` 正式三方实测**（10,000 真实仓库、92 训练 + 21 导出 YARN 作业、`portrait-a43992293a479d9c8b70d9a7`）：[standard-real-round3-yarn/report.md](../../tools/experiments/generated/standard-real-round3-yarn/report.md)
+  - **双主机 YARN 真实公开目录 `standard-real` 正式六方实测与匿名盲评汇总**（10,000 真实仓库、92 初训 + 41 回流 YARN 作业、双大模型 20×3 重复波动 + 15 人/90 条盲评解盲）：[standard-real-round3-yarn/report.md](../../tools/experiments/generated/standard-real-round3-yarn/report.md)
   - 历史单机与合成预览：`standard-real` 单机版 [standard-real-round3-local/report.md](../../tools/experiments/generated/standard-real-round3-local/report.md) / `pilot` [pilot-round3-preview/report.md](../../tools/experiments/generated/pilot-round3-preview/report.md) / `standard` 合成夹具 [standard-round3-baseline-preview/report.md](../../tools/experiments/generated/standard-round3-baseline-preview/report.md)
 
 ### 4. 服务端、数据平台与集群部署（成员甲维护入口）
@@ -79,7 +79,7 @@ Gemini 与 Codex 对照均已纳入同一批 100 人的冻结测试集，六方�
 | 本地排序与近期行为接续 | B | 已完成并集成验证 | `acceptedThrough`/`processedThrough` 分离、未处理近期事件增量与 24h 已看降权、隐藏/恢复及快照防漂移通过测试 |
 | 个人群体界面与项目证据 | B | 已完成代码与构建，待真机实测 | `ProfileView` / `TrendingView` / `SettingsModal` 接通多状态、`<10` 抑制、项目用途/安装/关注度与已隐藏恢复 |
 | 数据与模型管理工作台 | A | 已完成并集成验证 | 管理台支持采集/训练/推断/发布/回退状态展示；第三轮任务取消与重试随 A 分支集成 |
-| 独立画像对比与报告 | B | 100 人冻结测试集六方评测完成 | 双机 YARN 固定导出摘要已校验，Codex 与 Gemini 各回收 100/20/20 条；15 人匿名盲评材料已生成，待回收人工标注 |
+| 独立画像对比与报告 | B | 100 人冻结测试集六方评测与 15 人匿名盲评已完成 | 双机 YARN 固定导出摘要已校验，Codex 与 Gemini 各回收 100/20/20 条；15 人（90 条匿名候选）盲评已解盲回写主报告与 SVG 图表（0 越界引用） |
 | 真实 Ubuntu 部署与运行核对 | A | 双主机部署与跨节点 YARN 并行、任务取消/重试已验收 | `hg-1`+`hg-2` 双 DataNode（0 缺失块）/双 NodeManager 完成 92 训练 + 21 导出跨节点并行取证（`parallelExecution=proven`）与 ZK 精确取消/重试实测；两主机按受限控制面记录，三节点 HA 演练留作三机环境扩展 |
 | 双端安装包与真实使用验收 | B | 双端全新启动与 `v1.0.0→v1.2.0` 覆盖升级已验通 | Windows 独立启动及真实 `user_version=2→3` 无损升级、Android 模拟器 `versionCode=2→3` 原地覆盖升级（`user_version=4`，0 崩溃）均已通过；带正式 HTTPS 地址的重构包、真机联网登录、指定仓库 Star 与真实端上回流待外部环境验证 |
 | 项目说明与最终材料整理 | B 主责 / A 配合 | 首版交付与方案文档已对齐 | 补齐三轮方案/契约/任务表/服务端数据规范入库，更新真实目录实验报告与本机就绪验收记录 |

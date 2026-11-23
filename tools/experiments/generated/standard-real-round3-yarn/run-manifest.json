@@ -1,6 +1,6 @@
 {
-  "executedAt": "2026-11-20T16:25:19Z",
-  "gitCommit": "5694818452a6962436c87595440b4d95d48df6ac",
+  "executedAt": "2026-11-23T02:43:26Z",
+  "gitCommit": "9cd60313f3ac5cedeb92b1a0f9a4ae8584893138",
   "datasetVersion": "hg-standard-real-20261103",
   "catalogMode": "real",
   "behaviorSourceMode": "deterministic_rules",
@@ -33,6 +33,7 @@
     "sampleFile": "blind-review-sample.jsonl",
     "keyFile": "blind-review-key.json",
     "worksheetFile": "blind-review-worksheet.md",
-    "auditTemplateFile": "blind-review-audit-template.jsonl"
+    "auditTemplateFile": "blind-review-audit-template.jsonl",
+    "preservedForAudit": true
   }
 }

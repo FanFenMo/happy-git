@@ -1,0 +1,140 @@
+{
+  "seed": 42,
+  "sampleCount": 15,
+  "methodsCompared": [
+    "baseline_local_v1",
+    "baseline_mr_fixed_v1",
+    "learned_model",
+    "learned_retrained",
+    "llm_codex_sol_xhigh",
+    "llm_reference"
+  ],
+  "categories": [
+    "grounded",
+    "over_inferred",
+    "nonexistent_citation",
+    "insufficient_evidence"
+  ],
+  "mappingBySubject": {
+    "subj_standard_0164": {
+      "method_A": "learned_retrained",
+      "method_B": "llm_reference",
+      "method_C": "baseline_local_v1",
+      "method_D": "learned_model",
+      "method_E": "llm_codex_sol_xhigh",
+      "method_F": "baseline_mr_fixed_v1"
+    },
+    "subj_standard_0172": {
+      "method_A": "learned_model",
+      "method_B": "baseline_local_v1",
+      "method_C": "llm_codex_sol_xhigh",
+      "method_D": "baseline_mr_fixed_v1",
+      "method_E": "llm_reference",
+      "method_F": "learned_retrained"
+    },
+    "subj_standard_0173": {
+      "method_A": "baseline_local_v1",
+      "method_B": "llm_reference",
+      "method_C": "learned_retrained",
+      "method_D": "learned_model",
+      "method_E": "llm_codex_sol_xhigh",
+      "method_F": "baseline_mr_fixed_v1"
+    },
+    "subj_standard_0178": {
+      "method_A": "baseline_mr_fixed_v1",
+      "method_B": "llm_reference",
+      "method_C": "baseline_local_v1",
+      "method_D": "learned_model",
+      "method_E": "learned_retrained",
+      "method_F": "llm_codex_sol_xhigh"
+    },
+    "subj_standard_0474": {
+      "method_A": "baseline_mr_fixed_v1",
+      "method_B": "learned_model",
+      "method_C": "llm_reference",
+      "method_D": "baseline_local_v1",
+      "method_E": "learned_retrained",
+      "method_F": "llm_codex_sol_xhigh"
+    },
+    "subj_standard_0475": {
+      "method_A": "llm_codex_sol_xhigh",
+      "method_B": "baseline_local_v1",
+      "method_C": "learned_model",
+      "method_D": "learned_retrained",
+      "method_E": "llm_reference",
+      "method_F": "baseline_mr_fixed_v1"
+    },
+    "subj_standard_0573": {
+      "method_A": "baseline_local_v1",
+      "method_B": "baseline_mr_fixed_v1",
+      "method_C": "learned_model",
+      "method_D": "llm_codex_sol_xhigh",
+      "method_E": "llm_reference",
+      "method_F": "learned_retrained"
+    },
+    "subj_standard_0578": {
+      "method_A": "learned_retrained",
+      "method_B": "baseline_mr_fixed_v1",
+      "method_C": "learned_model",
+      "method_D": "llm_reference",
+      "method_E": "baseline_local_v1",
+      "method_F": "llm_codex_sol_xhigh"
+    },
+    "subj_standard_0579": {
+      "method_A": "learned_retrained",
+      "method_B": "llm_codex_sol_xhigh",
+      "method_C": "baseline_mr_fixed_v1",
+      "method_D": "baseline_local_v1",
+      "method_E": "learned_model",
+      "method_F": "llm_reference"
+    },
+    "subj_standard_0678": {
+      "method_A": "llm_codex_sol_xhigh",
+      "method_B": "llm_reference",
+      "method_C": "learned_model",
+      "method_D": "baseline_local_v1",
+      "method_E": "learned_retrained",
+      "method_F": "baseline_mr_fixed_v1"
+    },
+    "subj_standard_0746": {
+      "method_A": "learned_retrained",
+      "method_B": "llm_reference",
+      "method_C": "learned_model",
+      "method_D": "baseline_local_v1",
+      "method_E": "baseline_mr_fixed_v1",
+      "method_F": "llm_codex_sol_xhigh"
+    },
+    "subj_standard_0748": {
+      "method_A": "learned_model",
+      "method_B": "learned_retrained",
+      "method_C": "baseline_local_v1",
+      "method_D": "baseline_mr_fixed_v1",
+      "method_E": "llm_codex_sol_xhigh",
+      "method_F": "llm_reference"
+    },
+    "subj_standard_0749": {
+      "method_A": "learned_retrained",
+      "method_B": "llm_reference",
+      "method_C": "learned_model",
+      "method_D": "baseline_local_v1",
+      "method_E": "llm_codex_sol_xhigh",
+      "method_F": "baseline_mr_fixed_v1"
+    },
+    "subj_standard_0835": {
+      "method_A": "llm_reference",
+      "method_B": "learned_model",
+      "method_C": "baseline_mr_fixed_v1",
+      "method_D": "llm_codex_sol_xhigh",
+      "method_E": "baseline_local_v1",
+      "method_F": "learned_retrained"
+    },
+    "subj_standard_0938": {
+      "method_A": "learned_retrained",
+      "method_B": "llm_codex_sol_xhigh",
+      "method_C": "learned_model",
+      "method_D": "llm_reference",
+      "method_E": "baseline_local_v1",
+      "method_F": "baseline_mr_fixed_v1"
+    }
+  }
+}

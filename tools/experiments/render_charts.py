@@ -32,13 +32,31 @@ def _render_grouped_bar_svg(
 ) -> str:
     pad_left = 68
     pad_right = 28
-    pad_top = 86
     pad_bottom = 86
     chart_w = max(200, width - pad_left - pad_right)
-    chart_h = max(140, height - pad_top - pad_bottom)
+
+    # Pre-layout wrapped legend rows so 6+ series never overflow SVG width
+    legend_items: List[Tuple[float, float, str, str]] = []
+    max_legend_x = width - pad_right
+    lx = float(pad_left)
+    ly = 58.0
+    row_height = 20.0
+    for idx, (name, _) in enumerate(series):
+        color = PALETTE[idx % len(PALETTE)]
+        item_w = max(125.0, len(name) * 6.8 + 34.0)
+        if lx > pad_left and lx + item_w > max_legend_x:
+            lx = float(pad_left)
+            ly += row_height
+        legend_items.append((lx, ly, color, name))
+        lx += item_w
+
+    legend_rows = max(1, int(round((ly - 58.0) / row_height)) + 1)
+    pad_top = 68 + legend_rows * int(row_height)
+    effective_height = max(height, pad_top + 248 + pad_bottom)
+    chart_h = max(140, effective_height - pad_top - pad_bottom)
 
     lines: List[str] = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{effective_height}" viewBox="0 0 {width} {effective_height}">',
         '<rect width="100%" height="100%" fill="#ffffff"/>',
         '<style>'
         'text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; fill: #0f172a; }'
@@ -52,13 +70,9 @@ def _render_grouped_bar_svg(
         f'<text x="{pad_left}" y="46" class="sub">{_esc(subtitle)}</text>',
     ]
 
-    # Legend row
-    lx = pad_left
-    for idx, (name, _) in enumerate(series):
-        color = PALETTE[idx % len(PALETTE)]
-        lines.append(f'<rect x="{lx}" y="58" width="12" height="12" rx="2" fill="{color}"/>')
-        lines.append(f'<text x="{lx + 17}" y="68" class="legend">{_esc(name)}</text>')
-        lx += max(125, len(name) * 8 + 38)
+    for item_x, item_y, color, name in legend_items:
+        lines.append(f'<rect x="{item_x:.1f}" y="{item_y:.1f}" width="12" height="12" rx="2" fill="{color}"/>')
+        lines.append(f'<text x="{item_x + 17:.1f}" y="{item_y + 10:.1f}" class="legend">{_esc(name)}</text>')
 
     # Gridlines & Y-axis ticks (0.0 to 1.0)
     for step in range(6):

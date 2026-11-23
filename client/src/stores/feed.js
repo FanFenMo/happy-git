@@ -96,7 +96,7 @@ export const useFeedStore = defineStore('feed', {
       }
     },
 
-    async refreshRecommendations(retryCount = 0, { advanceSearch = false } = {}) {
+    async refreshRecommendations(retryCount = 0, { advanceSearch = false, forceRefresh = false } = {}) {
       const userStore = useUserStore()
       if (!userStore.canWriteGitHub && !userStore.hasAccount) {
         this.activeTab = 'trending'
@@ -177,7 +177,7 @@ export const useFeedStore = defineStore('feed', {
           searchSourceProfile,
           advanceSearch ? [] : this.recentQueryStrings,
           Date.now(),
-          { maxQueries: 4, maxTotalPages: 8, pageCursors: this.searchPageCursors }
+          { maxQueries: 4, maxTotalPages: 4, pageCursors: this.searchPageCursors }
         )
         const queryPlan = Array.isArray(planResult)
           ? planResult
@@ -185,7 +185,10 @@ export const useFeedStore = defineStore('feed', {
 
         if (queryPlan.length > 0) {
           try {
-            const discoveryRes = await refreshPersonalizedCandidates(queryPlan, { round: this.searchRound })
+            const discoveryRes = await refreshPersonalizedCandidates(queryPlan, {
+              round: this.searchRound,
+              forceRefresh: Boolean(forceRefresh || advanceSearch)
+            })
             if (isStaleRun()) return
             const queryReports = Array.isArray(discoveryRes?.queries) ? discoveryRes.queries : []
             const nextCursors = { ...this.searchPageCursors }

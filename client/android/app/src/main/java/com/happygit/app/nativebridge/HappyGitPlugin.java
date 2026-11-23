@@ -2,6 +2,7 @@ package com.happygit.app.nativebridge;
 
 import android.content.Intent;
 import android.net.Uri;
+import android.webkit.CookieManager;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -11,9 +12,21 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @CapacitorPlugin(name = "HappyGit")
 public class HappyGitPlugin extends Plugin {
@@ -28,6 +41,11 @@ public class HappyGitPlugin extends Plugin {
     private CloudService cloudService;
 
     private final ExecutorService backgroundExecutor = Executors.newFixedThreadPool(4);
+    private final ExecutorService searchExecutor = Executors.newFixedThreadPool(4);
+    private static final long DISCOVERY_CACHE_TTL_MS = 2L * 60L * 60L * 1000L;
+    private static final Pattern SCRIPT_TAG_PATTERN = Pattern.compile("<script\\b([^>]*)>([\\s\\S]*?)</script>", Pattern.CASE_INSENSITIVE);
+    private static final Pattern TITLE_TAG_PATTERN = Pattern.compile("<title[^>]*>([\\s\\S]*?)</title>", Pattern.CASE_INSENSITIVE);
+    private static final Pattern HTML_TAG_PATTERN = Pattern.compile("<[^>]+>");
 
     @Override
     public void load() {
@@ -300,18 +318,32 @@ public class HappyGitPlugin extends Plugin {
                     }
                     int maxQueries = 4;
                     int maxTotalPages = 8;
-                    int pagesUsed = 0;
-                    java.util.Set<String> seen = new java.util.HashSet<>();
-                    JSONArray candidates = new JSONArray();
-                    JSONArray queryReports = new JSONArray();
+                    boolean forceRefresh = payload.optBoolean("forceRefresh", false);
 
+                    List<JSONObject> plannedQueries = new ArrayList<>();
+                    List<Integer> plannedPageBudgets = new ArrayList<>();
+                    int budgetLeft = maxTotalPages;
                     if (queryPlan != null) {
                         for (int i = 0; i < Math.min(queryPlan.length(), maxQueries); i++) {
+                            if (budgetLeft <= 0) break;
                             JSONObject q = queryPlan.getJSONObject(i);
+                            int reqPages = Math.max(1, Math.min(2, q.optInt("maxPages", 1)));
+                            int allowed = Math.min(reqPages, budgetLeft);
+                            budgetLeft -= allowed;
+                            plannedQueries.add(q);
+                            plannedPageBudgets.add(allowed);
+                        }
+                    }
+
+                    final AtomicBoolean rateLimited = new AtomicBoolean(false);
+                    List<Future<JSONObject>> futures = new ArrayList<>();
+                    for (int i = 0; i < plannedQueries.size(); i++) {
+                        final JSONObject q = plannedQueries.get(i);
+                        final int allowedPages = plannedPageBudgets.get(i);
+                        futures.add(searchExecutor.submit(() -> {
                             String queryStr = q.optString("query", "stars:>100");
                             String sort = "updated".equals(q.optString("sort", "stars")) ? "updated" : "stars";
                             int startPage = Math.max(1, q.optInt("startPage", 1));
-                            int maxPages = Math.max(1, Math.min(2, q.optInt("maxPages", 1)));
 
                             JSONObject report = new JSONObject();
                             report.put("id", q.optString("id", ""));
@@ -319,40 +351,70 @@ public class HappyGitPlugin extends Plugin {
                             report.put("sort", sort);
                             report.put("startPage", startPage);
                             int pagesFetched = 0;
-                            int itemCount = 0;
+                            int cacheHits = 0;
                             Integer nextPageNum = null;
                             boolean exhausted = false;
+                            JSONArray collected = new JSONArray();
 
-                            for (int page = startPage; page < startPage + maxPages && pagesUsed < maxTotalPages; page++) {
+                            for (int page = startPage; page < startPage + allowedPages; page++) {
+                                if (rateLimited.get()) break;
+                                String cacheKey = "search:" + queryStr + ":" + sort + ":p" + page;
+
+                                if (!forceRefresh && accountId != null && !accountId.isEmpty()) {
+                                    try {
+                                        JSONObject cached = localRepository.readDiscoveryCache(accountId, cacheKey);
+                                        if (cached != null) {
+                                            JSONArray cachedItems = cached.optJSONArray("items");
+                                            if (cachedItems != null && cachedItems.length() > 0) {
+                                                pagesFetched++;
+                                                cacheHits++;
+                                                for (int j = 0; j < cachedItems.length(); j++) {
+                                                    JSONObject item = cachedItems.optJSONObject(j);
+                                                    if (item != null) collected.put(item);
+                                                }
+                                                nextPageNum = page + 1;
+                                                continue;
+                                            }
+                                        }
+                                    } catch (Exception ignored) {}
+                                }
+
                                 final String url = "https://github.com/search?q=" + URLEncoder.encode(queryStr, "UTF-8")
                                         + "&type=repositories&s=" + URLEncoder.encode(sort, "UTF-8") + "&o=desc"
                                         + (page > 1 ? "&p=" + page : "");
                                 try {
-                                    JSONObject sRes = scheduler.withPageLease(contextId, "discovery", () -> {
-                                        pageExecutor.navigate(url, 25000);
-                                        return pageExecutor.executeScript("readSearchResults", null);
-                                    });
-                                    pagesUsed++;
+                                    JSONObject sRes = fastFetchGitHubSearch(url, page);
+                                    if (sRes == null) {
+                                        final int pageArg = page;
+                                        sRes = scheduler.withPageLease(contextId, "discovery", () -> {
+                                            pageExecutor.navigate(url, 25000);
+                                            JSONObject args = new JSONObject();
+                                            args.put("pageSeq", pageArg);
+                                            return pageExecutor.executeScript("readSearchResults", args);
+                                        });
+                                    }
                                     pagesFetched++;
-                                    JSONArray found = sRes.optJSONArray("items");
-                                    String nextUrl = sRes.optString("nextUrl", "");
+                                    JSONArray found = sRes != null ? sRes.optJSONArray("items") : null;
+                                    String nextUrl = sRes != null ? sRes.optString("nextUrl", "") : "";
+                                    JSONArray normalizedBatch = new JSONArray();
                                     if (found != null) {
                                         for (int j = 0; j < found.length(); j++) {
-                                            JSONObject item = found.getJSONObject(j);
-                                            String key = item.optString("repoId", item.optString("canonicalKey", ""));
-                                            if (!key.isEmpty() && seen.add(key)) {
-                                                candidates.put(item);
-                                                itemCount++;
+                                            JSONObject item = normalizeSearchItem(found.optJSONObject(j), q, page);
+                                            if (item != null) {
+                                                normalizedBatch.put(item);
+                                                collected.put(item);
                                             }
                                         }
-                                        localRepository.saveDiscoveryCache(
-                                                accountId,
-                                                "search:" + queryStr + ":" + sort + ":p" + page,
-                                                q.toString(),
-                                                found.toString(),
-                                                System.currentTimeMillis(),
-                                                System.currentTimeMillis() + 86400000L
-                                        );
+                                        if (accountId != null && !accountId.isEmpty()) {
+                                            localRepository.saveDiscoveryCache(
+                                                    accountId,
+                                                    cacheKey,
+                                                    q.toString(),
+                                                    normalizedBatch.toString(),
+                                                    System.currentTimeMillis(),
+                                                    System.currentTimeMillis() + DISCOVERY_CACHE_TTL_MS
+                                            );
+                                        }
                                     }
                                     if (!nextUrl.isEmpty() && !"null".equals(nextUrl)) {
                                         nextPageNum = page + 1;
@@ -364,18 +426,50 @@ public class HappyGitPlugin extends Plugin {
                                 } catch (Exception err) {
                                     report.put("error", err.getMessage());
                                     if (err.getMessage() != null && err.getMessage().contains("RATE_LIMITED")) {
-                                        pagesUsed = maxTotalPages;
+                                        rateLimited.set(true);
                                     }
                                     break;
                                 }
                             }
                             report.put("pagesFetched", pagesFetched);
-                            report.put("itemCount", itemCount);
+                            report.put("cacheHits", cacheHits);
+                            report.put("itemCount", 0);
                             report.put("nextPage", nextPageNum != null ? nextPageNum : JSONObject.NULL);
                             report.put("exhausted", exhausted);
-                            queryReports.put(report);
-                        }
+
+                            JSONObject bundle = new JSONObject();
+                            bundle.put("report", report);
+                            bundle.put("items", collected);
+                            return bundle;
+                        }));
                     }
+
+                    int pagesUsed = 0;
+                    java.util.Set<String> seen = new java.util.HashSet<>();
+                    JSONArray candidates = new JSONArray();
+                    JSONArray queryReports = new JSONArray();
+                    for (Future<JSONObject> f : futures) {
+                        JSONObject bundle = f.get();
+                        JSONObject report = bundle.getJSONObject("report");
+                        JSONArray items = bundle.getJSONArray("items");
+                        pagesUsed += report.optInt("pagesFetched", 0);
+                        int added = 0;
+                        for (int j = 0; j < items.length(); j++) {
+                            JSONObject item = items.optJSONObject(j);
+                            if (item == null) continue;
+                            String key = item.optString("repoId", "");
+                            if (key.isEmpty() || "null".equals(key)) {
+                                key = item.optString("canonicalKey", "");
+                            }
+                            if (!key.isEmpty() && seen.add(key)) {
+                                candidates.put(item);
+                                added++;
+                            }
+                        }
+                        report.put("itemCount", added);
+                        queryReports.put(report);
+                    }
+
                     JSObject res = new JSObject();
                     res.put("candidates", new JSArray(candidates.toString()));
                     res.put("count", candidates.length());
@@ -642,8 +736,215 @@ public class HappyGitPlugin extends Plugin {
         call.resolve(envelope);
     }
 
+    private JSONObject fastFetchGitHubSearch(String urlStr, int pageSeq) throws Exception {
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(urlStr);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(12000);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36");
+            try {
+                String cookie = CookieManager.getInstance().getCookie("https://github.com");
+                if (cookie != null && !cookie.isEmpty()) {
+                    conn.setRequestProperty("Cookie", cookie);
+                }
+            } catch (Exception ignored) {}
+
+            int status = conn.getResponseCode();
+            if (status == 429) {
+                throw new Exception("RATE_LIMITED");
+            }
+            if (status < 200 || status >= 300) {
+                return null;
+            }
+
+            StringBuilder sb = new StringBuilder();
+            try (InputStream is = conn.getInputStream();
+                 BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+                char[] buf = new char[8192];
+                int n;
+                while ((n = reader.read(buf)) != -1) {
+                    sb.append(buf, 0, n);
+                }
+            }
+            String html = sb.toString();
+            Matcher titleMatcher = TITLE_TAG_PATTERN.matcher(html);
+            if (titleMatcher.find()) {
+                String title = titleMatcher.group(1);
+                if (title != null && (title.contains("Rate limit") || title.contains("Whoa there!"))) {
+                    throw new Exception("RATE_LIMITED");
+                }
+            }
+
+            Matcher m = SCRIPT_TAG_PATTERN.matcher(html);
+            while (m.find()) {
+                String attrs = m.group(1);
+                String body = m.group(2);
+                if (attrs == null || body == null) continue;
+                if (!attrs.contains("application/json") || !attrs.contains("embeddedData")) continue;
+                if (!body.contains("blackbirdSearchRoute") && !body.contains("\"hl_name\"")) continue;
+                try {
+                    JSONObject parsed = new JSONObject(body);
+                    JSONObject payload = parsed.optJSONObject("payload");
+                    if (payload == null) continue;
+                    JSONObject route = payload.optJSONObject("blackbirdSearchRoute");
+                    if (route == null) route = payload;
+                    JSONArray results = route.optJSONArray("results");
+                    if (results == null) continue;
+
+                    JSONArray items = new JSONArray();
+                    java.util.Set<String> seenKeys = new java.util.HashSet<>();
+                    for (int i = 0; i < results.length(); i++) {
+                        JSONObject r = results.optJSONObject(i);
+                        if (r == null) continue;
+                        JSONObject repoWrapper = r.optJSONObject("repo");
+                        JSONObject repoObj = repoWrapper != null ? repoWrapper.optJSONObject("repository") : null;
+                        String fullName = "";
+                        if (repoObj != null && !repoObj.optString("owner_login", "").isEmpty() && !repoObj.optString("name", "").isEmpty()) {
+                            fullName = repoObj.optString("owner_login") + "/" + repoObj.optString("name");
+                        } else if (!r.optString("hl_name", "").isEmpty()) {
+                            fullName = cleanHtmlSnippet(r.optString("hl_name"));
+                        }
+                        if (fullName.isEmpty() || !fullName.contains("/")) continue;
+                        String[] parts = fullName.split("/");
+                        if (parts.length < 2) continue;
+                        String normFull = parts[0] + "/" + parts[1];
+                        String key = normFull.toLowerCase();
+                        if (!seenKeys.add(key)) continue;
+
+                        String desc = cleanHtmlSnippet(r.optString("hl_trunc_description", r.optString("description", "")));
+                        JSONObject item = new JSONObject();
+                        String idStr = r.has("id") && !r.isNull("id") ? String.valueOf(r.opt("id"))
+                                : (repoObj != null && repoObj.has("id") && !repoObj.isNull("id") ? String.valueOf(repoObj.opt("id")) : "");
+                        item.put("repoId", idStr.isEmpty() ? JSONObject.NULL : idStr);
+                        item.put("canonicalKey", key);
+                        item.put("owner", parts[0]);
+                        item.put("name", parts[1]);
+                        item.put("fullName", normFull);
+                        item.put("htmlUrl", "https://github.com/" + normFull);
+                        item.put("description", desc.isEmpty() ? JSONObject.NULL : desc);
+                        item.put("purposeCue", desc.isEmpty() ? JSONObject.NULL : desc);
+                        item.put("purposeSource", desc.isEmpty() ? JSONObject.NULL : "description");
+                        String lang = r.optString("language", "").trim();
+                        item.put("primaryLanguage", lang.isEmpty() || "null".equals(lang) ? JSONObject.NULL : lang);
+                        if (r.has("followers") && !r.isNull("followers")) {
+                            item.put("starCount", r.optLong("followers", 0));
+                        } else {
+                            item.put("starCount", JSONObject.NULL);
+                        }
+                        JSONArray topicsOut = new JSONArray();
+                        JSONArray rawTopics = r.optJSONArray("topics");
+                        if (rawTopics != null) {
+                            for (int t = 0; t < rawTopics.length(); t++) {
+                                Object tv = rawTopics.opt(t);
+                                String ts = tv instanceof JSONObject ? ((JSONObject) tv).optString("name", "") : String.valueOf(tv);
+                                ts = ts.trim().replaceFirst("^#", "");
+                                if (!ts.isEmpty() && !"null".equals(ts)) topicsOut.put(ts);
+                            }
+                        }
+                        item.put("topics", topicsOut);
+                        String upd = repoObj != null ? repoObj.optString("updated_at", "") : r.optString("updated_at", "");
+                        item.put("updatedAt", upd.isEmpty() || "null".equals(upd) ? JSONObject.NULL : upd);
+                        items.put(item);
+                    }
+
+                    int pageCount = route.optInt("page_count", 0);
+                    JSONObject out = new JSONObject();
+                    out.put("items", items);
+                    out.put("pageSeq", pageSeq);
+                    if (items.length() > 0 && pageCount > pageSeq) {
+                        out.put("nextUrl", urlStr + "&next=" + (pageSeq + 1));
+                        out.put("completion", "more");
+                    } else {
+                        out.put("nextUrl", JSONObject.NULL);
+                        out.put("completion", "end");
+                    }
+                    return out;
+                } catch (Exception ignored) {}
+            }
+            return null;
+        } catch (Exception e) {
+            if (e.getMessage() != null && e.getMessage().contains("RATE_LIMITED")) {
+                throw e;
+            }
+            return null;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private JSONObject normalizeSearchItem(JSONObject raw, JSONObject q, int page) {
+        if (raw == null) return null;
+        try {
+            JSONObject item = new JSONObject(raw.toString());
+            String fullName = item.optString("fullName", "").trim();
+            if (fullName.isEmpty() || !fullName.contains("/")) return null;
+            if (item.optString("canonicalKey", "").isEmpty()) {
+                item.put("canonicalKey", fullName.toLowerCase());
+            }
+            String desc = item.optString("description", "").trim();
+            if (!desc.isEmpty() && !"null".equals(desc)) {
+                if (item.optString("purposeCue", "").isEmpty() || "null".equals(item.optString("purposeCue", ""))) {
+                    item.put("purposeCue", desc);
+                    item.put("purposeSource", "description");
+                }
+            }
+            if (item.has("starCount") && item.opt("starCount") instanceof String) {
+                Long parsedStars = parseCountText(item.optString("starCount", ""));
+                item.put("starCount", parsedStars != null ? parsedStars : JSONObject.NULL);
+            }
+            JSONObject discBy = new JSONObject();
+            discBy.put("queryId", q.has("id") ? q.opt("id") : JSONObject.NULL);
+            discBy.put("directionId", q.has("directionId") ? q.opt("directionId") : JSONObject.NULL);
+            discBy.put("generationId", q.has("generationId") ? q.opt("generationId") : JSONObject.NULL);
+            discBy.put("page", page);
+            item.put("discoveredBy", discBy);
+            return item;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static Long parseCountText(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim().toLowerCase().replace(",", "");
+        if (s.isEmpty() || "null".equals(s)) return null;
+        try {
+            if (s.endsWith("k")) {
+                return Math.round(Double.parseDouble(s.substring(0, s.length() - 1)) * 1000.0);
+            }
+            if (s.endsWith("m")) {
+                return Math.round(Double.parseDouble(s.substring(0, s.length() - 1)) * 1000000.0);
+            }
+            return Long.parseLong(s);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String cleanHtmlSnippet(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        String noTags = HTML_TAG_PATTERN.matcher(raw).replaceAll("");
+        return noTags
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&apos;", "'")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&nbsp;", " ")
+                .replace("&amp;", "&")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
     @Override
     protected void handleOnDestroy() {
+        searchExecutor.shutdownNow();
+        backgroundExecutor.shutdownNow();
         if (webViewHost != null) {
             webViewHost.destroy();
         }

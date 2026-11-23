@@ -9,8 +9,23 @@ try {
 } catch (_) {}
 const { CloudService } = require('./cloud-service.cjs')
 
+let sharedSearchModules = null
+async function getSharedSearchModules() {
+  if (!sharedSearchModules) {
+    const [parserMod, normMod] = await Promise.all([
+      import('../shared/github-page/search-html-parser.js'),
+      import('../shared/github-page/normalize.js')
+    ])
+    sharedSearchModules = {
+      parseGitHubSearchHtml: parserMod.parseGitHubSearchHtml,
+      normalizeRepository: normMod.normalizeRepository
+    }
+  }
+  return sharedSearchModules
+}
+
 class IpcRouter {
-  constructor({ sessionManager, accountSyncService, starService, cloudService = null, database, browser, scheduler, pageExecutorFactory, routes }) {
+  constructor({ sessionManager, accountSyncService, starService, cloudService = null, database, browser, scheduler, pageExecutorFactory, routes, fastSearchFetcher = null }) {
     this.sessionManager = sessionManager
     this.accountSyncService = accountSyncService
     this.starService = starService
@@ -19,6 +34,7 @@ class IpcRouter {
     this.scheduler = scheduler
     this.pageExecutorFactory = pageExecutorFactory
     this.routes = routes
+    this.fastSearchFetcher = fastSearchFetcher
     this.cloudService = cloudService || new CloudService({ database })
   }
 
@@ -350,60 +366,102 @@ class IpcRouter {
       const queryPlan = Array.isArray(rawPlan)
         ? rawPlan
         : (Array.isArray(rawPlan?.queryPlan) ? rawPlan.queryPlan : [])
-      // 有界搜索：单轮最多 4 个查询、总计最多 8 页；结果按 repoId/canonicalKey 去重并保留完整 DTO
+      // 有界并发搜索：单轮最多 4 个查询、总计最多 8 页；优先命中未过期缓存，未命中时并发直拉搜索页内嵌 JSON，失败自动回退隐藏浏览器
       const MAX_QUERIES = 4
       const MAX_TOTAL_PAGES = 8
-      const seen = new Set()
-      const candidates = []
-      const queryReports = []
-      let pagesUsed = 0
+      const CACHE_TTL_MS = 2 * 60 * 60 * 1000
+      const forceRefresh = Boolean(payload.forceRefresh)
 
+      // 预先为最多 4 条查询分配总页数配额，避免并发越界
+      const plannedTasks = []
+      let budgetLeft = MAX_TOTAL_PAGES
       for (const q of queryPlan.slice(0, MAX_QUERIES)) {
         const queryStr = q.query || (q.topics || []).map(t => `topic:${t}`).join(' ')
-        if (!queryStr) continue
+        if (!queryStr || budgetLeft <= 0) continue
         const sort = q.sort === 'updated' ? 'updated' : 'stars'
         const startPage = Math.max(1, Number(q.startPage || 1))
-        const maxPages = Math.max(1, Math.min(2, Number(q.maxPages || 1)))
-        const report = { id: q.id || null, query: queryStr, sort, startPage, pagesFetched: 0, itemCount: 0, nextPage: null, exhausted: false, error: null }
+        const requestedPages = Math.max(1, Math.min(2, Number(q.maxPages || 1)))
+        const allowedPages = Math.min(requestedPages, budgetLeft)
+        budgetLeft -= allowedPages
+        plannedTasks.push({ q, queryStr, sort, startPage, allowedPages })
+      }
 
-        for (let page = startPage; page < startPage + maxPages && pagesUsed < MAX_TOTAL_PAGES; page++) {
+      let rateLimited = false
+      const perQueryResults = await Promise.all(plannedTasks.map(async ({ q, queryStr, sort, startPage, allowedPages }) => {
+        const report = {
+          id: q.id || null,
+          query: queryStr,
+          sort,
+          startPage,
+          pagesFetched: 0,
+          cacheHits: 0,
+          itemCount: 0,
+          nextPage: null,
+          exhausted: false,
+          error: null
+        }
+        const collectedItems = []
+
+        for (let page = startPage; page < startPage + allowedPages; page++) {
+          if (rateLimited) break
+          const cacheKey = `search:${queryStr}:${sort}:p${page}`
+
+          // 1. 普通刷新优先命中未过期缓存（毫秒级返回）
+          if (!forceRefresh && context.accountId) {
+            try {
+              const cached = await this.database.callDatabase('readDiscoveryCache', {
+                accountId: context.accountId,
+                queryKey: cacheKey
+              })
+              if (cached && Array.isArray(cached.items) && cached.items.length > 0) {
+                report.pagesFetched += 1
+                report.cacheHits += 1
+                const cachedTagged = cached.items.filter(Boolean).map(item => ({
+                  ...item,
+                  discoveredBy: { queryId: q.id || null, directionId: q.directionId || null, generationId: q.generationId || null, page }
+                }))
+                collectedItems.push(...cachedTagged)
+                report.nextPage = page + 1
+                continue
+              }
+            } catch (_) {}
+          }
+
+          // 2. 并发直拉搜索页 HTML 解析内嵌 JSON；不可用或结构变化时自动回退隐藏浏览器
           const url = this.routes.searchRepositoriesUrl(queryStr, sort, page)
           try {
-            const searchRes = await this.scheduler.enqueue({
-              taskId: `disc_search_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-              contextId: context.contextId,
-              kind: 'discovery',
-              taskFn: async () => {
-                const workPage = this.browser.getOrCreateWorkPage()
-                const executor = this.pageExecutorFactory(workPage.webContents)
-                return executor.runTask({ scriptId: 'readSearchResults', url, args: { pageSeq: page } })
-              }
-            })
-            pagesUsed += 1
+            let searchRes = await this.tryFastFetchSearchPage(url, page)
+            if (!searchRes) {
+              searchRes = await this.scheduler.enqueue({
+                taskId: `disc_search_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                contextId: context.contextId,
+                kind: 'discovery',
+                taskFn: async () => {
+                  const workPage = this.browser.getOrCreateWorkPage()
+                  const executor = this.pageExecutorFactory(workPage.webContents)
+                  return executor.runTask({ scriptId: 'readSearchResults', url, args: { pageSeq: page } })
+                }
+              })
+            }
+
             report.pagesFetched += 1
             const items = (searchRes?.items || []).filter(Boolean).map(item => ({
               ...item,
               discoveredBy: { queryId: q.id || null, directionId: q.directionId || null, generationId: q.generationId || null, page }
             }))
-            const fresh = []
-            for (const item of items) {
-              const key = item.repoId || item.canonicalKey
-              if (!key || seen.has(key)) continue
-              seen.add(key)
-              fresh.push(item)
-            }
-            candidates.push(...fresh)
-            report.itemCount += fresh.length
+            collectedItems.push(...items)
             report.nextPage = searchRes?.nextUrl ? page + 1 : null
 
-            await this.database.callDatabase('saveDiscoveryCache', {
-              accountId: context.accountId,
-              queryKey: `search:${queryStr}:${sort}:p${page}`,
-              queryJson: JSON.stringify({ ...q, page }),
-              resultJson: JSON.stringify(items),
-              fetchedAt: Date.now(),
-              expiresAt: Date.now() + 24 * 60 * 60 * 1000
-            })
+            if (context.accountId) {
+              await this.database.callDatabase('saveDiscoveryCache', {
+                accountId: context.accountId,
+                queryKey: cacheKey,
+                queryJson: JSON.stringify({ ...q, page }),
+                resultJson: JSON.stringify(items),
+                fetchedAt: Date.now(),
+                expiresAt: Date.now() + CACHE_TTL_MS
+              })
+            }
             if (!searchRes?.nextUrl) {
               report.exhausted = true
               break
@@ -411,9 +469,30 @@ class IpcRouter {
           } catch (err) {
             report.error = err.code || err.message
             console.warn('[IpcRouter] 候选查询异常:', err.message)
-            if (err.code === 'RATE_LIMITED') pagesUsed = MAX_TOTAL_PAGES
+            if (err.code === 'RATE_LIMITED') {
+              rateLimited = true
+            }
             break
           }
+        }
+
+        return { report, collectedItems }
+      }))
+
+      // 按原查询顺序确定性去重汇总
+      const seen = new Set()
+      const candidates = []
+      const queryReports = []
+      let pagesUsed = 0
+
+      for (const { report, collectedItems } of perQueryResults) {
+        pagesUsed += report.pagesFetched
+        for (const item of collectedItems) {
+          const key = item.repoId || item.canonicalKey
+          if (!key || seen.has(key)) continue
+          seen.add(key)
+          candidates.push(item)
+          report.itemCount += 1
         }
         queryReports.push(report)
       }
@@ -429,6 +508,72 @@ class IpcRouter {
     }
 
     return { items: [], count: 0 }
+  }
+
+  /**
+   * 极速搜索页拉取：复用 Electron 专用 GitHub 会话的 session.fetch（自动继承系统代理与登录态 Cookie），
+   * 直接解析原始 HTML 中的 react-app.embeddedData，无需渲染 JS/CSS/头像。
+   * 返回 null 时调用方自动回退至隐藏浏览器 PageExecutor。
+   */
+  async tryFastFetchSearchPage(url, pageSeq = 1) {
+    if (typeof this.fastSearchFetcher === 'function') {
+      return this.fastSearchFetcher(url, pageSeq)
+    }
+
+    const sess = this.browser?.session || this.browser?.workWindow?.webContents?.session || null
+    if (!sess || typeof sess.fetch !== 'function') {
+      return null
+    }
+
+    try {
+      const controller = typeof AbortController === 'function' ? new AbortController() : null
+      const timer = controller ? setTimeout(() => controller.abort(), 12000) : null
+      let response
+      try {
+        response = await sess.fetch(url, {
+          method: 'GET',
+          headers: {
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+          },
+          signal: controller ? controller.signal : undefined
+        })
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+
+      if (!response) return null
+      if (response.status === 429) {
+        const err = new Error('RATE_LIMITED')
+        err.code = 'RATE_LIMITED'
+        throw err
+      }
+      if (!response.ok) return null
+
+      const html = await response.text()
+      const { parseGitHubSearchHtml, normalizeRepository } = await getSharedSearchModules()
+      const parsed = parseGitHubSearchHtml(html, { pageSeq, requestUrl: url })
+      if (!parsed) return null
+      if (parsed.rateLimited) {
+        const err = new Error('RATE_LIMITED')
+        err.code = 'RATE_LIMITED'
+        throw err
+      }
+
+      const now = Date.now()
+      const items = (parsed.items || []).map(r => normalizeRepository(r, 'search', now))
+      return {
+        pageKind: 'search',
+        items,
+        nextUrl: parsed.nextUrl || null,
+        completion: parsed.completion || 'end',
+        pageSeq
+      }
+    } catch (err) {
+      if (err?.code === 'RATE_LIMITED') throw err
+      console.warn('[IpcRouter] 快速搜索降级回退至浏览器:', err?.message || err)
+      return null
+    }
   }
 }
 

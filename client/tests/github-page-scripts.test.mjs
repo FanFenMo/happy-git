@@ -3,8 +3,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import { run as runSearch } from '../shared/github-page/scripts/readSearchResults.js'
 import { run as runDetail } from '../shared/github-page/scripts/readRepositoryDetail.js'
+import { parseGitHubSearchHtml } from '../shared/github-page/search-html-parser.js'
+
+const require = createRequire(import.meta.url)
+const { IpcRouter } = require('../electron/ipc-router.cjs')
 
 const clientDir = fileURLToPath(new URL('..', import.meta.url))
 
@@ -199,4 +204,142 @@ test('built Android page-scripts.json strips export keyword and compiles cleanly
     // Must parse as valid classic JS without SyntaxError
     assert.doesNotThrow(() => new Function(runnable), `${id} failed JS syntax compile`)
   }
+})
+
+test('parseGitHubSearchHtml parses blackbirdSearchRoute embeddedData, decodes entities, and handles rate-limit/fallback', () => {
+  const sampleHtml = `<!doctype html><html><head><title>Repository search results</title></head><body>
+    <script type="application/json" data-target="react-app.embeddedData">${JSON.stringify({
+      payload: {
+        blackbirdSearchRoute: {
+          page_count: 12,
+          results: [
+            {
+              id: '1031912724',
+              hl_name: 'farion1231/<em>cc-switch</em>',
+              hl_trunc_description: 'Fast &amp; reliable <em>Rust</em> assistant &#39;all-in-one&#39;.',
+              language: 'Rust',
+              followers: 156536,
+              topics: ['rust', 'mcp'],
+              repo: { repository: { id: 1031912724, owner_login: 'farion1231', name: 'cc-switch', updated_at: '2026-11-23T08:00:00Z' } }
+            }
+          ]
+        }
+      }
+    })}</script></body></html>`
+
+  const parsed = parseGitHubSearchHtml(sampleHtml, {
+    pageSeq: 1,
+    requestUrl: 'https://github.com/search?q=rust&type=repositories&s=stars&o=desc&p=1'
+  })
+  assert.ok(parsed)
+  assert.equal(parsed.rateLimited, false)
+  assert.equal(parsed.items.length, 1)
+  assert.equal(parsed.items[0].fullName, 'farion1231/cc-switch')
+  assert.equal(parsed.items[0].description, "Fast & reliable Rust assistant 'all-in-one'.")
+  assert.equal(parsed.items[0].primaryLanguage, 'Rust')
+  assert.equal(parsed.items[0].starCount, '156536')
+  assert.deepEqual(parsed.items[0].topics, ['rust', 'mcp'])
+  assert.ok(parsed.nextUrl.includes('p=2'))
+
+  const rateLimited = parseGitHubSearchHtml('<html><head><title>Whoa there!</title></head></html>')
+  assert.equal(rateLimited.rateLimited, true)
+
+  const unknown = parseGitHubSearchHtml('<html><head><title>Sign in</title></head><body>login</body></html>')
+  assert.equal(unknown, null)
+})
+
+test('IpcRouter runs personalized search concurrently, hits discovery_cache on repeat, and falls back to browser when fast fetch returns null', async () => {
+  const cacheStore = new Map()
+  let fastCalls = 0
+  let browserCalls = 0
+  let inFlight = 0
+  let maxConcurrent = 0
+
+  const router = new IpcRouter({
+    sessionManager: { getContext: () => ({ contextId: 'ctx_1', accountId: 'acc_1', status: 'authenticated' }) },
+    accountSyncService: {},
+    starService: {},
+    database: {
+      callDatabase: async (action, payload) => {
+        if (action === 'readDiscoveryCache') {
+          return cacheStore.get(`${payload.accountId}:${payload.queryKey}`) || null
+        }
+        if (action === 'saveDiscoveryCache') {
+          cacheStore.set(`${payload.accountId}:${payload.queryKey}`, {
+            items: JSON.parse(payload.resultJson),
+            fetchedAt: payload.fetchedAt
+          })
+          return { saved: true }
+        }
+        return null
+      }
+    },
+    browser: { getOrCreateWorkPage: () => ({ webContents: {} }) },
+    scheduler: { enqueue: async ({ taskFn }) => taskFn() },
+    fastSearchFetcher: async (url) => {
+      fastCalls += 1
+      inFlight += 1
+      maxConcurrent = Math.max(maxConcurrent, inFlight)
+      await new Promise((r) => setTimeout(r, 25))
+      inFlight -= 1
+      if (url.includes('fallback')) return null
+      const q = new URL(url).searchParams.get('q')
+      return {
+        items: [{ repoId: `id_${q}`, canonicalKey: `org/${q}`, fullName: `org/${q}`, description: `desc ${q}` }],
+        nextUrl: `${url}&p=2`
+      }
+    },
+    pageExecutorFactory: () => ({
+      runTask: async ({ url }) => {
+        browserCalls += 1
+        return {
+          items: [{ repoId: 'id_fb', canonicalKey: 'org/fallback', fullName: 'org/fallback', description: 'from browser' }],
+          nextUrl: null
+        }
+      }
+    }),
+    routes: {
+      searchRepositoriesUrl: (q, sort, page) => `https://github.com/search?q=${encodeURIComponent(q)}&type=repositories&s=${sort}&p=${page}`
+    }
+  })
+
+  const plan = [
+    { id: 'q1', query: 'topic_a', sort: 'stars', startPage: 1, maxPages: 1 },
+    { id: 'q2', query: 'topic_b', sort: 'stars', startPage: 1, maxPages: 1 },
+    { id: 'q3', query: 'topic_c', sort: 'stars', startPage: 1, maxPages: 1 },
+    { id: 'q4', query: 'fallback', sort: 'stars', startPage: 1, maxPages: 1 }
+  ]
+
+  // Round 1: cache miss -> 4 concurrent fast calls, 1 falls back to browser
+  const r1 = await router.handleInvoke(null, {
+    operation: 'discovery.refresh',
+    contextId: 'ctx_1',
+    payload: { mode: 'personalized', queryPlan: plan }
+  })
+  assert.equal(r1.ok, true)
+  assert.equal(r1.data.count, 4)
+  assert.equal(fastCalls, 4)
+  assert.equal(browserCalls, 1)
+  assert.ok(maxConcurrent >= 2, `expected concurrent search execution, got maxConcurrent=${maxConcurrent}`)
+
+  // Round 2: normal refresh -> 100% cache hit, 0 new network calls
+  const r2 = await router.handleInvoke(null, {
+    operation: 'discovery.refresh',
+    contextId: 'ctx_1',
+    payload: { mode: 'personalized', queryPlan: plan, forceRefresh: false }
+  })
+  assert.equal(r2.ok, true)
+  assert.equal(r2.data.count, 4)
+  assert.equal(fastCalls, 4)
+  assert.equal(browserCalls, 1)
+
+  // Round 3: forceRefresh=true -> bypasses cache and re-fetches
+  const r3 = await router.handleInvoke(null, {
+    operation: 'discovery.refresh',
+    contextId: 'ctx_1',
+    payload: { mode: 'personalized', queryPlan: plan, forceRefresh: true }
+  })
+  assert.equal(r3.ok, true)
+  assert.equal(fastCalls, 8)
+  assert.equal(browserCalls, 2)
 })

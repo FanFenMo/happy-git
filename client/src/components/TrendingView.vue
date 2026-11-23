@@ -360,7 +360,7 @@ async function switchTab(tab) {
 
 async function handleRefresh() {
   if (feedStore.isRecommendedTab) {
-    await feedStore.refreshRecommendations()
+    await feedStore.refreshRecommendations(0, { forceRefresh: true })
   } else {
     await feedStore.loadTrendingFeed({ force: true })
   }

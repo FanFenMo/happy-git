@@ -31,7 +31,8 @@ export async function refreshPersonalizedCandidates(queryPlan = [], options = {}
   const res = await invoke(OPERATIONS.DISCOVERY_REFRESH, {
     mode: 'personalized',
     queryPlan: normalizedPlan,
-    round: options.round || 1
+    round: options.round || 1,
+    forceRefresh: Boolean(options.forceRefresh)
   })
   if (!res.ok) {
     throw new Error(res.error?.message || '刷新候选仓库失败')

@@ -163,7 +163,10 @@ public class CloudService {
         JSONObject res = requestJson("/api/v2/auth/github/begin", "POST", null, req);
 
         String challengeId = res.getString("challengeId");
-        String authorizeUrl = res.optString("authorizeUrl", "");
+        String authorizeUrl = res.optString("authorizationUrl", "");
+        if (authorizeUrl.isEmpty()) {
+            authorizeUrl = res.optString("authorizeUrl", "");
+        }
         JSONObject ch = new JSONObject();
         ch.put("challengeId", challengeId);
         ch.put("codeVerifier", codeVerifier);
@@ -181,6 +184,7 @@ public class CloudService {
         JSONObject out = new JSONObject();
         out.put("challengeId", challengeId);
         out.put("authorizeUrl", authorizeUrl);
+        out.put("authorizationUrl", authorizeUrl);
         out.put("expiresAt", ch.optLong("expiresAt"));
         out.put("state", "pending");
         return out;

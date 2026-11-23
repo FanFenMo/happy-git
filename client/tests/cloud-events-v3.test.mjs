@@ -241,7 +241,7 @@ test('SQLite v2 -> v3 迁移保留历史数据，并正确实现 30 秒按次事
           text: async () =>
             JSON.stringify({
               challengeId: 'ch_test_1',
-              authorizeUrl: 'https://github.com/login/oauth/authorize?state=ch_test_1',
+              authorizationUrl: 'https://github.com/login/oauth/authorize?state=ch_test_1',
               expiresAt: Date.now() + 300000
             })
         }
@@ -356,6 +356,8 @@ test('SQLite v2 -> v3 迁移保留历史数据，并正确实现 30 秒按次事
 
     // A. 验证云端账号与本地账号不一致时阻止绑定和上传
     const begin1 = await cloudService.beginAuth({ accountId: '1001' }, { openBrowser: false })
+    assert.equal(begin1.authorizeUrl, 'https://github.com/login/oauth/authorize?state=ch_test_1')
+    assert.equal(begin1.authorizationUrl, 'https://github.com/login/oauth/authorize?state=ch_test_1')
     const mismatchRes = await cloudService.pollAuth({ accountId: '1001' }, { challengeId: begin1.challengeId })
     assert.equal(mismatchRes.state, 'account_mismatch')
     assert.equal(mismatchRes.error.code, 'CLOUD_ACCOUNT_MISMATCH')

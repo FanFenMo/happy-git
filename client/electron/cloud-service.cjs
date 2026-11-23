@@ -257,24 +257,26 @@ class CloudService {
       body: { codeChallenge }
     })
 
+    const authorizeUrl = res.authorizationUrl || res.authorizeUrl || ''
     const challengeRecord = {
       challengeId: res.challengeId,
       codeVerifier,
-      authorizeUrl: res.authorizeUrl,
+      authorizeUrl,
       expiresAt: res.expiresAt,
       accountId: context.accountId
     }
     this.authChallenges.set(res.challengeId, challengeRecord)
 
-    if (payload.openBrowser !== false && res.authorizeUrl && electronShell) {
+    if (payload.openBrowser !== false && authorizeUrl && electronShell) {
       try {
-        await electronShell.openExternal(res.authorizeUrl)
+        await electronShell.openExternal(authorizeUrl)
       } catch (_) {}
     }
 
     return {
       challengeId: res.challengeId,
-      authorizeUrl: res.authorizeUrl,
+      authorizeUrl,
+      authorizationUrl: authorizeUrl,
       expiresAt: res.expiresAt,
       state: 'pending'
     }
@@ -524,6 +526,8 @@ class CloudService {
             !realignedOnce &&
             (err.code === 'STREAM_EPOCH_MISMATCH' ||
               err.code === 'ANALYSIS_EPOCH_MISMATCH' ||
+              err.code === 'STALE_ANALYSIS_EPOCH' ||
+              err.code === 'DEVICE_STREAM_REQUIRED' ||
               err.code === 'SEQUENCE_GAP')
           ) {
             realignedOnce = true

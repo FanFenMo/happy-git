@@ -10,20 +10,33 @@ import path from 'node:path'
 
 const clientDir = fileURLToPath(new URL('..', import.meta.url))
 
+const allowLocalApi = process.env.HAPPYGIT_ALLOW_LOCAL_API === '1'
 console.log('[build-release] 1/4 准备公开服务配置与版本元数据...')
-execSync('node scripts/prepare-config.mjs --mode production --release', {
-  cwd: clientDir,
-  env: { ...process.env, HAPPYGIT_RELEASE: '1' },
-  stdio: 'inherit'
-})
+execSync(
+  allowLocalApi
+    ? 'node scripts/prepare-config.mjs --mode development'
+    : 'node scripts/prepare-config.mjs --mode production --release',
+  {
+    cwd: clientDir,
+    env: allowLocalApi ? { ...process.env } : { ...process.env, HAPPYGIT_RELEASE: '1' },
+    stdio: 'inherit'
+  }
+)
 
 console.log('[build-release] 2/4 构建固定网页脚本...')
 execSync('node scripts/build-page-scripts.mjs', { cwd: clientDir, stdio: 'inherit' })
 
+const buildEnv = { ...process.env }
+if (allowLocalApi) {
+  delete buildEnv.HAPPYGIT_RELEASE
+} else {
+  buildEnv.HAPPYGIT_RELEASE = '1'
+}
+
 console.log('[build-release] 3/4 执行 Vite 构建...')
 execSync('npm run build', {
   cwd: clientDir,
-  env: { ...process.env, HAPPYGIT_RELEASE: '1' },
+  env: buildEnv,
   stdio: 'inherit'
 })
 

@@ -14,6 +14,7 @@ import {
   sparseDotProduct
 } from './features.js'
 import { buildInterestProfile } from './profile.js'
+import { buildReverseFeatureSpace, extractProjectKeywordWeights } from './keywords.js'
 
 export function weightedAvailable(components) {
   let weightedSum = 0
@@ -756,13 +757,17 @@ export function createRecommendationBatch({
   // MMR 重排与滑动窗口多样性约束
   const ranked = rerankCandidates(scored, 100, seed)
 
+  const reverseSpace = effectiveFeatureSpace ? buildReverseFeatureSpace(effectiveFeatureSpace) : null
   const items = ranked.map((item, index) => ({
     batchId,
     position: index + 1,
     repoId: item.candidate.repoId || item.candidate.canonicalKey,
     score: item.baseScore,
     reasons: item.reasons,
-    repository: item.candidate
+    repository: {
+      ...item.candidate,
+      keywordWeights: extractProjectKeywordWeights(item.candidate, { reverseSpace })
+    }
   }))
 
   const activeModelVersion =

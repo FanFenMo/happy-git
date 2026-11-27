@@ -224,7 +224,7 @@ export function projectRepositoryToFeatureSpace(repository, featureSpace) {
 }
 
 // 预定义常见技术专有名词保留表（避免被拆散，例如 C++, C#, .NET）
-const PRESERVED_TECH_TERMS = [
+export const PRESERVED_TECH_TERMS = [
   'c++', 'c#', '.net', 'vue.js', 'vue', 'spring boot', 'spring', 'react', 'sqlite',
   'docker', 'kubernetes', 'k8s', 'pytorch', 'tensorflow', 'machine learning',
   'deep learning', 'android', 'electron', 'capacitor', 'nodejs', 'node.js',

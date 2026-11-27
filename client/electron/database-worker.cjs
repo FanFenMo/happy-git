@@ -638,6 +638,27 @@ function readCloudSyncState(accountId) {
   }
 }
 
+function readLocalProfile(accountId, revisions, historyEnabled) {
+  const row = db.prepare(`
+    SELECT model_version, input_versions_json, profile_json, generated_at
+    FROM interest_profiles WHERE account_id = ?;
+  `).get(accountId)
+  if (!row) return null
+
+  const inputVersions = JSON.parse(row.input_versions_json)
+  const profile = JSON.parse(row.profile_json)
+  if (!historyEnabled && profile.evidenceRepos?.some(repo => repo.sources?.includes('history'))) return null
+  const stale = ['collectionRevision', 'historyRevision', 'preferenceRevision', 'feedbackRevision']
+    .some(key => inputVersions[key] !== revisions[key])
+  return {
+    profile,
+    modelVersion: row.model_version,
+    generatedAt: row.generated_at,
+    inputVersions,
+    stale
+  }
+}
+
 function readAccountSnapshot(accountId) {
   const actStmt = db.prepare('SELECT profile_json FROM accounts WHERE account_id = ?;')
   const act = actStmt.get(accountId)
@@ -677,14 +698,16 @@ function readAccountSnapshot(accountId) {
     }
   }
 
+  const revisions = getAccountRevisions(accountId)
   return {
     profile,
     preferences,
     repoSync: findSync('repos'),
     starSync: findSync('stars'),
-    revisions: getAccountRevisions(accountId),
+    revisions,
     cloudSync: cloudState,
-    cloudPortrait: act ? readCloudPortrait(accountId) : null
+    cloudPortrait: act ? readCloudPortrait(accountId) : null,
+    localProfile: act ? readLocalProfile(accountId, revisions, preferences.historyEnabled) : null
   }
 }
 

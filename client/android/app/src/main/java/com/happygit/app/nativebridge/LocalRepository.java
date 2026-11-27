@@ -5,6 +5,7 @@ import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
@@ -272,6 +273,37 @@ public class LocalRepository {
         }
     }
 
+    private JSONObject readLocalProfile(SQLiteDatabase db, String accountId, JSONObject revisions, boolean historyEnabled) throws JSONException {
+        try (Cursor cursor = db.rawQuery(
+                "SELECT model_version, input_versions_json, profile_json, generated_at FROM interest_profiles WHERE account_id = ?",
+                new String[]{accountId})) {
+            if (!cursor.moveToFirst()) return null;
+
+            JSONObject inputVersions = new JSONObject(cursor.getString(1));
+            boolean stale = false;
+            for (String key : new String[]{"collectionRevision", "historyRevision", "preferenceRevision", "feedbackRevision"}) {
+                stale |= inputVersions.optInt(key, -1) != revisions.getInt(key);
+            }
+            JSONObject profile = new JSONObject(cursor.getString(2));
+            JSONArray evidence = profile.optJSONArray("evidenceRepos");
+            if (!historyEnabled && evidence != null) {
+                for (int i = 0; i < evidence.length(); i++) {
+                    JSONArray sources = evidence.getJSONObject(i).optJSONArray("sources");
+                    if (sources == null) continue;
+                    for (int j = 0; j < sources.length(); j++) {
+                        if ("history".equals(sources.optString(j))) return null;
+                    }
+                }
+            }
+            return new JSONObject()
+                    .put("profile", profile)
+                    .put("modelVersion", cursor.getString(0))
+                    .put("generatedAt", cursor.getLong(3))
+                    .put("inputVersions", inputVersions)
+                    .put("stale", stale);
+        }
+    }
+
     public synchronized JSONObject readAccountSnapshot(String accountId) {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         JSONObject result = new JSONObject();
@@ -303,7 +335,10 @@ public class LocalRepository {
 
             result.put("repoSync", getSyncState(db, accountId, "repos"));
             result.put("starSync", getSyncState(db, accountId, "stars"));
-            result.put("revisions", getAccountRevisions(accountId));
+            JSONObject revisions = getAccountRevisions(accountId);
+            result.put("revisions", revisions);
+            JSONObject localProfile = readLocalProfile(db, accountId, revisions, prefObj.getBoolean("historyEnabled"));
+            result.put("localProfile", localProfile != null ? localProfile : JSONObject.NULL);
             result.put("cloudSync", cloudState != null ? cloudState : JSONObject.NULL);
             JSONObject portraitState = readCloudPortrait(accountId);
             result.put("cloudPortrait", portraitState != null ? portraitState : JSONObject.NULL);

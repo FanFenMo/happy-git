@@ -10,7 +10,10 @@ import java.io.*;
 /** Bound the actual decoded request stream, including chunked transfer bodies. */
 @Component @Profile("cloud")
 public class CloudRequestFilter extends OncePerRequestFilter {
-    @Override protected boolean shouldNotFilter(HttpServletRequest request) { return !request.getRequestURI().startsWith("/api/v2/"); }
+    @Override protected boolean shouldNotFilter(HttpServletRequest request) {
+        String uri = request.getRequestURI();
+        return !uri.startsWith("/api/v2/") || uri.equals("/api/v2/auth/github/local-approve");
+    }
     @Override protected void doFilterInternal(HttpServletRequest request,HttpServletResponse response,FilterChain chain) throws ServletException,IOException {
         response.setHeader("Cache-Control","no-store"); response.setHeader("X-Content-Type-Options","nosniff");
         if (request.getHeader("Content-Encoding")!=null && !request.getHeader("Content-Encoding").equals("identity")) { response.sendError(415);return; }

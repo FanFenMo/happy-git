@@ -10,6 +10,7 @@ import { parseGitHubSearchHtml } from '../shared/github-page/search-html-parser.
 
 const require = createRequire(import.meta.url)
 const { IpcRouter } = require('../electron/ipc-router.cjs')
+const { PageTaskScheduler } = require('../electron/task-scheduler.cjs')
 
 const clientDir = fileURLToPath(new URL('..', import.meta.url))
 
@@ -212,6 +213,7 @@ test('parseGitHubSearchHtml parses blackbirdSearchRoute embeddedData, decodes en
       payload: {
         blackbirdSearchRoute: {
           page_count: 12,
+          result_count: 3456,
           results: [
             {
               id: '1031912724',
@@ -239,6 +241,7 @@ test('parseGitHubSearchHtml parses blackbirdSearchRoute embeddedData, decodes en
   assert.equal(parsed.items[0].primaryLanguage, 'Rust')
   assert.equal(parsed.items[0].starCount, '156536')
   assert.deepEqual(parsed.items[0].topics, ['rust', 'mcp'])
+  assert.equal(parsed.resultCount, 3456)
   assert.ok(parsed.nextUrl.includes('p=2'))
 
   const rateLimited = parseGitHubSearchHtml('<html><head><title>Whoa there!</title></head></html>')
@@ -342,4 +345,165 @@ test('IpcRouter runs personalized search concurrently, hits discovery_cache on r
   assert.equal(r3.ok, true)
   assert.equal(fastCalls, 8)
   assert.equal(browserCalls, 2)
+})
+
+test('IpcRouter runs interactive GitHub search for guests and users via local search engine without polluting discovery_cache', async () => {
+  let currentContext = { contextId: 'guest_1', accountId: null, status: 'guest' }
+  const cacheWrites = []
+  const fetchedUrls = []
+  let browserCalls = 0
+  const searchRoutes = await import('../shared/github-page/routes.js')
+
+  const router = new IpcRouter({
+    sessionManager: { getContext: () => currentContext },
+    accountSyncService: {},
+    starService: {},
+    database: {
+      callDatabase: async (action, payload) => {
+        if (action === 'saveDiscoveryCache') {
+          cacheWrites.push(payload)
+        }
+        return null
+      }
+    },
+    browser: { getOrCreateWorkPage: () => ({ webContents: {} }) },
+    scheduler: { enqueue: async ({ taskFn }) => taskFn() },
+    fastSearchFetcher: async (url) => {
+      fetchedUrls.push(url)
+      if (url.includes('rate_limit_trigger')) {
+        const err = new Error('RATE_LIMITED')
+        err.code = 'RATE_LIMITED'
+        throw err
+      }
+      if (url.includes('browser_fallback')) {
+        return null
+      }
+      return {
+        items: [
+          { repoId: '101', canonicalKey: 'org/alpha', fullName: 'org/alpha', description: 'alpha' },
+          { repoId: '101', canonicalKey: 'org/alpha', fullName: 'org/alpha', description: 'alpha dup' },
+          { repoId: '102', canonicalKey: 'org/beta', fullName: 'org/beta', description: 'beta' }
+        ],
+        nextUrl: 'https://github.com/search?q=mcp&type=repositories&p=2',
+        completion: 'more',
+        pageCount: 5,
+        resultCount: 1280
+      }
+    },
+    pageExecutorFactory: () => ({
+      runTask: async ({ scriptId, url, args }) => {
+        browserCalls += 1
+        assert.equal(scriptId, 'readSearchResults')
+        assert.equal(args.pageSeq, 2)
+        assert.ok(url.includes('s=forks'))
+        return {
+          items: [
+            { repoId: '201', canonicalKey: 'org/fallback-repo', fullName: 'org/fallback-repo', description: 'via browser' }
+          ],
+          nextUrl: null,
+          completion: 'end'
+        }
+      }
+    }),
+    routes: searchRoutes
+  })
+
+  // 1. Blank query returns empty immediately without hitting network or cache
+  const emptyRes = await router.handleInvoke(null, {
+    operation: 'discovery.refresh',
+    contextId: 'guest_1',
+    payload: { mode: 'search', query: '   ', sort: 'stars', page: 1 }
+  })
+  assert.equal(emptyRes.ok, true)
+  assert.equal(emptyRes.data.count, 0)
+  assert.deepEqual(emptyRes.data.items, [])
+  assert.equal(fetchedUrls.length, 0)
+
+  // 2. Guest search with Best Match (sort: '') hits fastSearchFetcher, omits s/o params, deduplicates items, never writes discovery_cache
+  const guestRes = await router.handleInvoke(null, {
+    operation: 'discovery.refresh',
+    contextId: 'guest_1',
+    payload: { mode: 'search', query: 'mcp server language:Rust', sort: '', page: 1 }
+  })
+  assert.equal(guestRes.ok, true)
+  assert.equal(guestRes.data.count, 2)
+  assert.equal(guestRes.data.hasMore, true)
+  assert.equal(guestRes.data.nextPage, 2)
+  assert.equal(guestRes.data.pageCount, 5)
+  assert.equal(guestRes.data.resultCount, 1280)
+  assert.equal(fetchedUrls.length, 1)
+  assert.equal(new URL(fetchedUrls[0]).searchParams.has('s'), false)
+  assert.equal(cacheWrites.length, 0)
+
+  // 3. Authenticated user search falling back to hidden browser when fastSearchFetcher returns null
+  currentContext = { contextId: 'ctx_1', accountId: 'acc_1', status: 'authenticated' }
+  const fallbackRes = await router.handleInvoke(null, {
+    operation: 'discovery.refresh',
+    contextId: 'ctx_1',
+    payload: { mode: 'search', query: 'browser_fallback', sort: 'forks', page: 2 }
+  })
+  assert.equal(fallbackRes.ok, true)
+  assert.equal(browserCalls, 1)
+  assert.equal(fallbackRes.data.count, 1)
+  assert.equal(fallbackRes.data.hasMore, false)
+  assert.equal(fallbackRes.data.nextPage, null)
+  assert.equal(cacheWrites.length, 0)
+
+  // 4. Rate limit propagates cleanly
+  const limitRes = await router.handleInvoke(null, {
+    operation: 'discovery.refresh',
+    contextId: 'ctx_1',
+    payload: { mode: 'search', query: 'rate_limit_trigger', sort: 'updated', page: 1 }
+  })
+  assert.equal(limitRes.ok, false)
+  assert.equal(limitRes.error.code, 'RATE_LIMITED')
+})
+
+test('PageTaskScheduler wakes queued tasks after page lease finishes and maintains mutual exclusion', async () => {
+  const scheduler = new PageTaskScheduler()
+  scheduler.minIntervalMs = 0
+
+  const timeline = []
+  let active = 0
+  let overlapDetected = false
+
+  const track = async (label, ms) => {
+    active += 1
+    if (active > 1) overlapDetected = true
+    timeline.push(`${label}:start`)
+    await new Promise((r) => setTimeout(r, ms))
+    timeline.push(`${label}:end`)
+    active -= 1
+    return label
+  }
+
+  // Case 1: lease holds lock while higher/lower priority tasks enqueue
+  const pLease = scheduler.withPageLease({ contextId: 'ctx_1' }, 'verify', () => track('lease1', 25))
+  const pSync = scheduler.enqueue({ taskId: 'sync_1', contextId: 'ctx_1', kind: 'sync', taskFn: () => track('sync1', 10) })
+  const pTrend = scheduler.enqueue({ taskId: 'trend_1', contextId: 'ctx_1', kind: 'trending', taskFn: () => track('trend1', 10) })
+
+  const results1 = await Promise.all([pLease, pSync, pTrend])
+  assert.deepEqual(results1, ['lease1', 'sync1', 'trend1'])
+  assert.equal(overlapDetected, false)
+  assert.deepEqual(timeline, [
+    'lease1:start', 'lease1:end',
+    'trend1:start', 'trend1:end',
+    'sync1:start', 'sync1:end'
+  ])
+
+  // Case 2: queued task holds lock while lease is requested -> lease waits for currentTask then runs before lower priority tasks
+  timeline.length = 0
+  const pTask = scheduler.enqueue({ taskId: 'task_2', contextId: 'ctx_1', kind: 'sync', taskFn: () => track('task2', 25) })
+  await new Promise((r) => setImmediate(r))
+  const pLease2 = scheduler.withPageLease({ contextId: 'ctx_1' }, 'verify', () => track('lease2', 10))
+  const pSync2 = scheduler.enqueue({ taskId: 'sync_2', contextId: 'ctx_1', kind: 'sync', taskFn: () => track('sync2', 10) })
+
+  const results2 = await Promise.all([pTask, pLease2, pSync2])
+  assert.deepEqual(results2, ['task2', 'lease2', 'sync2'])
+  assert.equal(overlapDetected, false)
+  assert.deepEqual(timeline, [
+    'task2:start', 'task2:end',
+    'lease2:start', 'lease2:end',
+    'sync2:start', 'sync2:end'
+  ])
 })

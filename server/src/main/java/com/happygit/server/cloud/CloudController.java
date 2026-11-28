@@ -23,6 +23,18 @@ public class CloudController {
         boolean ok=auth.callback(state,code,error);
         return ResponseEntity.status(ok?200:400).body("<!doctype html><html lang=zh-CN><meta charset=utf-8><title>HappyGit 云端身份</title><p>"+(ok?"云端身份核验完成，请返回 HappyGit。":"授权未完成，请返回 HappyGit 重试。")+"</p></html>");
     }
+    @GetMapping(value="/auth/github/local-authorize",produces=MediaType.TEXT_HTML_VALUE)
+    public ResponseEntity<String> localAuthorize(@RequestParam(required=false) String state) {
+        return ResponseEntity.ok(auth.renderLocalAuthorizePage(state));
+    }
+    @PostMapping(value="/auth/github/local-approve",consumes=MediaType.APPLICATION_FORM_URLENCODED_VALUE,produces=MediaType.TEXT_HTML_VALUE)
+    public ResponseEntity<String> localApprove(@RequestParam(required=false) String state,
+            @RequestParam(required=false) String accountId,
+            @RequestParam(required=false) String login,
+            @RequestParam(required=false) String action) {
+        boolean ok=auth.approveLocalAuthorize(state,accountId,login,action);
+        return ResponseEntity.status(ok?200:200).body(CloudAuthService.renderLocalResultPage(ok,action));
+    }
     @PostMapping("/session/refresh") public Object refresh(@RequestBody JsonNode body) { return auth.refresh(body); }
     @PostMapping("/session/logout") public Object logout(@RequestHeader(value="Authorization",required=false) String token) { auth.logout(token); return Map.of("state","revoked"); }
     @PostMapping("/devices/register") public Object register(@RequestHeader(value="Authorization",required=false) String token,@RequestBody JsonNode body) { return ingest.register(token,body); }
@@ -36,6 +48,7 @@ public class CloudController {
     @PostMapping("/internal/exports/{id}/commit") public Object commit(@RequestHeader(value="Authorization",required=false) String token,@PathVariable String id,@RequestBody JsonNode body) { admin(token);return exports.commit(id,body); }
     @GetMapping("/internal/analysis-scopes") public Object scopes(@RequestHeader(value="Authorization",required=false) String token) { admin(token);return exports.scopes(); }
     @GetMapping("/me/portrait") public Object portrait(@RequestHeader(value="Authorization",required=false) String token) { return learning.portrait(token,false); }
+    @PostMapping("/me/portrait/refresh") public Object refreshPortrait(@RequestHeader(value="Authorization",required=false) String token,@RequestBody(required=false) JsonNode body) { return learning.computePortrait(token,body); }
     @GetMapping("/me/search-plan") public Object search(@RequestHeader(value="Authorization",required=false) String token) { return learning.portrait(token,true); }
     @GetMapping("/cohorts") public Object cohorts(@RequestHeader(value="Authorization",required=false) String token) { auth.session(token);return learning.cohorts(); }
     @GetMapping("/models/{version}/projection") public Object projection(@RequestHeader(value="Authorization",required=false) String token,@PathVariable String version) { auth.session(token);return learning.projection(version); }

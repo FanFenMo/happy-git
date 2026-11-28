@@ -252,9 +252,15 @@ class CloudService {
       crypto.createHash('sha256').update(codeVerifier, 'utf8').digest()
     )
 
+    const cleanLogin = String(context.login || context.profile?.login || '').trim().split(/[\s·]+/)[0] || ''
     const res = await this.requestJson('/api/v2/auth/github/begin', {
       method: 'POST',
-      body: { codeChallenge }
+      body: {
+        codeChallenge,
+        accountId: String(context.accountId),
+        login: cleanLogin,
+        displayName: String(context.profile?.displayName || cleanLogin || '').trim()
+      }
     })
 
     const authorizeUrl = res.authorizationUrl || res.authorizeUrl || ''
@@ -328,6 +334,9 @@ class CloudService {
       }
     }
 
+    const prevState = await this.database.callDatabase('readCloudSyncState', { accountId: localAccountId }).catch(() => null)
+    const localDesiredAnalysisEnabled = prevState ? Boolean(prevState.analysisEnabled) : true
+
     await this.saveTokens(localAccountId, {
       accessToken: res.accessToken,
       refreshToken: res.refreshToken,
@@ -346,7 +355,23 @@ class CloudService {
       }
     })
 
-    await this.registerDeviceAndSyncStream(localAccountId)
+    let streamState = await this.registerDeviceAndSyncStream(localAccountId)
+    if (res.supportsInstantPortrait) {
+      if (!streamState?.analysisEnabled && localDesiredAnalysisEnabled) {
+        await this.syncPreferencesState(localAccountId, { analysisEnabled: true }).catch(() => {})
+      }
+      await this.flushOutbox({ accountId: localAccountId, status: 'authenticated' }).catch(() => {})
+      await this.syncCollections({ accountId: localAccountId, status: 'authenticated' }).catch(() => {})
+      const portraitRes = await this.refreshPortrait({ accountId: localAccountId, status: 'authenticated' }, { compute: true }).catch(() => null)
+      const syncState = await this.database.callDatabase('readCloudSyncState', { accountId: localAccountId })
+      return {
+        challengeId,
+        state: 'authenticated',
+        cloudSync: syncState,
+        cloudPortrait: portraitRes?.cloudPortrait || null
+      }
+    }
+
     await this.flushOutbox({ accountId: localAccountId, status: 'authenticated' })
     await this.syncCollections({ accountId: localAccountId, status: 'authenticated' })
 
@@ -873,7 +898,7 @@ class CloudService {
    * 从 /me/portrait 与 /me/search-plan 拉取同代结果并写入本机缓存。
    * 接口不可用时保留缓存原状态与真实 fetchedAt，不把旧结果或本地画像标记为新模型结果。
    */
-  async refreshPortrait(context) {
+  async refreshPortrait(context, options = {}) {
     if (!context?.accountId) return { refreshed: false, reason: 'NO_ACTIVE_ACCOUNT' }
     const accountId = context.accountId
     const state = await this.database.callDatabase('readCloudSyncState', { accountId })
@@ -887,7 +912,26 @@ class CloudService {
     if (!token) return { refreshed: false, reason: 'CLOUD_AUTH_REQUIRED', cloudPortrait: await this.readPortrait(context) }
 
     try {
-      const portrait = await this.requestJson('/api/v2/me/portrait', { token })
+      let portrait = null
+      if (options?.compute) {
+        await this.flushOutbox({ accountId, status: 'authenticated' }).catch(() => {})
+        await this.syncCollections({ accountId, status: 'authenticated' }).catch(() => {})
+        const evidence = await this.database.callDatabase('readPortraitEvidence', { accountId }).catch(() => null)
+        try {
+          portrait = await this.requestJson('/api/v2/me/portrait/refresh', {
+            method: 'POST',
+            token,
+            body: evidence || {}
+          })
+        } catch (refreshErr) {
+          if (refreshErr.status !== 404 && refreshErr.status !== 405) {
+            throw refreshErr
+          }
+        }
+      }
+      if (!portrait) {
+        portrait = await this.requestJson('/api/v2/me/portrait', { token })
+      }
       if (portrait.processedThrough && typeof portrait.processedThrough === 'object') {
         portrait.processedThrough = Number(portrait.processedThrough[state.streamEpoch] || 0)
       }
@@ -915,7 +959,9 @@ class CloudService {
         }
       })
 
-      if (portrait.generationId && (portrait.status || 'ready') !== 'pending') {
+      if (portrait.searchPlan && typeof portrait.searchPlan === 'object') {
+        saved = await this.database.callDatabase('saveCloudSearchPlan', { accountId, searchPlan: portrait.searchPlan })
+      } else if (portrait.generationId && (portrait.status || 'ready') !== 'pending') {
         try {
           const plan = await this.requestJson('/api/v2/me/search-plan', { token })
           saved = await this.database.callDatabase('saveCloudSearchPlan', { accountId, searchPlan: plan })

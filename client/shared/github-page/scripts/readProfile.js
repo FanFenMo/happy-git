@@ -18,7 +18,11 @@ export function run(doc, args = {}) {
   const followerCounter = doc.querySelector('a[href*="tab=followers"] span.Counter')
   const followingCounter = doc.querySelector('a[href*="tab=following"] span.Counter')
 
-  const login = (nicknameEl?.innerText || '').trim() || expectedLogin
+  const metaUserLogin = doc.querySelector('meta[name="octolytics-dimension-user_login"]')?.getAttribute('content')
+    || doc.querySelector('meta[name="octolytics-actor-login"]')?.getAttribute('content')
+  const rawNickname = (nicknameEl?.innerText || '').trim()
+  const cleanedNickname = rawNickname.split(/[\s·]+/)[0] || ''
+  const login = (metaUserLogin || cleanedNickname || expectedLogin || '').trim()
   const displayName = (fullnameEl?.innerText || '').trim() || null
   const avatarUrl = avatarEl?.getAttribute('src') || null
   const bio = (bioEl?.innerText || '').trim() || null

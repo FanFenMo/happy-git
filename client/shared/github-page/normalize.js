@@ -110,7 +110,8 @@ export function extractRepositoryEvidenceCues(raw = {}) {
 
 export function normalizeProfile(raw, fetchedAt = Date.now()) {
   if (!raw) return null
-  const login = raw.login ? String(raw.login).trim() : null
+  const rawLogin = raw.login ? String(raw.login).trim() : ''
+  const login = rawLogin ? (rawLogin.split(/[\s·]+/)[0] || '').trim() : null
   if (!login) return null
 
   const repoCount = parseCount(raw.publicRepoCount ?? raw.public_repos)

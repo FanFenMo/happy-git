@@ -22,6 +22,7 @@ class SessionManager {
     }
 
     this.loginTasks = new Map() // loginTaskId -> { state, intent, session, error }
+    this.lastVerifyScheduledAt = 0
   }
 
   generateContextId() {
@@ -85,28 +86,35 @@ class SessionManager {
         profile: snapshot.profile
       }
 
-      // 在后台低频复核远端身份
-      setImmediate(async () => {
-        try {
-          await this.scheduler.withPageLease(this.currentContext, 'verify', async () => {
-            const workPage = this.browser.getOrCreateWorkPage()
-            const executor = this.pageExecutorFactory(workPage.webContents)
-            await executor.navigate('https://github.com', 15000)
-            const identity = await executor.executeScript('readCurrentIdentity')
+      // 在后台低频复核远端身份（避免启动与初始化重复入队 verify 租约）
+      const now = Date.now()
+      if (now - this.lastVerifyScheduledAt > 30000) {
+        this.lastVerifyScheduledAt = now
+        setImmediate(async () => {
+          try {
+            await this.scheduler.withPageLease(this.currentContext, 'verify', async () => {
+              const workPage = this.browser.getOrCreateWorkPage()
+              const executor = this.pageExecutorFactory(workPage.webContents)
+              await executor.navigate('https://github.com', 15000)
+              const identity = await executor.executeScript('readCurrentIdentity')
 
-            if (identity?.kind === 'anonymous') {
-              this.currentContext.status = 'reauth_required'
-            } else if (identity?.kind === 'authenticated' && identity.login !== snapshot.profile.login) {
-              console.warn('[SessionManager] 网站检测到不同账号，需重新认证')
-              this.currentContext.status = 'reauth_required'
+              if (identity?.kind === 'anonymous') {
+                this.currentContext.status = 'reauth_required'
+              } else if (
+                identity?.kind === 'authenticated' &&
+                String(identity.login || '').toLowerCase() !== String(snapshot.profile.login || '').toLowerCase()
+              ) {
+                console.warn('[SessionManager] 网站检测到不同账号，需重新认证')
+                this.currentContext.status = 'reauth_required'
+              }
+            })
+          } catch (err) {
+            if (err.code === 'NETWORK_UNAVAILABLE' || err.code === 'PAGE_TIMEOUT') {
+              this.currentContext.status = 'offline'
             }
-          })
-        } catch (err) {
-          if (err.code === 'NETWORK_UNAVAILABLE' || err.code === 'PAGE_TIMEOUT') {
-            this.currentContext.status = 'offline'
           }
-        }
-      })
+        })
+      }
 
       return this.getContext()
     } catch (err) {

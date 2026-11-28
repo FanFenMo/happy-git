@@ -105,9 +105,9 @@ export async function readCloudPortrait() {
   return res.data
 }
 
-export async function refreshCloudPortrait() {
+export async function refreshCloudPortrait(options = {}) {
   const invoke = nativeBridge.capture()
-  const res = await invoke(OPERATIONS.CLOUD_PORTRAIT_REFRESH)
+  const res = await invoke(OPERATIONS.CLOUD_PORTRAIT_REFRESH, options)
   if (!res.ok) {
     throw new Error(res.error?.message || '获取云端个人画像失败')
   }

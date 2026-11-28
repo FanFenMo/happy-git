@@ -28,6 +28,10 @@ export function run(doc, args = {}) {
     const name = titleLink.innerText.trim()
     const href = titleLink.getAttribute('href') || ''
     const fullName = href.replace(/^\//, '').split('?')[0] || `${expectedLogin}/${name}`
+    const repoId = li.getAttribute('data-repository-id')
+      || li.querySelector('[data-repository-id]')?.getAttribute('data-repository-id')
+      || li.querySelector('input[name="repository_id"]')?.getAttribute('value')
+      || null
 
     // 检查可见性 (Public / Private)
     const label = li.querySelector('.Label--secondary')?.innerText?.toLowerCase() || ''
@@ -54,6 +58,7 @@ export function run(doc, args = {}) {
     const topics = topicEls.map(el => el.innerText.trim().replace(/^#/, '')).filter(Boolean)
 
     items.push({
+      repoId: repoId ? String(repoId).trim() : null,
       fullName,
       name,
       owner: fullName.split('/')[0] || expectedLogin,

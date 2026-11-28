@@ -22,6 +22,7 @@ import {
   setStar as apiSetStar,
   savePreferences as apiSavePreferences
 } from '../services/account'
+import { createSnapshot, computeAndCommitProfile } from '../services/recommendation'
 import {
   beginCloudAuth,
   pollCloudAuth,
@@ -94,12 +95,15 @@ export const useUserStore = defineStore('user', {
     activeLoginTaskId: null,
     preferences: emptyPreferences(),
     cloudSync: emptyCloudSync(),
+    localProfile: null,
     cloudPortrait: null,
     cloudPortraitLoading: false,
     cloudPortraitError: null,
+    cloudPortraitJustUpdatedAt: null,
     cloudCohorts: null,
     cloudCohortsLoading: false,
     cloudAuthStage: 'idle',
+    cloudAuthError: null,
     cloudChallengeId: null,
     repos: [],
     stars: [],
@@ -137,10 +141,13 @@ export const useUserStore = defineStore('user', {
       this.stars = []
       this.preferences = emptyPreferences()
       this.cloudSync = emptyCloudSync()
+      this.localProfile = null
       this.cloudPortrait = null
       this.cloudPortraitLoading = false
       this.cloudPortraitError = null
+      this.cloudPortraitJustUpdatedAt = null
       this.cloudAuthStage = 'idle'
+      this.cloudAuthError = null
       this.cloudChallengeId = null
       this.repoSync = emptySync()
       this.starSync = emptySync()
@@ -192,6 +199,7 @@ export const useUserStore = defineStore('user', {
         if (snap.cloudPortrait) {
           this.cloudPortrait = snap.cloudPortrait
         }
+        this.localProfile = snap.localProfile || null
         this.repoSync = { ...emptySync(), ...snap.repoSync }
         this.starSync = { ...emptySync(), ...snap.starSync }
 
@@ -204,11 +212,22 @@ export const useUserStore = defineStore('user', {
 
         if (epoch !== this.sessionEpoch) return
 
-        if (this.cloudSync.cloudBound && this.cloudSync.accountMatched && this.preferences.analysisEnabled) {
-          this.refreshCloudPortraitData().catch(() => {})
+        if (!this.localProfile?.profile) {
+          this.ensureLocalProfile().catch(() => {})
         }
 
-        if (this.session.status === 'authenticated' && (!this.repoSync.complete || !this.starSync.complete)) {
+        const needsAccountSync = this.session.status === 'authenticated' && (!this.repoSync.complete || !this.starSync.complete)
+        const shouldComputePortrait = !this.cloudPortrait?.portrait || this.cloudPortrait?.status === 'empty'
+        if (
+          this.cloudSync.cloudBound &&
+          this.cloudSync.accountMatched &&
+          this.preferences.analysisEnabled &&
+          (!needsAccountSync || this.repos.length > 0 || this.stars.length > 0)
+        ) {
+          this.refreshCloudPortraitData({ compute: shouldComputePortrait }).catch(() => {})
+        }
+
+        if (needsAccountSync) {
           this.refreshAccountData().catch(err => {
             if (epoch === this.sessionEpoch) this.authError = err.message
           })
@@ -376,7 +395,18 @@ export const useUserStore = defineStore('user', {
               this.repoSync = { ...emptySync(), ...snap.repoSync }
               this.starSync = { ...emptySync(), ...snap.starSync }
               if (snap.cloudSync) this.cloudSync = { ...emptyCloudSync(), ...snap.cloudSync }
+              if (snap.localProfile) this.localProfile = snap.localProfile
               if (snap.profile) this.session.profile = snap.profile
+              await this.ensureLocalProfile().catch(() => {})
+              if (this.cloudSync.cloudBound && this.cloudSync.accountMatched && this.preferences.analysisEnabled) {
+                await this.refreshCloudPortraitData({ compute: true }).catch(() => {})
+              }
+              import('./feed').then(({ useFeedStore }) => {
+                const feedStore = useFeedStore()
+                if (!feedStore.isSearchTab) {
+                  feedStore.refreshRecommendations(0, { forceRefresh: false }).catch(() => {})
+                }
+              }).catch(() => {})
               return
             }
             setTimeout(poll, 1000)
@@ -448,7 +478,31 @@ export const useUserStore = defineStore('user', {
         manualTags: tags
       })
       this.preferences.manualTags = tags
+      await this.ensureLocalProfile().catch(() => {})
+      if (this.cloudSync.cloudBound && this.cloudSync.accountMatched && this.preferences.analysisEnabled) {
+        this.refreshCloudPortraitData({ compute: true }).catch(() => {})
+      }
       return tags
+    },
+
+    async ensureLocalProfile() {
+      if (!this.hasAccount) return null
+      try {
+        const snapshot = await createSnapshot('profile', 'local_portrait_view')
+        const result = await computeAndCommitProfile(snapshot)
+        if (result?.profile) {
+          this.localProfile = {
+            profile: result.profile,
+            modelVersion: result.profile.modelVersion || 'content-v1',
+            generatedAt: result.profile.generatedAt || Date.now(),
+            inputVersions: snapshot.inputVersions || {},
+            stale: false
+          }
+        }
+        return this.localProfile
+      } catch (_) {
+        return this.localProfile
+      }
     },
 
     async refreshCloudSyncState() {
@@ -461,16 +515,19 @@ export const useUserStore = defineStore('user', {
       return this.cloudSync
     },
 
-    async refreshCloudPortraitData() {
+    async refreshCloudPortraitData(options = {}) {
       if (!this.hasAccount || this.cloudPortraitLoading) return this.cloudPortrait
       const epoch = this.sessionEpoch
       this.cloudPortraitLoading = true
       this.cloudPortraitError = null
       try {
-        const res = await refreshCloudPortrait()
+        const res = await refreshCloudPortrait(options)
         if (epoch !== this.sessionEpoch) return null
         if (res?.cloudPortrait) {
           this.cloudPortrait = res.cloudPortrait
+          if (res.refreshed) {
+            this.cloudPortraitJustUpdatedAt = Date.now()
+          }
         } else {
           this.cloudPortrait = await readCloudPortrait().catch(() => this.cloudPortrait)
         }
@@ -518,33 +575,80 @@ export const useUserStore = defineStore('user', {
     async startCloudBind() {
       if (!this.hasAccount) throw new Error('请先登录本地 GitHub 账号')
       this.cloudAuthStage = 'authorizing'
-      const { challengeId } = await beginCloudAuth(true)
-      this.cloudChallengeId = challengeId
+      this.cloudAuthError = null
+      let challengeId
+      try {
+        const res = await beginCloudAuth(true)
+        challengeId = res.challengeId
+        this.cloudChallengeId = challengeId
+      } catch (err) {
+        this.cloudAuthStage = 'idle'
+        this.cloudChallengeId = null
+        this.cloudAuthError = err.message || '发起云端授权失败'
+        throw err
+      }
 
       const poll = async () => {
         if (this.cloudChallengeId !== challengeId) return
         try {
           const res = await pollCloudAuth(challengeId)
+          if (this.cloudChallengeId !== challengeId) return
           if (res.state === 'authenticated') {
             this.cloudAuthStage = 'idle'
             this.cloudChallengeId = null
-            if (res.cloudSync) this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
+            this.cloudAuthError = null
+            if (res.cloudSync) {
+              this.cloudSync = { ...emptyCloudSync(), ...res.cloudSync }
+              this.preferences.analysisEnabled = Boolean(res.cloudSync.analysisEnabled)
+            }
+            if (res.cloudPortrait) {
+              this.cloudPortrait = res.cloudPortrait
+              this.cloudPortraitJustUpdatedAt = Date.now()
+            } else if (this.preferences.analysisEnabled) {
+              await this.refreshCloudPortraitData({ compute: true }).catch(() => {})
+            }
+            if (this.session.status === 'authenticated' && (!this.repoSync.complete || !this.starSync.complete) && !this.refreshing) {
+              this.refreshAccountData().catch(() => {})
+            }
+            import('./feed').then(({ useFeedStore }) => {
+              const feedStore = useFeedStore()
+              if (!feedStore.isSearchTab) {
+                feedStore.refreshRecommendations().catch(() => {})
+              }
+            }).catch(() => {})
             return
           }
-          if (res.state === 'account_mismatch' || res.state === 'failed') {
+          if (['account_mismatch', 'failed', 'denied', 'expired', 'consumed'].includes(res.state)) {
             this.cloudAuthStage = 'idle'
             this.cloudChallengeId = null
-            await this.refreshCloudSyncState()
-            throw new Error(res.error?.message || '云端账号绑定失败')
+            await this.refreshCloudSyncState().catch(() => {})
+            const fallbackMsg = res.state === 'denied'
+              ? '您已取消或拒绝本次云端授权'
+              : res.state === 'expired'
+                ? '云端授权已过期，请重新发起'
+                : '云端账号绑定失败'
+            this.cloudAuthError = res.error?.message || fallbackMsg
+            return
           }
-          setTimeout(poll, 1500)
+          setTimeout(poll, 1000)
         } catch (err) {
           this.cloudAuthStage = 'idle'
           this.cloudChallengeId = null
+          this.cloudAuthError = err.message
           this.authError = err.message
         }
       }
-      setTimeout(poll, 1500)
+      setTimeout(poll, 1000)
+    },
+
+    async cancelCloudBind() {
+      const challengeId = this.cloudChallengeId
+      this.cloudChallengeId = null
+      this.cloudAuthStage = 'idle'
+      this.cloudAuthError = null
+      if (challengeId) {
+        await cancelCloudAuth(challengeId).catch(() => {})
+      }
     },
 
     async unbindCloudSession() {

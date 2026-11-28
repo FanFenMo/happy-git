@@ -30,6 +30,20 @@
         >
           热门项目
         </button>
+        <button
+          v-if="feedStore.hasSearchSession"
+          role="tab"
+          :aria-selected="feedStore.isSearchTab"
+          @click="switchTab('search')"
+          :class="[
+            'px-3 py-1 text-xs rounded-lg font-medium transition cursor-pointer',
+            feedStore.isSearchTab
+              ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] shadow'
+              : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
+          ]"
+        >
+          搜索结果
+        </button>
       </div>
 
       <!-- 刷新与探索下一轮按钮 -->
@@ -62,23 +76,84 @@
       </div>
     </header>
 
+    <!-- GitHub 搜索栏（复用本地 GitHub 搜索引擎） -->
+    <form
+      @submit.prevent="handleSearchSubmit"
+      role="search"
+      aria-label="搜索 GitHub 开源项目"
+      class="feed-search-bar flex flex-wrap items-center gap-2 shrink-0"
+    >
+      <div class="flex-1 min-w-[200px] relative flex items-center">
+        <Search :size="15" aria-hidden="true" class="absolute left-3 text-[var(--color-text-subtle)] pointer-events-none" />
+        <input
+          v-model="searchInput"
+          type="text"
+          placeholder="搜索 GitHub 项目，支持 language:Rust、stars:>1000 等语法..."
+          aria-label="GitHub 项目搜索关键词"
+          class="w-full h-9 pl-9 pr-8 rounded-lg bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-subtle)] focus:border-[var(--color-primary)] transition selectable"
+        />
+        <button
+          v-if="searchInput || feedStore.hasSearchSession"
+          type="button"
+          @click="handleClearSearch"
+          aria-label="清空搜索"
+          title="清空搜索"
+          class="absolute right-2 p-1 rounded text-[var(--color-text-subtle)] hover:text-[var(--color-text)] transition cursor-pointer"
+        >
+          <X :size="14" aria-hidden="true" />
+        </button>
+      </div>
+
+      <select
+        v-model="selectedSort"
+        @change="handleSortChange"
+        aria-label="搜索结果排序方式"
+        class="h-9 px-2.5 rounded-lg bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-xs text-[var(--color-text)] cursor-pointer shrink-0"
+      >
+        <option value="">最佳匹配</option>
+        <option value="stars">最多 Star</option>
+        <option value="updated">最近更新</option>
+        <option value="forks">最多 Fork</option>
+      </select>
+
+      <button
+        type="submit"
+        :disabled="feedStore.searchLoading || !searchInput.trim()"
+        class="btn-primary !min-h-0 h-9 px-3.5 text-xs shrink-0 cursor-pointer"
+      >
+        {{ feedStore.searchLoading ? '搜索中...' : '搜索' }}
+      </button>
+    </form>
+
     <!-- Sub Header Status -->
     <div class="feed-summary py-3 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--color-text-muted)] shrink-0 no-select">
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 min-w-0">
         <span
           class="w-2 h-2 rounded-full shrink-0"
           :class="
+            feedStore.isSearchTab ? 'bg-[var(--color-primary)]' :
             !feedStore.isRecommendedTab ? 'bg-[var(--color-success)]' :
             feedStore.rankingSource === 'cloud_portrait' ? 'bg-[var(--color-primary)]' : 'bg-amber-500'
           "
         ></span>
-        <span>{{ feedStatusDescription }}</span>
+        <span class="truncate">{{ feedStatusDescription }}</span>
       </div>
       <div class="flex items-center gap-3 text-[11px] text-[var(--color-text-subtle)] font-mono">
         <span v-if="feedStore.isRecommendedTab && feedStore.searchSummary">
           有界搜索第 {{ feedStore.searchSummary.round }} 轮 · {{ feedStore.searchSummary.queriesCount }} 查询 / {{ feedStore.searchSummary.pagesUsed }} 页 (局部结果)
         </span>
+        <span v-else-if="feedStore.isSearchTab && feedStore.hasSearchSession">
+          第 {{ feedStore.searchPage || 1 }} 页
+        </span>
         <span>{{ currentList.length }} 个公开项目</span>
+        <button
+          v-if="feedStore.isSearchTab"
+          type="button"
+          @click="handleClearSearch"
+          class="font-sans text-[var(--color-primary)] hover:underline cursor-pointer"
+        >
+          退出搜索
+        </button>
       </div>
     </div>
 
@@ -175,6 +250,11 @@
               来源: {{ repoOf(item).purposeSource === 'readme' ? 'README' : repoOf(item).purposeSource === 'description' ? '仓库简介' : '技术标签' }}
             </span>
           </div>
+          <button v-if="feedStore.isRecommendedTab" type="button" aria-haspopup="dialog"
+            class="project-keyword-trigger mb-3 inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-primary-subtle)] px-2.5 text-xs font-medium text-[var(--color-primary)] hover:border-[var(--color-primary)]"
+            @click="selectedKeywordRepo = repoOf(item)">
+            <Tags :size="14" aria-hidden="true" />查看关键词
+          </button>
         </div>
 
         <!-- Card Action Footer -->
@@ -244,12 +324,35 @@
         </button>
       </div>
 
+      <!-- 加载更多搜索结果 -->
+      <div v-if="feedStore.isSearchTab && feedStore.searchHasMore && currentList.length > 0" class="feed-state text-center py-4">
+        <button
+          @click="feedStore.loadMoreSearchResults()"
+          :disabled="feedStore.searchLoadingMore"
+          class="btn-secondary text-xs px-4 py-2 cursor-pointer"
+        >
+          {{ feedStore.searchLoadingMore ? '正在加载下一页...' : '加载更多搜索结果' }}
+        </button>
+      </div>
+
       <!-- 空状态提示 -->
       <div v-if="!isLoading && currentList.length === 0" class="feed-state card-surface text-center py-16 px-6 no-select" role="status">
-        <h2 class="text-base font-semibold mb-2">{{ feedStore.recError && feedStore.isRecommendedTab ? '推荐暂时无法生成' : '暂时没有可展示的项目' }}</h2>
-        <p class="text-sm text-[var(--color-text-muted)] leading-relaxed">{{ feedStore.recError && feedStore.isRecommendedTab ? feedStore.recError : userStore.hasAccount ? '稍后刷新，或切换浏览方式继续探索。' : '游客可以浏览公开项目；连接 GitHub 后可使用个人兴趣推荐。' }}</p>
-        <button v-if="!userStore.hasAccount" class="btn-primary px-4 text-sm mt-5" @click="$emit('request-login')">连接 GitHub</button>
-        <button v-else class="btn-secondary px-4 text-sm mt-5" @click="handleRefresh">重新加载</button>
+        <template v-if="feedStore.isSearchTab">
+          <h2 class="text-base font-semibold mb-2">{{ feedStore.searchError ? 'GitHub 搜索暂时失败' : '未找到匹配的开源项目' }}</h2>
+          <p class="text-sm text-[var(--color-text-muted)] leading-relaxed">
+            {{ feedStore.searchError || `没有找到与“${feedStore.searchQuery}”相关的公开仓库，可尝试更换关键词或减少限定条件。` }}
+          </p>
+          <div class="flex items-center justify-center gap-3 mt-5">
+            <button v-if="feedStore.searchError" class="btn-primary px-4 text-sm cursor-pointer" @click="handleRefresh">重试搜索</button>
+            <button class="btn-secondary px-4 text-sm cursor-pointer" @click="handleClearSearch">返回列表</button>
+          </div>
+        </template>
+        <template v-else>
+          <h2 class="text-base font-semibold mb-2">{{ feedStore.recError && feedStore.isRecommendedTab ? '推荐暂时无法生成' : '暂时没有可展示的项目' }}</h2>
+          <p class="text-sm text-[var(--color-text-muted)] leading-relaxed">{{ feedStore.recError && feedStore.isRecommendedTab ? feedStore.recError : userStore.hasAccount ? '稍后刷新，或切换浏览方式继续探索。' : '游客可以浏览公开项目；连接 GitHub 后可使用个人兴趣推荐。' }}</p>
+          <button v-if="!userStore.hasAccount" class="btn-primary px-4 text-sm mt-5" @click="$emit('request-login')">连接 GitHub</button>
+          <button v-else class="btn-secondary px-4 text-sm mt-5" @click="handleRefresh">重新加载</button>
+        </template>
       </div>
     </div>
 
@@ -260,11 +363,15 @@
     >
       {{ toastMessage }}
     </div>
+
+    <ProjectKeywordsDialog :repository="selectedKeywordRepo" @close="selectedKeywordRepo = null" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { Tags, Search, X } from 'lucide-vue-next'
+import ProjectKeywordsDialog from './ProjectKeywordsDialog.vue'
 import { useUserStore } from '../stores/user'
 import { useFeedStore } from '../stores/feed'
 import { openRepository } from '../services/projects'
@@ -274,6 +381,17 @@ const userStore = useUserStore()
 const feedStore = useFeedStore()
 
 const toastMessage = ref('')
+const selectedKeywordRepo = ref(null)
+const searchInput = ref(feedStore.searchQuery || '')
+const selectedSort = ref(feedStore.searchSort || '')
+
+watch([() => userStore.sessionEpoch, () => feedStore.activeTab], () => { selectedKeywordRepo.value = null })
+watch(() => feedStore.searchQuery, (val) => {
+  if (val !== searchInput.value) searchInput.value = val || ''
+})
+watch(() => feedStore.searchSort, (val) => {
+  if ((val || '') !== selectedSort.value) selectedSort.value = val || ''
+})
 
 const showToast = (msg) => {
   toastMessage.value = msg
@@ -283,14 +401,30 @@ const showToast = (msg) => {
 }
 
 const isLoading = computed(() => {
+  if (feedStore.isSearchTab) return feedStore.searchLoading
   return feedStore.isRecommendedTab ? feedStore.recLoading : feedStore.trendingLoading
 })
 
 const currentList = computed(() => {
+  if (feedStore.isSearchTab) return feedStore.searchItems
   return feedStore.isRecommendedTab ? feedStore.recItems : feedStore.trendingItems
 })
 
+const SEARCH_SORT_LABELS = {
+  '': '最佳匹配',
+  stars: '最多 Star',
+  updated: '最近更新',
+  forks: '最多 Fork'
+}
+
 const feedStatusDescription = computed(() => {
+  if (feedStore.isSearchTab) {
+    const sortLabel = SEARCH_SORT_LABELS[feedStore.searchSort] || '最佳匹配'
+    const countSuffix = feedStore.searchResultCount != null
+      ? ` · 约 ${formatNumber(feedStore.searchResultCount)} 个匹配仓库`
+      : ''
+    return `GitHub 搜索 “${feedStore.searchQuery}” · ${sortLabel}${countSuffix}`
+  }
   if (!feedStore.isRecommendedTab) return '近 3 个月 GitHub 热门与活跃公开项目'
   if (feedStore.rankingSource === 'cloud_portrait') {
     const model = feedStore.modelVersion || '已发布模型'
@@ -304,6 +438,12 @@ const feedStatusDescription = computed(() => {
   if (feedStore.portraitStatus === 'pending') {
     const inc = feedStore.unprocessedEventCount > 0 ? ` · ${feedStore.unprocessedEventCount} 条待处理近期事件` : ''
     return `云端画像计算中 · 当前使用本机基线与近期线索${inc}`
+  }
+  if (userStore.refreshing) {
+    return '正在同步 GitHub 仓库与 Star 数据，完成后将自动更新画像与推荐...'
+  }
+  if (feedStore.portraitStatus === 'empty') {
+    return '当前暂无足够仓库/标签证据 · 同步仓库或添加兴趣标签后将自动生成云端画像'
   }
   return '本机基线画像排序 (待同步服务端已发布画像)'
 })
@@ -358,8 +498,46 @@ async function switchTab(tab) {
   }
 }
 
+async function handleSearchSubmit() {
+  const trimmed = searchInput.value.trim()
+  if (!trimmed) {
+    await handleClearSearch()
+    return
+  }
+  await feedStore.searchGitHubRepositories(trimmed, {
+    sort: selectedSort.value,
+    page: 1,
+    append: false
+  })
+}
+
+async function handleSortChange() {
+  if (!feedStore.hasSearchSession) return
+  await feedStore.searchGitHubRepositories(feedStore.searchQuery, {
+    sort: selectedSort.value,
+    page: 1,
+    append: false
+  })
+}
+
+async function handleClearSearch() {
+  searchInput.value = ''
+  feedStore.clearSearch()
+  if (feedStore.isRecommendedTab && feedStore.recItems.length === 0) {
+    await feedStore.refreshRecommendations()
+  } else if (feedStore.isTrendingTab && feedStore.trendingItems.length === 0) {
+    await feedStore.loadTrendingFeed()
+  }
+}
+
 async function handleRefresh() {
-  if (feedStore.isRecommendedTab) {
+  if (feedStore.isSearchTab) {
+    await feedStore.searchGitHubRepositories(feedStore.searchQuery, {
+      sort: feedStore.searchSort,
+      page: 1,
+      append: false
+    })
+  } else if (feedStore.isRecommendedTab) {
     await feedStore.refreshRecommendations(0, { forceRefresh: true })
   } else {
     await feedStore.loadTrendingFeed({ force: true })
@@ -402,6 +580,11 @@ async function handleHide(repo) {
 }
 
 onMounted(() => {
+  searchInput.value = feedStore.searchQuery || ''
+  selectedSort.value = feedStore.searchSort || ''
+  if (feedStore.isSearchTab && feedStore.searchQuery) {
+    return
+  }
   if (userStore.hasAccount) {
     feedStore.refreshRecommendations()
   } else {

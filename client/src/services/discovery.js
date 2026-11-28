@@ -39,3 +39,18 @@ export async function refreshPersonalizedCandidates(queryPlan = [], options = {}
   }
   return res.data
 }
+
+export async function searchGitHubRepositories(query, { sort = '', page = 1 } = {}) {
+  const res = await nativeBridge.invoke(OPERATIONS.DISCOVERY_REFRESH, {
+    mode: 'search',
+    query: String(query || '').trim(),
+    sort,
+    page
+  })
+  if (!res.ok) {
+    const err = new Error(res.error?.message || 'GitHub 搜索失败')
+    err.code = res.error?.code || 'SEARCH_FAILED'
+    throw err
+  }
+  return res.data
+}

@@ -54,7 +54,36 @@ function openDatabase(dbPath) {
     SELECT 1 FROM sync_state s WHERE s.account_id = repository_cache.account_id
     AND s.kind = repository_cache.kind AND s.active_generation = repository_cache.generation_id);
     UPDATE sync_state SET staging_generation = NULL, staging_next_page = NULL, staging_next_url = NULL, staging_page_seq = 0, staging_count = 0;`)
+  sanitizeStoredAccountLogins()
   for (const row of db.prepare('SELECT account_id FROM accounts').all()) pruneHistory(row.account_id)
+}
+
+function sanitizeStoredAccountLogins() {
+  const rows = db.prepare('SELECT account_id, login, profile_json FROM accounts;').all()
+  const updAcc = db.prepare('UPDATE accounts SET login = ?, profile_json = ? WHERE account_id = ?;')
+  const resetEmptySync = db.prepare('UPDATE sync_state SET active_complete = 0 WHERE account_id = ? AND active_complete = 1 AND active_count = 0;')
+  for (const row of rows) {
+    const rawLogin = String(row.login || '').trim()
+    const cleanLogin = (rawLogin.split(/[\s·]+/)[0] || '').trim()
+    let profileChanged = false
+    let parsedProfile = null
+    try {
+      parsedProfile = JSON.parse(row.profile_json || '{}')
+      const profLogin = String(parsedProfile.login || '').trim()
+      const cleanProfLogin = (profLogin.split(/[\s·]+/)[0] || cleanLogin).trim()
+      if (cleanProfLogin && profLogin !== cleanProfLogin) {
+        parsedProfile.login = cleanProfLogin
+        parsedProfile.profileUrl = `https://github.com/${encodeURIComponent(cleanProfLogin)}`
+        profileChanged = true
+      }
+    } catch (_) {}
+    if ((cleanLogin && cleanLogin !== rawLogin) || profileChanged) {
+      const nextLogin = cleanLogin || rawLogin
+      const nextProfileJson = parsedProfile ? JSON.stringify(parsedProfile) : row.profile_json
+      updAcc.run(nextLogin, nextProfileJson, row.account_id)
+      resetEmptySync.run(row.account_id)
+    }
+  }
 }
 
 function initOrMigrateDatabase() {
@@ -2354,8 +2383,16 @@ function readCollectionForCloudSync(accountId, collectionKind) {
   for (const r of cacheRows) {
     try {
       const repo = JSON.parse(r.repository_json)
-      if (repo && repo.visibility !== 'private' && !repo.private && repo.repoId) {
-        repoIdSet.add(String(repo.repoId))
+      if (!repo || repo.visibility === 'private' || repo.private) continue
+      let candidateId = repo.repoId ? String(repo.repoId).trim() : ''
+      if (!candidateId && repo.canonicalKey) {
+        const fallback = String(repo.canonicalKey).trim().replace(/\//g, '__')
+        if (CLOUD_PREF_ID_REGEX.test(fallback)) {
+          candidateId = fallback
+        }
+      }
+      if (candidateId && CLOUD_PREF_ID_REGEX.test(candidateId)) {
+        repoIdSet.add(candidateId)
       }
     } catch (_) {}
   }
@@ -2412,6 +2449,85 @@ function markCollectionCloudSynced(accountId, collectionKind, result = {}) {
 
     return readCloudSyncState(accountId)
   })
+}
+
+function readPortraitEvidence(accountId) {
+  if (!accountId) return null
+  ensureAccountV3State(accountId)
+  const prefRow = db.prepare('SELECT history_enabled, manual_tags_json FROM account_preferences WHERE account_id = ?;').get(accountId)
+  const historyEnabled = prefRow ? Boolean(prefRow.history_enabled) : true
+  let manualTags = []
+  try { manualTags = JSON.parse(prefRow?.manual_tags_json || '[]') } catch (_) {}
+
+  const compactRepo = (repo) => {
+    if (!repo || typeof repo !== 'object' || repo.visibility === 'private' || repo.private) return null
+    return {
+      repoId: repo.repoId ? String(repo.repoId) : null,
+      canonicalKey: repo.canonicalKey || (repo.fullName ? String(repo.fullName).toLowerCase() : null),
+      fullName: repo.fullName || repo.name || null,
+      name: repo.name || null,
+      htmlUrl: repo.htmlUrl || null,
+      description: repo.description ? String(repo.description).slice(0, 400) : null,
+      primaryLanguage: repo.primaryLanguage || null,
+      topics: Array.isArray(repo.topics) ? repo.topics.slice(0, 12) : [],
+      starCount: typeof repo.starCount === 'number' ? repo.starCount : null
+    }
+  }
+
+  const readKind = (kind) => {
+    const syncRow = db.prepare('SELECT active_generation FROM sync_state WHERE account_id = ? AND kind = ?;').get(accountId, kind)
+    if (!syncRow?.active_generation) return []
+    const rows = db.prepare(`
+      SELECT repository_json FROM repository_cache
+      WHERE account_id = ? AND kind = ? AND generation_id = ?
+      ORDER BY sort_time DESC
+      LIMIT 200;
+    `).all(accountId, kind, syncRow.active_generation)
+    const list = []
+    for (const r of rows) {
+      try {
+        const compact = compactRepo(JSON.parse(r.repository_json))
+        if (compact) list.push(compact)
+      } catch (_) {}
+    }
+    return list
+  }
+
+  const starred = readKind('stars')
+  const owned = readKind('repos')
+  let history = []
+  if (historyEnabled) {
+    const histRows = db.prepare(`
+      SELECT repository_json, visit_count, last_viewed_at
+      FROM browse_history
+      WHERE account_id = ?
+      ORDER BY last_viewed_at DESC
+      LIMIT 300;
+    `).all(accountId)
+    for (const r of histRows) {
+      try {
+        const compact = compactRepo(JSON.parse(r.repository_json))
+        if (compact) {
+          history.push({
+            repository: compact,
+            visitCount: r.visit_count || 1,
+            lastViewedAt: r.last_viewed_at
+          })
+        }
+      } catch (_) {}
+    }
+  }
+
+  const hiddenRepoIds = db.prepare('SELECT repo_id FROM recommendation_feedback WHERE account_id = ? AND hidden = 1;').all(accountId).map(r => String(r.repo_id))
+  return {
+    accountId,
+    historyEnabled,
+    manualTags: Array.isArray(manualTags) ? manualTags : [],
+    hiddenRepoIds,
+    starred,
+    owned,
+    history
+  }
 }
 
 function forgetAccount(accountId) {
@@ -2995,6 +3111,9 @@ parentPort.on('message', (msg) => {
         break
       case 'saveCloudCohorts':
         result = saveCloudCohorts(payload.cacheKey || 'default', payload.cohorts || payload)
+        break
+      case 'readPortraitEvidence':
+        result = readPortraitEvidence(payload.accountId)
         break
       case 'forgetAccount':
         forgetAccount(payload.accountId)

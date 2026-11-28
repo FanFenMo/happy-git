@@ -478,6 +478,90 @@ public class HappyGitPlugin extends Plugin {
                     res.put("complete", false);
                     res.put("queries", new JSArray(queryReports.toString()));
                     resolveSuccess(call, res);
+                } else if ("search".equals(mode)) {
+                    String rawQuery = payload.getString("query", "");
+                    String query = rawQuery != null ? rawQuery.trim() : "";
+                    if (query.isEmpty()) {
+                        JSObject emptyRes = new JSObject();
+                        emptyRes.put("query", "");
+                        emptyRes.put("sort", "");
+                        emptyRes.put("page", 1);
+                        emptyRes.put("items", new JSArray());
+                        emptyRes.put("count", 0);
+                        emptyRes.put("hasMore", false);
+                        emptyRes.put("nextPage", JSONObject.NULL);
+                        emptyRes.put("pageCount", JSONObject.NULL);
+                        emptyRes.put("resultCount", JSONObject.NULL);
+                        emptyRes.put("searchUrl", JSONObject.NULL);
+                        resolveSuccess(call, emptyRes);
+                        break;
+                    }
+                    String rawSort = payload.getString("sort", "");
+                    String sort = ("stars".equals(rawSort) || "updated".equals(rawSort) || "forks".equals(rawSort)) ? rawSort : "";
+                    int page = Math.max(1, Math.min(100, payload.optInt("page", 1)));
+                    final String url = "https://github.com/search?q=" + URLEncoder.encode(query, "UTF-8")
+                            + "&type=repositories"
+                            + (!sort.isEmpty() ? "&s=" + URLEncoder.encode(sort, "UTF-8") + "&o=desc" : "")
+                            + (page > 1 ? "&p=" + page : "");
+
+                    JSONObject sRes = fastFetchGitHubSearch(url, page);
+                    if (sRes == null) {
+                        final int pageArg = page;
+                        sRes = scheduler.withPageLease(contextId, "discovery", () -> {
+                            pageExecutor.navigate(url, 25000);
+                            JSONObject args = new JSONObject();
+                            args.put("pageSeq", pageArg);
+                            return pageExecutor.executeScript("readSearchResults", args);
+                        });
+                    }
+
+                    JSONArray found = sRes != null ? sRes.optJSONArray("items") : null;
+                    String nextUrl = sRes != null ? sRes.optString("nextUrl", "") : "";
+                    String completion = sRes != null ? sRes.optString("completion", "end") : "end";
+                    boolean hasMore = (!nextUrl.isEmpty() && !"null".equals(nextUrl)) || "more".equals(completion);
+
+                    JSONArray normalizedItems = new JSONArray();
+                    java.util.Set<String> seen = new java.util.HashSet<>();
+                    JSONObject qMeta = new JSONObject();
+                    qMeta.put("id", "user_search");
+                    if (found != null) {
+                        for (int j = 0; j < found.length(); j++) {
+                            JSONObject item = normalizeSearchItem(found.optJSONObject(j), qMeta, page);
+                            if (item == null) continue;
+                            String key = item.optString("repoId", "");
+                            if (key.isEmpty() || "null".equals(key)) {
+                                key = item.optString("canonicalKey", "");
+                            }
+                            if (!key.isEmpty() && seen.add(key)) {
+                                normalizedItems.put(item);
+                            }
+                        }
+                    }
+
+                    JSObject res = new JSObject();
+                    res.put("query", query);
+                    res.put("sort", sort);
+                    res.put("page", page);
+                    res.put("items", new JSArray(normalizedItems.toString()));
+                    res.put("count", normalizedItems.length());
+                    res.put("hasMore", hasMore);
+                    if (hasMore) {
+                        res.put("nextPage", page + 1);
+                    } else {
+                        res.put("nextPage", JSONObject.NULL);
+                    }
+                    if (sRes != null && sRes.has("pageCount") && !sRes.isNull("pageCount")) {
+                        res.put("pageCount", sRes.optInt("pageCount"));
+                    } else {
+                        res.put("pageCount", JSONObject.NULL);
+                    }
+                    if (sRes != null && sRes.has("resultCount") && !sRes.isNull("resultCount")) {
+                        res.put("resultCount", sRes.optLong("resultCount"));
+                    } else {
+                        res.put("resultCount", JSONObject.NULL);
+                    }
+                    res.put("searchUrl", url);
+                    resolveSuccess(call, res);
                 } else {
                     JSObject res = new JSObject();
                     res.put("items", new JSArray());
@@ -856,6 +940,14 @@ public class HappyGitPlugin extends Plugin {
                     JSONObject out = new JSONObject();
                     out.put("items", items);
                     out.put("pageSeq", pageSeq);
+                    out.put("pageCount", pageCount > 0 ? pageCount : JSONObject.NULL);
+                    if (route.has("result_count") && !route.isNull("result_count")) {
+                        out.put("resultCount", route.optLong("result_count"));
+                    } else if (route.has("results_count") && !route.isNull("results_count")) {
+                        out.put("resultCount", route.optLong("results_count"));
+                    } else {
+                        out.put("resultCount", JSONObject.NULL);
+                    }
                     if (items.length() > 0 && pageCount > pageSeq) {
                         out.put("nextUrl", urlStr + "&next=" + (pageSeq + 1));
                         out.put("completion", "more");

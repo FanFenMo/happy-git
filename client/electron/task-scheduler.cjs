@@ -54,7 +54,7 @@ class PageTaskScheduler {
   }
 
   async processLeaseQueue() {
-    if (this.isLeased || this.leaseQueue.length === 0) return
+    if (this.isLeased || this.currentTask || this.leaseQueue.length === 0) return
 
     const item = this.leaseQueue.shift()
     this.isLeased = true
@@ -73,7 +73,13 @@ class PageTaskScheduler {
       this.isLeased = false
       this.leaseHolder = null
       this.lastNavigationTime = Date.now()
-      setImmediate(() => this.processLeaseQueue())
+      setImmediate(() => {
+        if (this.leaseQueue.length > 0) {
+          this.processLeaseQueue()
+        } else {
+          this.processQueue()
+        }
+      })
     }
   }
 
@@ -100,7 +106,11 @@ class PageTaskScheduler {
   }
 
   async processQueue() {
-    if (this.isLeased || this.currentTask || this.queue.length === 0) return
+    if (this.isLeased || this.currentTask) return
+    if (this.leaseQueue.length > 0) {
+      return this.processLeaseQueue()
+    }
+    if (this.queue.length === 0) return
 
     const entry = this.queue.shift()
     if (entry.cancelled) {
@@ -121,7 +131,13 @@ class PageTaskScheduler {
     } finally {
       this.currentTask = null
       this.lastNavigationTime = Date.now()
-      setImmediate(() => this.processQueue())
+      setImmediate(() => {
+        if (this.leaseQueue.length > 0) {
+          this.processLeaseQueue()
+        } else {
+          this.processQueue()
+        }
+      })
     }
   }
 

@@ -32,6 +32,10 @@ export function run(doc, args = {}) {
     const parts = fullName.split('/')
     const owner = parts[0]
     const name = parts[1]
+    const repoId = row.getAttribute('data-repository-id')
+      || row.querySelector('[data-repository-id]')?.getAttribute('data-repository-id')
+      || row.querySelector('input[name="repository_id"]')?.getAttribute('value')
+      || null
 
     const descEl = row.querySelector('p') || row.querySelector('.description')
     const langEl = row.querySelector('[itemprop="programmingLanguage"]')
@@ -44,6 +48,7 @@ export function run(doc, args = {}) {
     const topics = topicEls.map(el => el.innerText.trim().replace(/^#/, '')).filter(Boolean)
 
     items.push({
+      repoId: repoId ? String(repoId).trim() : null,
       fullName,
       owner,
       name,

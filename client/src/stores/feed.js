@@ -14,15 +14,31 @@ import {
   listHiddenRecommendations
 } from '../services/recommendation'
 import { planDiscoveryQueries } from '../../shared/recommendation/recall'
-import { refreshPersonalizedCandidates } from '../services/discovery'
+import { refreshPersonalizedCandidates, searchGitHubRepositories as searchGitHubRepos } from '../services/discovery'
 import { useUserStore } from './user'
+
+const ALLOWED_SEARCH_SORTS = new Set(['', 'stars', 'updated', 'forks'])
 
 export const useFeedStore = defineStore('feed', {
   state: () => ({
-    activeTab: 'recommended', // 'recommended' | 'trending'
+    activeTab: 'recommended', // 'recommended' | 'trending' | 'search'
+    lastBrowseTab: 'recommended',
     trendingItems: [],
     trendingLoading: false,
     trendingFetchedAt: null,
+
+    searchQuery: '',
+    searchSort: '',
+    searchItems: [],
+    searchPage: 0,
+    searchHasMore: false,
+    searchPageCount: null,
+    searchResultCount: null,
+    searchLoading: false,
+    searchLoadingMore: false,
+    searchError: null,
+    searchSeq: 0,
+    searchUrl: null,
 
     recItems: [],
     recBatchId: null,
@@ -52,12 +68,115 @@ export const useFeedStore = defineStore('feed', {
   getters: {
     isRecommendedTab: (state) => state.activeTab === 'recommended',
     isTrendingTab: (state) => state.activeTab === 'trending',
+    isSearchTab: (state) => state.activeTab === 'search',
+    hasSearchSession: (state) => Boolean(state.searchQuery),
     hasRecommendations: (state) => state.recItems.length > 0
   },
 
   actions: {
     setTab(tab) {
+      if (tab === 'recommended' || tab === 'trending') {
+        this.lastBrowseTab = tab
+      }
       this.activeTab = tab
+    },
+
+    clearSearch() {
+      this.searchSeq += 1
+      this.searchQuery = ''
+      this.searchItems = []
+      this.searchPage = 0
+      this.searchHasMore = false
+      this.searchPageCount = null
+      this.searchResultCount = null
+      this.searchLoading = false
+      this.searchLoadingMore = false
+      this.searchError = null
+      this.searchUrl = null
+      if (this.activeTab === 'search') {
+        this.activeTab = this.lastBrowseTab || 'recommended'
+      }
+    },
+
+    async searchGitHubRepositories(query, { sort = this.searchSort, page = 1, append = false } = {}) {
+      const q = String(query || '').trim()
+      if (!q) {
+        this.clearSearch()
+        return null
+      }
+
+      const validSort = ALLOWED_SEARCH_SORTS.has(sort) ? sort : ''
+      if (this.activeTab !== 'search') {
+        this.lastBrowseTab = this.activeTab === 'trending' ? 'trending' : 'recommended'
+      }
+      this.activeTab = 'search'
+      this.searchQuery = q
+      this.searchSort = validSort
+      this.searchError = null
+
+      const seq = ++this.searchSeq
+      if (append) {
+        this.searchLoadingMore = true
+      } else {
+        this.searchItems = []
+        this.searchPage = 0
+        this.searchHasMore = false
+        this.searchPageCount = null
+        this.searchResultCount = null
+        this.searchUrl = null
+        this.searchLoading = true
+      }
+
+      try {
+        const res = await searchGitHubRepos(q, { sort: validSort, page })
+        if (seq !== this.searchSeq) return null
+
+        const incoming = Array.isArray(res?.items) ? res.items.filter(Boolean) : []
+        if (append) {
+          const merged = [...this.searchItems]
+          const seen = new Set(merged.map(item => item.repoId || item.canonicalKey || item.fullName).filter(Boolean))
+          for (const item of incoming) {
+            const key = item.repoId || item.canonicalKey || item.fullName
+            if (!key || seen.has(key)) continue
+            seen.add(key)
+            merged.push(item)
+          }
+          this.searchItems = merged
+        } else {
+          this.searchItems = incoming
+        }
+
+        this.searchPage = Number(res?.page || page)
+        this.searchHasMore = Boolean(res?.hasMore)
+        this.searchPageCount = res?.pageCount ?? null
+        this.searchResultCount = res?.resultCount ?? null
+        this.searchUrl = res?.searchUrl || null
+        return res
+      } catch (err) {
+        if (seq !== this.searchSeq) return null
+        if (err?.code === 'RATE_LIMITED' || /RATE_LIMITED/i.test(err?.message || '')) {
+          this.searchError = '触发 GitHub 搜索频率限制，请稍候片刻再试'
+        } else if (err?.code === 'NETWORK_UNAVAILABLE' || err?.code === 'PAGE_TIMEOUT') {
+          this.searchError = '无法连接 GitHub 搜索服务，请检查网络或代理设置后重试'
+        } else {
+          this.searchError = err?.message || 'GitHub 搜索失败，请稍后重试'
+        }
+        return null
+      } finally {
+        if (seq === this.searchSeq) {
+          this.searchLoading = false
+          this.searchLoadingMore = false
+        }
+      }
+    },
+
+    async loadMoreSearchResults() {
+      if (this.searchLoading || this.searchLoadingMore || !this.searchHasMore || !this.searchQuery) return null
+      return this.searchGitHubRepositories(this.searchQuery, {
+        sort: this.searchSort,
+        page: (this.searchPage || 1) + 1,
+        append: true
+      })
     },
 
     resetRecommendationState() {
@@ -113,7 +232,8 @@ export const useFeedStore = defineStore('feed', {
       try {
         // 0. 若已绑定云端且开启分析，优先尝试从服务端同步最新画像与搜索方向（失败不覆盖缓存）
         if (userStore.cloudSync?.cloudBound && userStore.cloudSync?.accountMatched && userStore.preferences?.analysisEnabled) {
-          await userStore.refreshCloudPortraitData().catch(() => {})
+          const shouldComputePortrait = !userStore.cloudPortrait?.portrait || userStore.cloudPortrait?.status === 'empty'
+          await userStore.refreshCloudPortraitData({ compute: shouldComputePortrait }).catch(() => {})
           if (isStaleRun()) return
         }
 
@@ -183,9 +303,20 @@ export const useFeedStore = defineStore('feed', {
           ? planResult
           : (Array.isArray(planResult?.queryPlan) ? planResult.queryPlan : [])
 
-        if (queryPlan.length > 0) {
+        const effectiveQueryPlan = queryPlan.length > 0
+          ? queryPlan
+          : [{
+              id: 'query_cold_start_explore',
+              label: '高关注度开源探索',
+              query: 'stars:>5000 archived:false is:public',
+              sort: 'stars',
+              startPage: 1,
+              maxPages: 1
+            }]
+
+        if (effectiveQueryPlan.length > 0) {
           try {
-            const discoveryRes = await refreshPersonalizedCandidates(queryPlan, {
+            const discoveryRes = await refreshPersonalizedCandidates(effectiveQueryPlan, {
               round: this.searchRound,
               forceRefresh: Boolean(forceRefresh || advanceSearch)
             })
@@ -199,13 +330,13 @@ export const useFeedStore = defineStore('feed', {
             }
             this.searchPageCursors = nextCursors
             this.recentQueryStrings = Array.from(new Set([
-              ...queryPlan.map(q => q.query).filter(Boolean),
+              ...effectiveQueryPlan.map(q => q.query).filter(Boolean),
               ...this.recentQueryStrings
             ])).slice(0, 16)
             this.searchSummary = {
               round: this.searchRound,
-              queriesCount: queryReports.length || queryPlan.length,
-              pagesUsed: discoveryRes?.pagesUsed ?? queryPlan.length,
+              queriesCount: queryReports.length || effectiveQueryPlan.length,
+              pagesUsed: discoveryRes?.pagesUsed ?? effectiveQueryPlan.length,
               candidateCount: discoveryRes?.count ?? (discoveryRes?.candidates?.length || 0),
               bounded: true,
               complete: false,

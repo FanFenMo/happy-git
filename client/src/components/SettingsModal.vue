@@ -131,14 +131,30 @@
                   解绑云端
                 </button>
                 <button
+                  v-if="userStore.cloudAuthStage === 'authorizing'"
+                  @click="handleCancelCloud"
+                  class="px-2.5 py-1 rounded-lg btn-secondary text-[11px] cursor-pointer !min-h-0"
+                >
+                  取消授权
+                </button>
+                <button
                   v-else
                   @click="handleBindCloud"
-                  :disabled="userStore.cloudAuthStage === 'authorizing'"
                   class="px-2.5 py-1 rounded-lg btn-primary text-[11px] cursor-pointer !min-h-0"
                 >
-                  {{ userStore.cloudAuthStage === 'authorizing' ? '授权中...' : '绑定云端会话' }}
+                  绑定云端会话
                 </button>
               </div>
+            </div>
+
+            <div v-if="userStore.cloudAuthStage === 'authorizing'" class="text-[11px] text-[var(--color-primary)]">
+              已在浏览器打开授权确认页，确认后将自动绑定并更新云端画像...
+            </div>
+            <div v-if="userStore.cloudAuthError" class="text-[11px] text-[var(--color-danger)] selectable">
+              {{ userStore.cloudAuthError }}
+            </div>
+            <div v-else-if="userStore.cloudSync.cloudBound && userStore.cloudPortrait?.portrait" class="text-[11px] text-[var(--color-success)]">
+              云端画像已就绪（{{ userStore.cloudPortrait.modelVersion || 'active' }}）
             </div>
 
             <div class="grid grid-cols-2 gap-2 text-[11px] font-mono bg-[var(--color-surface)] p-2.5 rounded-xl">
@@ -349,6 +365,11 @@ const handleBindCloud = async () => {
   } catch (error) {
     feedback.value = error.message
   }
+}
+
+const handleCancelCloud = async () => {
+  feedback.value = ''
+  await userStore.cancelCloudBind()
 }
 
 const handleUnbindCloud = async () => {

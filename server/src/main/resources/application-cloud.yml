@@ -15,3 +15,5 @@ happygit:
     client-secret: ${GITHUB_CLOUD_CLIENT_SECRET:${GITHUB_CLIENT_SECRET:}}
     admin-token: ${HG_CLOUD_ADMIN_TOKEN}
     callback-url: ${GITHUB_CLOUD_CALLBACK_URL}
+    local-auth-enabled: ${GITHUB_CLOUD_LOCAL_AUTH_ENABLED:false}
+    centers-path: ${HG_MODEL_CENTERS_PATH:/var/lib/happygit/active-model-centers.json}

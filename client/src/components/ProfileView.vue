@@ -154,13 +154,30 @@
                 {{ portraitStatusLabel }}
               </span>
             </div>
-            <button
-              @click="refreshPortrait"
-              :disabled="userStore.cloudPortraitLoading"
-              class="text-[11px] text-[var(--color-primary)] hover:underline cursor-pointer"
-            >
-              {{ userStore.cloudPortraitLoading ? '刷新中...' : '刷新云端画像' }}
-            </button>
+            <div class="flex items-center gap-2">
+              <button
+                v-if="!userStore.cloudSync.cloudBound && userStore.cloudAuthStage !== 'authorizing'"
+                @click="authorizeCloudPortrait"
+                class="text-[11px] font-semibold text-[var(--color-primary)] hover:underline cursor-pointer"
+              >
+                授权并自动更新
+              </button>
+              <button
+                v-else-if="userStore.cloudAuthStage === 'authorizing'"
+                @click="userStore.cancelCloudBind()"
+                class="text-[11px] text-[var(--color-text-muted)] hover:underline cursor-pointer"
+              >
+                授权中 · 取消
+              </button>
+              <button
+                v-else
+                @click="refreshPortrait"
+                :disabled="userStore.cloudPortraitLoading"
+                class="text-[11px] text-[var(--color-primary)] hover:underline cursor-pointer"
+              >
+                {{ userStore.cloudPortraitLoading ? '刷新中...' : '刷新云端画像' }}
+              </button>
+            </div>
           </div>
 
           <div class="text-[11px] text-[var(--color-text-muted)] leading-relaxed">
@@ -487,10 +504,12 @@
         </div>
       </div>
 
-      <!-- 4. 个人学习画像明细与证据引用 -->
+      <!-- 4. 个人动态技术画像与证据引用 -->
       <div v-if="activeTab === 'portrait'" class="space-y-4">
-        <div v-if="userStore.hasAccount">
-          <div class="flex items-center justify-between mb-3">
+        <div v-if="userStore.hasAccount" class="space-y-4">
+          <PersonalPortraitCanvas @open-repo="openRepo" />
+
+          <div class="flex items-center justify-between">
             <div class="text-xs text-[var(--color-text-muted)]">
               状态：<strong class="text-[var(--color-text)]">{{ portraitStatusLabel }}</strong>
               <span v-if="cloudPortrait?.generationId" class="ml-2 font-mono text-[10px]">Generation: {{ cloudPortrait.generationId }}</span>
@@ -668,6 +687,7 @@ import { useUserStore } from '../stores/user'
 import { useHistoryStore } from '../stores/history'
 import { openRepository } from '../services/projects'
 import { formatHistoryTime } from '../utils/time'
+import PersonalPortraitCanvas from './PersonalPortraitCanvas.vue'
 
 const emit = defineEmits(['edit-profile', 'open-settings', 'open-login'])
 
@@ -676,7 +696,7 @@ const historyStore = useHistoryStore()
 
 const feedback = ref('')
 const loadMore = async kind => { try { await userStore.loadCollection(kind, true) } catch (error) { feedback.value = error.message } }
-const activeTab = ref('history')
+const activeTab = ref('portrait')
 const historyKeyword = ref('')
 const isRefreshing = ref(false)
 
@@ -754,7 +774,16 @@ function formatCohortSource(sourceKind) {
 }
 
 const refreshPortrait = async () => {
-  await userStore.refreshCloudPortraitData()
+  await userStore.refreshCloudPortraitData({ compute: true })
+}
+
+const authorizeCloudPortrait = async () => {
+  feedback.value = ''
+  try {
+    await userStore.startCloudBind()
+  } catch (err) {
+    feedback.value = err.message
+  }
 }
 
 const refreshCohorts = async () => {
@@ -769,10 +798,10 @@ const starCountDisplay = computed(() => {
 })
 
 const tabs = computed(() => [
+  { id: 'portrait', label: '个人画像' },
   { id: 'history', label: '浏览历史', count: historyStore.total },
   { id: 'stars', label: '我的 Star', count: userStore.starPage.total ?? userStore.starSync.loadedCount },
   { id: 'projects', label: '我的项目', count: userStore.repoPage.total ?? userStore.repoSync.loadedCount },
-  { id: 'portrait', label: '技术画像' },
   { id: 'cohorts', label: '群体分布' }
 ])
 

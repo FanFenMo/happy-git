@@ -105,6 +105,10 @@ export function parseGitHubSearchHtml(html, { pageSeq = 1, requestUrl = '' } = {
       }
 
       const pageCount = Number(route?.page_count || 0)
+      const rawResultCount = route?.result_count ?? route?.results_count
+      const resultCount = rawResultCount != null && Number.isFinite(Number(rawResultCount))
+        ? Number(rawResultCount)
+        : null
       let nextUrl = null
       let completion = 'end'
       if (items.length > 0 && pageCount > pageSeq) {
@@ -128,7 +132,8 @@ export function parseGitHubSearchHtml(html, { pageSeq = 1, requestUrl = '' } = {
         nextUrl,
         completion,
         pageSeq,
-        pageCount
+        pageCount,
+        resultCount
       }
     } catch (_) {}
   }

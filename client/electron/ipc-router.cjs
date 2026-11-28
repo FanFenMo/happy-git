@@ -311,7 +311,7 @@ class IpcRouter {
         return this.cloudService.readPortrait(context)
 
       case 'cloud.portrait.refresh':
-        return this.cloudService.refreshPortrait(context)
+        return this.cloudService.refreshPortrait(context, payload || {})
 
       case 'cloud.searchPlan.read': {
         const portrait = await this.cloudService.readPortrait(context)
@@ -507,6 +507,68 @@ class IpcRouter {
       }
     }
 
+    if (mode === 'search') {
+      const query = String(payload.query || '').trim()
+      if (!query) {
+        return {
+          query: '',
+          sort: '',
+          page: 1,
+          items: [],
+          count: 0,
+          hasMore: false,
+          nextPage: null,
+          pageCount: null,
+          resultCount: null,
+          searchUrl: null
+        }
+      }
+
+      const ALLOWED_SORTS = new Set(['', 'stars', 'updated', 'forks'])
+      const sort = ALLOWED_SORTS.has(payload.sort) ? payload.sort : ''
+      const page = Math.max(1, Math.min(100, Math.floor(Number(payload.page) || 1)))
+      const url = this.routes.searchRepositoriesUrl(query, sort, page)
+
+      let searchRes = await this.tryFastFetchSearchPage(url, page)
+      if (!searchRes) {
+        searchRes = await this.scheduler.enqueue({
+          taskId: `disc_user_search_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          contextId: context.contextId,
+          kind: 'discovery',
+          taskFn: async () => {
+            const workPage = this.browser.getOrCreateWorkPage()
+            const executor = this.pageExecutorFactory(workPage.webContents)
+            return executor.runTask({ scriptId: 'readSearchResults', url, args: { pageSeq: page } })
+          }
+        })
+      }
+
+      const rawItems = Array.isArray(searchRes?.items) ? searchRes.items : []
+      const seen = new Set()
+      const items = []
+      for (const item of rawItems) {
+        if (!item) continue
+        const key = item.repoId || item.canonicalKey || item.fullName
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        items.push(item)
+      }
+
+      const hasMore = Boolean(searchRes?.nextUrl || searchRes?.completion === 'more')
+      return {
+        query,
+        sort,
+        page,
+        items,
+        count: items.length,
+        hasMore,
+        nextPage: hasMore ? page + 1 : null,
+        pageCount: searchRes?.pageCount ?? null,
+        resultCount: searchRes?.resultCount ?? null,
+        searchUrl: url
+      }
+    }
+
     return { items: [], count: 0 }
   }
 
@@ -567,7 +629,9 @@ class IpcRouter {
         items,
         nextUrl: parsed.nextUrl || null,
         completion: parsed.completion || 'end',
-        pageSeq
+        pageSeq,
+        pageCount: parsed.pageCount || null,
+        resultCount: parsed.resultCount ?? null
       }
     } catch (err) {
       if (err?.code === 'RATE_LIMITED') throw err
